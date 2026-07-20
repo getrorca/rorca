@@ -186,7 +186,7 @@ describe('context-capture route validation helpers', () => {
   test('bootstrap verification locks queue, redaction, and ignore paths to canonical locations', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'context-capture.ts'), 'utf8');
     const verifyHandler = source.slice(source.indexOf('/api/context-capture/bootstrap/verify'), source.indexOf("router.post('/events'"));
-    expect(verifyHandler).toContain("assertExpectedBootstrapPath(registeredPath, queuePath, 'queuePath', path.join('.rorca', 'capture', 'queue'))");
+    expect(verifyHandler).toContain("assertExpectedBootstrapPath(registeredPath, queuePath, 'queuePath', '.rorca-capture-queue.jsonl')");
     expect(verifyHandler).toContain("assertExpectedBootstrapPath(registeredPath, redactionConfigPath, 'redactionConfigPath', path.join('.rorca', 'capture', 'redaction.json'))");
     expect(verifyHandler).toContain("assertExpectedBootstrapPath(registeredPath, captureIgnorePath, 'captureIgnorePath', '.rorca-captureignore')");
   });

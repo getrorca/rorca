@@ -436,18 +436,26 @@ function publish(workspaceId: string, event: Record<string, unknown>): void { br
 router.post('/bootstrap/verify', async (req, res) => {
   const workspaceId = requiredString(req.body.workspaceId, 'workspaceId');
   const workspace = await loadWorkspace(workspaceId);
-  const workspacePath = path.resolve(requiredString(req.body.workspacePath, 'workspacePath'));
-  if (workspacePath !== path.resolve(workspace.path)) throw new ValidationError('workspacePath does not match registered workspace path');
-  if (!fs.existsSync(workspacePath)) throw new ValidationError('Registered workspace path does not exist');
-  const expected = {
-    queuePath: path.join(workspacePath, '.rorca-capture-queue.jsonl'),
-    redactionConfigPath: path.join(workspacePath, '.rorca', 'capture', 'redaction.json'),
-    captureIgnorePath: path.join(workspacePath, '.rorca-captureignore'),
-  };
-  for (const [name, value] of Object.entries(expected)) {
-    if (path.resolve(requiredString(req.body[name], name)) !== path.resolve(value)) throw new ValidationError(`${name} must be ${path.relative(workspacePath, value)}`);
-  }
-  res.json({ ok: true, workspace, checks: Object.entries(expected).map(([id, value]) => ({ id, ok: true, path: value })) });
+  const registeredPath = path.resolve(requiredString(req.body.workspacePath, 'workspacePath'));
+  if (registeredPath !== path.resolve(workspace.path)) throw new ValidationError('workspacePath does not match registered workspace path');
+  if (!fs.existsSync(registeredPath)) throw new ValidationError('Registered workspace path does not exist');
+
+  const queuePath = path.resolve(requiredString(req.body.queuePath, 'queuePath'));
+  const redactionConfigPath = path.resolve(requiredString(req.body.redactionConfigPath, 'redactionConfigPath'));
+  const captureIgnorePath = path.resolve(requiredString(req.body.captureIgnorePath, 'captureIgnorePath'));
+  assertExpectedBootstrapPath(registeredPath, queuePath, 'queuePath', '.rorca-capture-queue.jsonl');
+  assertExpectedBootstrapPath(registeredPath, redactionConfigPath, 'redactionConfigPath', path.join('.rorca', 'capture', 'redaction.json'));
+  assertExpectedBootstrapPath(registeredPath, captureIgnorePath, 'captureIgnorePath', '.rorca-captureignore');
+
+  res.json({
+    ok: true,
+    workspace,
+    checks: [
+      { id: 'queuePath', ok: true, path: queuePath },
+      { id: 'redactionConfigPath', ok: true, path: redactionConfigPath },
+      { id: 'captureIgnorePath', ok: true, path: captureIgnorePath },
+    ],
+  });
 });
 
 /**

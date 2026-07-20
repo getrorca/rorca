@@ -50,6 +50,7 @@ import { parseAgentConfig, type AgentType } from './config';
 import { isPtyTerminalMode, normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import { assertWavePolicyEnvelopeIntegrity, type WavePolicyEnvelope } from './wave-production-policy';
 import {
+  appendPtyCompletionInstructions,
   buildPtyCompletionMarker,
   buildPtyMarkerFilePath,
   getPtyReadinessTimeoutMs,
@@ -82,11 +83,24 @@ import {
   recordRunPtyHeartbeat,
   recordRunPtyPromptReadiness,
   startRunPtySession,
+  updateRunPtyChildPid,
+  type PtyGenerationRef,
 } from './run-pty-store';
 import { attachRunPtyLifecycle, transitionRunLifecycle } from './run-lifecycle';
+import { openRawPtyArchive, type RawPtyArchiveWriter } from './pty-raw-archive';
+import { PtyTranscriptRecorder } from './pty-transcript-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
+import {
+  createPiPromptFile,
+  createPiSessionDirectory,
+  detectPiStructuredCapability,
+  mapPiStructuredEvent,
+  PI_STRUCTURED_MIN_VERSION,
+  resolvePiExecutionProfile,
+} from './pi-structured-profile';
+import { UnprocessableError } from './errors';
 import {
   assertPtyCliCompatible,
   type PtyCliCapability,
@@ -1273,7 +1287,7 @@ function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
 }
 
-function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
+export function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
   const decoder = new StringDecoder('utf8');
   let buffer = '';
 
@@ -1317,7 +1331,20 @@ async function startPiRpcServer(
   skillFiles: string[] = [],
   mcpServers?: Record<string, string>,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+  onStructuredRecord?: (event: unknown, stream: 'stdout' | 'stderr') => void,
+  onHumanLine?: (line: string, stream: 'stdout' | 'stderr') => void,
+  onSpawn?: (pid: number | undefined) => void,
+  sessionDir?: string,
 ): Promise<PiRpcServer> {
+  const status = detectPi();
+  const capability = detectPiStructuredCapability(status.piVersion);
+  if (!status.piInstalled || !status.piBinPath || !capability.supported) {
+    throw new UnprocessableError(
+      `Pi structured autonomous profile unavailable: ${capability.reason}`,
+      'PI_STRUCTURED_PROFILE_UNSUPPORTED',
+      { installedVersion: status.piVersion, requiredVersion: PI_STRUCTURED_MIN_VERSION, profile: 'rpc-jsonl-v1' },
+    );
+  }
   const thinkingLevel = resolvePiThinkingLevel(model, effortLevel);
   const mcpServersSignature = normalizePiMcpServers(mcpServers);
   const piSelection = resolvePiCliSelection(model);
@@ -1327,6 +1354,7 @@ async function startPiRpcServer(
     '--no-extensions',
     '--tools', 'read,bash,edit,write,grep,find,ls',
     '--append-system-prompt', PI_AUTONOMOUS_SYSTEM_PROMPT,
+    ...(sessionDir ? ['--session-dir', sessionDir] : []),
     ...explicitExtensions.flatMap(extensionPath => ['--extension', extensionPath]),
     ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
     ...(piSelection.model ? ['--model', piSelection.model] : []),
@@ -1364,25 +1392,48 @@ async function startPiRpcServer(
     detachedProcessGroup,
   };
 
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    server.stderr += chunk.toString();
-    if (server.stderr.length > 64 * 1024) {
-      server.stderr = server.stderr.slice(-64 * 1024);
+  // Cancellation authority must see the detached process group immediately.
+  // Register synchronously after spawn, before startup waits or any other await.
+  _piRpcServers.add(server);
+  onSpawn?.(child.pid);
+
+  const dispatchEvent = (data: unknown, stream: 'stdout' | 'stderr'): void => {
+    onStructuredRecord?.(data, stream);
+    for (const listener of [...server.eventListeners]) {
+      try {
+        listener(data);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
+      }
     }
-  });
+  };
+
+  const handleJsonlLine = (line: string, stream: 'stdout' | 'stderr'): unknown | undefined => {
+    const trimmed = line.endsWith('\r') ? line.slice(0, -1).trim() : line.trim();
+    if (!trimmed) return undefined;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      const malformed = { type: 'malformed_json', stream, line };
+      onStructuredRecord?.(malformed, stream);
+      onHumanLine?.(line.endsWith('\n') ? line : `${line}\n`, stream);
+      server.stderr += `\n[pi-rpc] Invalid JSONL from ${stream}: ${trimmed.slice(0, 500)}`;
+      return undefined;
+    }
+  };
+
+  const detachStderrReader = child.stderr
+    ? attachJsonlLineReader(child.stderr, (line) => {
+      const data = handleJsonlLine(line, 'stderr');
+      if (data !== undefined) dispatchEvent(data, 'stderr');
+    })
+    : () => {};
 
   const detachStdoutReader = child.stdout
     ? attachJsonlLineReader(child.stdout, (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-
-      let data: unknown;
-      try {
-        data = JSON.parse(trimmed);
-      } catch {
-        server.stderr += `\n[pi-rpc] Invalid JSONL from stdout: ${trimmed.slice(0, 500)}`;
-        return;
-      }
+      const data = handleJsonlLine(line, 'stdout');
+      if (data === undefined) return;
 
       if (
         typeof data === 'object'
@@ -1413,17 +1464,11 @@ async function startPiRpcServer(
             }
           }
         }
+        onStructuredRecord?.(data, 'stdout');
         return;
       }
 
-      for (const listener of [...server.eventListeners]) {
-        try {
-          listener(data);
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
-        }
-      }
+      dispatchEvent(data, 'stdout');
     })
     : () => {};
 
@@ -1440,6 +1485,7 @@ async function startPiRpcServer(
 
   child.on('exit', (code, signal) => {
     detachStdoutReader();
+    detachStderrReader();
     server.ready = false;
     _piRpcServers.delete(server);
     const exitMessage = `pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
@@ -1461,7 +1507,6 @@ async function startPiRpcServer(
   }
 
   server.ready = true;
-  _piRpcServers.add(server);
 
   if (!_piRpcExitCleanupRegistered) {
     _piRpcExitCleanupRegistered = true;
@@ -1617,6 +1662,9 @@ async function buildPiSessionOptions(
   });
 
   return {
+    runId,
+    workspaceId,
+    storyId: story.id,
     progressLogPath,
     directionText: directionText.trim() || undefined,
     doneChecklist: packet.doneChecklist,
@@ -1966,6 +2014,9 @@ interface PiRetryContext {
 }
 
 interface PiSessionOptions {
+  runId: number;
+  workspaceId: string | null;
+  storyId: string;
   progressLogPath: string;
   directionText?: string;
   doneChecklist?: string[];
@@ -1998,7 +2049,8 @@ interface PtyRunOptions {
   cols: number;
   rows: number;
   port?: number;
-  storyId?: string;
+  storyId: string;
+  attempt: number;
 }
 
 interface PtyProcessLike {
@@ -2273,6 +2325,10 @@ async function spawnAgentViaPty(
     let readinessState: PtyReadinessState | null = null;
     let adapter: InteractivePtyAgentAdapter | null = null;
     let outputBatcher: ReturnType<typeof createRunPtyOutputBatcher> | null = null;
+    let transcriptRecorder: PtyTranscriptRecorder | null = null;
+    let rawArchiveWriter: RawPtyArchiveWriter | null = null;
+    let rawArchiveWriteFailed = false;
+    let generationRef: PtyGenerationRef | null = null;
     let resizeTimer: ReturnType<typeof setInterval> | null = null;
     let inputTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -2311,8 +2367,6 @@ async function spawnAgentViaPty(
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to drain bounded PTY output writer', ptyOptions.runId, err);
       }
-      logStream.end();
-      ptyCommand?.cleanup?.();
       // A file alone never erases an unexpected process failure. The only
       // normalized non-zero exit is the SIGTERM we intentionally send after a
       // valid file has ended the interactive turn.
@@ -2326,13 +2380,36 @@ async function spawnAgentViaPty(
             : exitSignal
               ? 'killed'
               : 'failed';
+      try {
+        await rawArchiveWriter?.drain();
+      } catch (err: unknown) {
+        rawArchiveWriteFailed = true;
+        transcriptRecorder?.recordError(
+          'raw_archive_finalize_failed',
+          'Exact raw PTY archive could not be finalized; earlier verified segments remain available.',
+        );
+        logRunPtyStoreError('Failed to finalize exact raw PTY archive', ptyOptions.runId, err);
+      }
+      transcriptRecorder?.recordHostNotice('generation_closed', 'PTY generation process exited.', {
+        processStatus: status,
+        rawArchiveComplete: !rawArchiveWriteFailed,
+      });
+      try {
+        await transcriptRecorder?.drain();
+      } catch (err: unknown) {
+        // Transcript evidence failure is explicit operational telemetry, but it
+        // never changes the agent process/story result.
+        logRunPtyStoreError('Failed to finalize structured PTY transcript', ptyOptions.runId, err);
+      }
+      logStream.end();
+      ptyCommand?.cleanup?.();
       try { pty?.kill(); } catch { /* already gone */ }
       killProcessGroup(pty?.pid, 'SIGTERM');
-      if (!completionFileSeen) {
-        try { await recordRunPtyCompletionFileError(ptyOptions.runId, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
+      if (!completionFileSeen && generationRef) {
+        try { await recordRunPtyCompletionFileError(generationRef, 'process_exited_without_completion_file'); } catch { /* best effort diagnostics */ }
       }
       try {
-        await completeRunPtySession(ptyOptions.runId, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
+        if (generationRef) await completeRunPtySession(generationRef, status, completionTurnExited ? 0 : exitCode, completionTurnExited ? null : exitSignal);
       } catch (err: unknown) {
         logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
       }
@@ -2398,15 +2475,53 @@ async function spawnAgentViaPty(
     let sequenceRef: { value: number } | null = null;
 
     try {
-      sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
-      outputBatcher = createRunPtyOutputBatcher(ptyOptions.runId, sequenceRef);
-      const storyIdForMarker = ptyOptions.storyId ?? 'run';
+      const storyIdForMarker = ptyOptions.storyId;
       const completionMarker = buildPtyCompletionMarker(ptyOptions.runId, storyIdForMarker);
       const markerFilePath = buildPtyMarkerFilePath(ptyOptions.runId, storyIdForMarker);
       const markerFile = path.resolve(cwd, markerFilePath);
       // A retry must not inherit a prior attempt's completion file.
       try { fs.unlinkSync(markerFile); } catch (err: any) {
         if (err?.code !== 'ENOENT') throw err;
+      }
+      const requestedGenerationToken = randomUUID();
+      const generation = await startRunPtySession({
+        runId: ptyOptions.runId,
+        workspaceId: ptyOptions.workspaceId,
+        storyId: ptyOptions.storyId,
+        attempt: ptyOptions.attempt,
+        cwd,
+        agentType: ptyOptions.agentType,
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+        childPid: null,
+        generationToken: requestedGenerationToken,
+        completionMarker,
+      });
+      generationRef = {
+        runId: generation.runId,
+        generationId: generation.generationId,
+        generationToken: generation.generationToken,
+      };
+      sequenceRef = await initializeRunPtySequence(generationRef);
+      outputBatcher = createRunPtyOutputBatcher(generationRef, sequenceRef, {}, {
+        storyId: ptyOptions.storyId,
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+      });
+      transcriptRecorder = new PtyTranscriptRecorder(generationRef);
+      transcriptRecorder.recordHostNotice('generation_started', 'PTY generation started.', {
+        agentType: ptyOptions.agentType,
+        attempt: ptyOptions.attempt,
+      });
+      try {
+        rawArchiveWriter = await openRawPtyArchive(generationRef);
+      } catch (err: unknown) {
+        rawArchiveWriteFailed = true;
+        transcriptRecorder.recordError(
+          'raw_archive_initialization_failed',
+          'Exact raw PTY archive could not be initialized; the agent process will continue independently.',
+        );
+        logRunPtyStoreError('Failed to initialize exact raw PTY archive', ptyOptions.runId, err);
       }
       completionState = createPtyCompletionState(completionMarker);
       readinessState = createPtyReadinessState(ptyOptions.agentType);
@@ -2427,6 +2542,9 @@ async function spawnAgentViaPty(
         agentType: ptyOptions.agentType,
         completionMarker,
         markerFilePath,
+        generationId: generation.generationId,
+        generationToken: generation.generationToken,
+        attempt: generation.attempt,
       });
       ptyCommand = adapter.resolveCommand({
         agentType: ptyOptions.agentType,
@@ -2444,16 +2562,7 @@ async function spawnAgentViaPty(
         env: ptyCommand.env,
         encoding: null,
       });
-      await startRunPtySession({
-        runId: ptyOptions.runId,
-        workspaceId: ptyOptions.workspaceId,
-        cwd,
-        agentType: ptyOptions.agentType,
-        cols: ptyOptions.cols,
-        rows: ptyOptions.rows,
-        childPid: pty.pid ?? null,
-        completionMarker,
-      });
+      await updateRunPtyChildPid(generationRef, pty.pid);
       const ptyAttached = await attachRunPtyLifecycle(ptyOptions.runId, {
         transport: 'pty_attached',
         process: 'spawned',
@@ -2467,7 +2576,8 @@ async function spawnAgentViaPty(
       resetInactivity();
       heartbeatTimer = setInterval(() => {
         const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
-        void recordRunPtyHeartbeat(ptyOptions.runId)
+        if (!generationRef) return;
+        void recordRunPtyHeartbeat(generationRef)
           .catch((err: unknown) => logRunPtyStoreError('Failed to record PTY heartbeat', ptyOptions.runId, err));
         if (ptyOptions.port && ptyOptions.storyId) {
           void emitWalEvent(ptyOptions.port, 'story_heartbeat', ptyOptions.workspaceId, {
@@ -2486,9 +2596,11 @@ async function spawnAgentViaPty(
         void (async () => {
           if (!pty) return;
           try {
-            const resize = await claimLatestRunPtyResize(ptyOptions.runId);
+            if (!generationRef) return;
+            const resize = await claimLatestRunPtyResize(generationRef);
             if (resize) {
               pty.resize(resize.cols, resize.rows);
+              outputBatcher?.resize(resize.cols, resize.rows);
             }
           } catch (err: unknown) {
             logRunPtyStoreError('Failed to apply PTY resize request', ptyOptions.runId, err);
@@ -2502,7 +2614,8 @@ async function spawnAgentViaPty(
           if (!pty || inputPollInFlight) return;
           inputPollInFlight = true;
           try {
-            const requests = await claimPendingRunPtyInput(ptyOptions.runId);
+            if (!generationRef) return;
+            const requests = await claimPendingRunPtyInput(generationRef);
             for (const request of requests) {
               pty.write(request.input.toString('utf8'));
               resetInactivity();
@@ -2524,13 +2637,17 @@ async function spawnAgentViaPty(
           const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
           const valid = parsed.storyId === storyIdForMarker
             && Number(parsed.runId) === ptyOptions.runId
-            && parsed.marker === completionMarker;
+            && parsed.marker === completionMarker
+            && parsed.generationId === generationRef?.generationId
+            && parsed.generationToken === generationRef?.generationToken
+            && Number(parsed.attempt) === ptyOptions.attempt;
           if (!valid) {
-            await recordRunPtyCompletionFileError(ptyOptions.runId, 'marker_file_payload_mismatch');
+            if (generationRef) await recordRunPtyCompletionFileError(generationRef, 'marker_file_payload_mismatch');
             return;
           }
           completionFileSeen = true;
-          await markRunPtyCompletionFileSeen(ptyOptions.runId, completionMarker);
+          if (!generationRef) return;
+          await markRunPtyCompletionFileSeen(generationRef, completionMarker);
           if (ptyOptions.port && ptyOptions.storyId) {
             await emitWalEvent(ptyOptions.port, 'story_completion_file', ptyOptions.workspaceId, {
               run_id: ptyOptions.runId,
@@ -2550,7 +2667,7 @@ async function spawnAgentViaPty(
           }, 250).unref?.();
         } catch (err: unknown) {
           const reason = err instanceof Error ? err.message : String(err);
-          await recordRunPtyCompletionFileError(ptyOptions.runId, reason);
+          if (generationRef) await recordRunPtyCompletionFileError(generationRef, reason);
           logRunPtyStoreError('Failed to inspect PTY completion file', ptyOptions.runId, err);
         } finally {
           completionFileCheckInFlight = false;
@@ -2579,13 +2696,28 @@ async function spawnAgentViaPty(
           const signal = adapter.detectCompletion?.(text, completionState) ?? null;
           if (signal?.type === 'marker') {
             terminalMarkerSeen = true;
-            void markRunPtyCompletionMarkerSeen(ptyOptions.runId, signal.marker)
+            if (!generationRef) return;
+            void markRunPtyCompletionMarkerSeen(generationRef, signal.marker)
               .catch((err: unknown) => logRunPtyStoreError('Failed to record corroborating PTY terminal marker', ptyOptions.runId, err));
           }
         }
-        // node-pty is push-only. The bounded single writer batches durable
-        // inserts and accounts for overflow instead of retaining an unbounded
-        // promise chain when terminal output outpaces PostgreSQL.
+        // Archive bytes before normalization: only this path receives the exact
+        // node-pty Buffer, preserving order and every repaint/control byte.
+        if (rawArchiveWriter && !rawArchiveWriteFailed) {
+          try {
+            rawArchiveWriter.append(buf);
+          } catch (err: unknown) {
+            rawArchiveWriteFailed = true;
+            transcriptRecorder?.recordError(
+              'raw_archive_write_failed',
+              'Exact raw PTY archive write failed; earlier verified segments remain available.',
+            );
+            logRunPtyStoreError('Failed to append exact raw PTY archive bytes', ptyOptions.runId, err);
+          }
+        }
+        transcriptRecorder?.recordModelBytes(buf);
+        // node-pty is push-only. The bounded replay-ring writer batches durable
+        // inserts and accounts for overflow. It is not full-history authority.
         outputBatcher?.enqueue(buf);
       });
 
@@ -2613,8 +2745,9 @@ async function spawnAgentViaPty(
       });
       if (readinessTimeoutTimer) clearTimeout(readinessTimeoutTimer);
       if (settled) return;
+      if (!generationRef) throw new Error('PTY_GENERATION_REQUIRED: generation disappeared before readiness');
       void recordRunPtyPromptReadiness(
-        ptyOptions.runId,
+        generationRef,
         readiness.timedOut ? 'timeout_fallback' : 'ready',
         readiness.reason,
       ).catch((err) => logRunPtyStoreError('Failed to record PTY readiness', ptyOptions.runId, err));
@@ -2630,7 +2763,7 @@ async function spawnAgentViaPty(
         logger.warn(`[engine] Bracketed PTY prompt injection failed for ${ptyOptions.agentType}; falling back to chunked typing: ${message}`);
         await injectPromptWithChunkedTyping(pty, ptyCommand.prompt);
       }
-      void recordRunPtyPromptReadiness(ptyOptions.runId, 'injected', readiness.reason)
+      void recordRunPtyPromptReadiness(generationRef, 'injected', readiness.reason)
         .catch((err) => logRunPtyStoreError('Failed to record PTY prompt injection', ptyOptions.runId, err));
       const ptyRunning = await transitionRunLifecycle(ptyOptions.runId, 'running', {
         transport: 'pty_attached',
@@ -2696,7 +2829,27 @@ async function spawnAgentViaPty(
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (inactivityTimer) clearTimeout(inactivityTimer);
       try {
-        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
+        await outputBatcher?.drain();
+      } catch (drainError) {
+        logRunPtyStoreError('Failed to drain PTY replay ring after spawn failure', ptyOptions.runId, drainError);
+      }
+      try {
+        await rawArchiveWriter?.drain();
+      } catch (archiveError) {
+        transcriptRecorder?.recordError(
+          'raw_archive_finalize_failed',
+          'Exact raw PTY archive could not be finalized after process startup failure.',
+        );
+        logRunPtyStoreError('Failed to finalize raw archive after spawn failure', ptyOptions.runId, archiveError);
+      }
+      transcriptRecorder?.recordError('pty_spawn_failed', 'PTY process startup failed before a normal generation exit.');
+      try {
+        await transcriptRecorder?.drain();
+      } catch (transcriptError) {
+        logRunPtyStoreError('Failed to finalize transcript after spawn failure', ptyOptions.runId, transcriptError);
+      }
+      try {
+        if (generationRef) await completeRunPtySession(generationRef, 'failed', 1, null);
       } catch { /* session may not have been persisted yet */ }
       logStream.end();
       ptyCommand?.cleanup?.();
@@ -2797,7 +2950,7 @@ function runAgent(
     return Promise.resolve(buildPromptDeliveryFailureResult(startTime));
   }
 
-  if (ptyOptions?.enabled) {
+  if (ptyOptions?.enabled && (agentType !== 'pi' || resolvePiExecutionProfile(ptyOptions.terminalMode) === 'interactive')) {
     return spawnAgentViaPty(
       ptyOptions,
       prompt,
@@ -3431,15 +3584,95 @@ async function spawnPiRpc(
   retryContext?: PiRetryContext,
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
   piServerSkillFiles: string[] = [],
-  _piSessionOptions?: PiSessionOptions,
+  piSessionOptions?: PiSessionOptions,
   mcpServers?: Record<string, string>,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Promise<AgentResult> {
   const startTime = Date.now();
   let serverForCleanup: PiRpcServer | null = null;
+  let promptFile: ReturnType<typeof createPiPromptFile> | null = null;
+  let transcriptRecorder: PtyTranscriptRecorder | null = null;
+  let generationRef: PtyGenerationRef | null = null;
+  let markerFile: string | null = null;
+  let completionMarker: string | null = null;
+  let finalExitCode = 1;
+
+  const capability = detectPiStructuredCapability(detectPi().piVersion);
+  if (!capability.supported) {
+    throw new UnprocessableError(
+      `Pi structured autonomous profile unavailable: ${capability.reason}`,
+      'PI_STRUCTURED_PROFILE_UNSUPPORTED',
+    );
+  }
+
+  if (piSessionOptions?.workspaceId) {
+    completionMarker = buildPtyCompletionMarker(piSessionOptions.runId, piSessionOptions.storyId);
+    const markerFilePath = buildPtyMarkerFilePath(piSessionOptions.runId, piSessionOptions.storyId);
+    markerFile = path.resolve(cwd, markerFilePath);
+    try { fs.unlinkSync(markerFile); } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const generation = await startRunPtySession({
+      runId: piSessionOptions.runId,
+      workspaceId: piSessionOptions.workspaceId,
+      storyId: piSessionOptions.storyId,
+      attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+      cwd,
+      agentType: 'pi',
+      cols: DEFAULT_PTY_COLS,
+      rows: DEFAULT_PTY_ROWS,
+      childPid: null,
+      completionMarker,
+    });
+    generationRef = {
+      runId: generation.runId,
+      generationId: generation.generationId,
+      generationToken: generation.generationToken,
+    };
+    transcriptRecorder = new PtyTranscriptRecorder(generationRef);
+    transcriptRecorder.recordHostNotice('generation_started', 'Pi structured RPC generation started.', {
+      profile: capability.profile,
+      attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+    });
+  }
+
+  const sessionDirectory = createPiSessionDirectory(
+    piSessionOptions?.runId ?? process.pid,
+    piSessionOptions?.storyId ?? 'story',
+  );
+  const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+  const mappedEvent = (event: unknown, stream: 'stdout' | 'stderr'): void => {
+    const mapped = mapPiStructuredEvent(event);
+    for (const transcript of mapped.transcripts) {
+      transcriptRecorder?.recordStructured(transcript);
+    }
+    logStream.write(`[PiEvent:${stream}] ${JSON.stringify(event)}\n`);
+  };
+  const humanLine = (line: string): void => {
+    process.stdout.write(line);
+    logStream.write(line);
+  };
   const launchPiRpcServer = async (): Promise<PiRpcServer> => {
-    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
-    const launchedServer = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers, effortLevel);
+    logger.info(`[pi-rpc] Starting pi RPC server (profile=${capability.profile}, model=${model ?? 'default'}, effort=${effortLevel ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
+    const launchedServer = await startPiRpcServer(
+      cwd,
+      model,
+      piServerSkillFiles,
+      mcpServers,
+      effortLevel,
+      mappedEvent,
+      humanLine,
+      (pid) => {
+        if (generationRef && pid) {
+          void updateRunPtyChildPid(generationRef, pid).catch((error: unknown) => {
+            transcriptRecorder?.recordError('structured_pid_persistence_failed', 'Pi process PID could not be persisted.', {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      },
+      sessionDirectory.path,
+    );
     serverForCleanup = launchedServer;
     logger.info('[pi-rpc] pi RPC server started');
     return launchedServer;
@@ -3476,7 +3709,6 @@ async function spawnPiRpc(
       });
     }
 
-    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     let storyTimedOut = false;
     let settled = false;
 
@@ -3638,22 +3870,60 @@ async function spawnPiRpc(
     }, timeoutMs);
 
     try {
-      logger.info('[pi-rpc] Dispatching prompt');
-      await sendPiRpcCommand(server, { type: 'prompt', message: prompt });
-      logger.info('[pi-rpc] Prompt accepted by RPC server; waiting for turn completion');
+      let deliveredPrompt = prompt;
+      if (generationRef && completionMarker && markerFile && piSessionOptions) {
+        deliveredPrompt = appendPtyCompletionInstructions({
+          basePrompt: prompt,
+          runId: piSessionOptions.runId,
+          storyId: piSessionOptions.storyId,
+          agentType: 'pi',
+          completionMarker,
+          markerFilePath: path.relative(cwd, markerFile),
+          generationId: generationRef.generationId,
+          generationToken: generationRef.generationToken,
+          attempt: retryContext?.attempt ? retryContext.attempt + 1 : 1,
+          executionProfile: 'structured-rpc',
+        });
+      }
+      promptFile = createPiPromptFile(
+        piSessionOptions?.runId ?? process.pid,
+        piSessionOptions?.storyId ?? 'story',
+        deliveredPrompt,
+      );
+      logger.info(`[pi-rpc] Dispatching ${promptFile.bytes} prompt bytes from private file over RPC stdin`);
+      const promptFromFile = fs.readFileSync(promptFile.path, 'utf8');
+      await sendPiRpcCommand(server, { type: 'prompt', message: promptFromFile });
+      logger.info('[pi-rpc] Prompt accepted by RPC server; waiting for settled completion');
       await storyDone;
-      logger.info('[pi-rpc] Story turn completed');
+      logger.info('[pi-rpc] Story RPC session settled');
+
+      if (generationRef && completionMarker && markerFile && piSessionOptions) {
+        if (!fs.existsSync(markerFile)) {
+          throw new Error('PI_COMPLETION_STATUS_MISSING: settled RPC output is not completion authority');
+        }
+        const parsed = JSON.parse(fs.readFileSync(markerFile, 'utf8')) as Record<string, unknown>;
+        const attempt = retryContext?.attempt ? retryContext.attempt + 1 : 1;
+        const valid = parsed.storyId === piSessionOptions.storyId
+          && Number(parsed.runId) === piSessionOptions.runId
+          && parsed.marker === completionMarker
+          && parsed.generationId === generationRef.generationId
+          && parsed.generationToken === generationRef.generationToken
+          && Number(parsed.attempt) === attempt;
+        if (!valid) throw new Error('PI_COMPLETION_STATUS_INVALID: status payload does not match this generation');
+        await markRunPtyCompletionFileSeen(generationRef, completionMarker);
+      }
+
       clearTimeout(timeout);
       cleanupListener();
-      logStream.end();
-      return finish(storyTimedOut ? 124 : 0);
+      finalExitCode = storyTimedOut ? 124 : 0;
+      return finish(finalExitCode);
     } catch (error: unknown) {
       clearTimeout(timeout);
       cleanupListener();
-      logStream.end();
       const message = error instanceof Error ? error.message : String(error);
+      finalExitCode = storyTimedOut ? 124 : 1;
       return {
-        exitCode: storyTimedOut ? 124 : 1,
+        exitCode: finalExitCode,
         stderrTail: `${server.stderr.slice(-4096)}${message ? `\n${message}` : ''}`.trim(),
         elapsedMs: Date.now() - startTime,
         piSessionId,
@@ -3663,6 +3933,30 @@ async function spawnPiRpc(
     if (serverForCleanup) {
       await stopPiRpcServer(serverForCleanup);
     }
+    promptFile?.cleanup();
+    sessionDirectory.cleanup();
+    transcriptRecorder?.recordHostNotice('generation_closed', 'Pi structured RPC generation closed.', {
+      exitCode: finalExitCode,
+      completionStatusObserved: finalExitCode === 0,
+    });
+    try {
+      await transcriptRecorder?.drain();
+    } catch (error: unknown) {
+      logRunPtyStoreError('Failed to finalize Pi structured transcript', piSessionOptions?.runId ?? 0, error);
+    }
+    if (generationRef) {
+      try {
+        await completeRunPtySession(
+          generationRef,
+          finalExitCode === 0 ? 'exited' : finalExitCode === 124 ? 'timed_out' : 'failed',
+          finalExitCode,
+          null,
+        );
+      } catch (error: unknown) {
+        logRunPtyStoreError('Failed to close Pi structured generation', piSessionOptions?.runId ?? 0, error);
+      }
+    }
+    logStream.end();
   }
 }
 
@@ -6307,6 +6601,7 @@ async function executeStory(
             rows: DEFAULT_PTY_ROWS,
             port: config.port,
             storyId: story.id,
+            attempt: retryAttempt + 1,
           } satisfies PtyRunOptions
         : undefined;
       const productionAdapter: StoryExecutionAdapter<{ prompt: string }, AgentResult> = {
