@@ -168,11 +168,7 @@ import {
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
 import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
-import {
-  currentWaveParallelPolicyEnvironment,
-  enforceWaveParallelPolicy,
-  type WaveExecutionMode,
-} from '../lib/wave-parallel-policy';
+import type { WaveExecutionMode } from '../lib/wave-parallel-policy';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
