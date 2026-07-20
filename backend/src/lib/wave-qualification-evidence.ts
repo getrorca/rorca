@@ -141,6 +141,7 @@ const IDENTITY_FILES = {
     'backend/src/db/pg-migrations/20260719106000_wave_dispatch_atomicity.sql',
     'backend/src/db/pg-migrations/20260719106500_wave_release_evidence_artifacts.sql',
     'backend/src/db/pg-migrations/20260719107000_governed_retry_publication_cancellation.sql',
+    '.github/workflows/ci.yml',
     '.github/workflows/wave-qualification.yml',
     'Dockerfile',
     'Dockerfile.backend',
