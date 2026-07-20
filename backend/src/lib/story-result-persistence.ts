@@ -79,6 +79,18 @@ export interface CanonicalStoryResultOutcome {
   trustedWal?: TrustedWalReference;
 }
 
+export interface StoryResultAtomicFinalizationOptions {
+  integrationFinalization?: {
+    attempt: number;
+    resultingHead: string;
+    finalizationIdentity: {
+      idempotencyKey: string;
+      revision: string;
+      receiptHash: string;
+    };
+  };
+}
+
 export interface LegacyStoryAccountingInput {
   runId: number;
   storyId: string;
@@ -678,6 +690,62 @@ async function persistTrustedPassOutbox(
   return trustedWalReference(event.row);
 }
 
+async function lockWaveIntegrationFinalization(
+  client: PoolClient,
+  input: CanonicalStoryResultInput,
+  options: StoryResultAtomicFinalizationOptions,
+): Promise<'none' | 'integrated_validated' | 'finalized'> {
+  const finalization = options.integrationFinalization;
+  if (!finalization) return 'none';
+  const identity = finalization.finalizationIdentity;
+  if (input.status !== 'pass' || !Number.isSafeInteger(finalization.attempt) || finalization.attempt < 1
+    || !/^[0-9a-f]{40}$/i.test(finalization.resultingHead)
+    || identity.idempotencyKey !== input.idempotencyKey
+    || identity.revision !== finalization.resultingHead
+    || !/^[0-9a-f]{64}$/i.test(identity.receiptHash)) {
+    throw new ValidationError('Wave integration finalization identity is invalid');
+  }
+  const ledger = rows(await client.query<{
+    state: string; resulting_head: string | null; finalization_identity: Record<string, unknown> | null;
+  }>(`
+    SELECT state, resulting_head, finalization_identity
+    FROM story_integration_ledger
+    WHERE run_id = $1 AND story_id = $2 AND attempt = $3
+    FOR UPDATE
+  `, [input.runId, input.storyId, finalization.attempt]))[0];
+  if (!ledger || !['integrated_validated', 'finalized'].includes(ledger.state)
+    || ledger.resulting_head?.trim().toLowerCase() !== finalization.resultingHead.toLowerCase()) {
+    throw new ConflictError('Wave integration ledger is not validated for this exact pass projection');
+  }
+  if (ledger.state === 'finalized') {
+    const prior = ledger.finalization_identity;
+    if (!prior
+      || prior.idempotencyKey !== identity.idempotencyKey
+      || prior.revision !== identity.revision
+      || prior.receiptHash !== identity.receiptHash) {
+      throw new ConflictError('Wave integration finalization identity changed during replay');
+    }
+  }
+  return ledger.state as 'integrated_validated' | 'finalized';
+}
+
+async function finalizeWaveIntegration(
+  client: PoolClient,
+  input: CanonicalStoryResultInput,
+  options: StoryResultAtomicFinalizationOptions,
+  state: 'none' | 'integrated_validated' | 'finalized',
+): Promise<void> {
+  if (state !== 'integrated_validated') return;
+  const finalization = options.integrationFinalization!;
+  const finalized = await client.query(
+    `UPDATE story_integration_ledger
+     SET state = 'finalized', finalization_identity = $4::jsonb, finalized_at = NOW()
+     WHERE run_id = $1 AND story_id = $2 AND attempt = $3 AND state = 'integrated_validated'`,
+    [input.runId, input.storyId, finalization.attempt, JSON.stringify(finalization.finalizationIdentity)],
+  );
+  if (finalized.rowCount !== 1) throw new ConflictError('Wave integration finalization lost its state fence');
+}
+
 /**
  * Persist the logical result and every dependent projection in one transaction.
  * A duplicate is acknowledged only after every immutable input and keyed
@@ -686,9 +754,11 @@ async function persistTrustedPassOutbox(
 export async function persistCanonicalStoryResult(
   input: CanonicalStoryResultInput,
   authority: StoryResultPersistenceAuthority = COMPATIBILITY_RESULT_AUTHORITY,
+  options: StoryResultAtomicFinalizationOptions = {},
 ): Promise<CanonicalStoryResultOutcome> {
   validateInput(input, authority);
   return transaction(async (client) => {
+    const integrationState = await lockWaveIntegrationFinalization(client, input, options);
     const projection = await loadRunProjection(client, input);
     const specId = path.basename(projection.spec_path, '.json');
     const commit = normalizedCommit(input, projection, specId, authority);
@@ -782,6 +852,7 @@ export async function persistCanonicalStoryResult(
       const trustedWal = await persistTrustedPassOutbox(
         client, input, projection, specId, existing.id, commit,
       );
+      await finalizeWaveIntegration(client, input, options, integrationState);
       return { id: existing.id, duplicate: true, ...(trustedWal ? { trustedWal } : {}) };
     }
 
@@ -838,6 +909,7 @@ export async function persistCanonicalStoryResult(
     const trustedWal = await persistTrustedPassOutbox(
       client, input, projection, specId, inserted.id, commit,
     );
+    await finalizeWaveIntegration(client, input, options, integrationState);
     return { id: inserted.id, duplicate: false, ...(trustedWal ? { trustedWal } : {}) };
   });
 }

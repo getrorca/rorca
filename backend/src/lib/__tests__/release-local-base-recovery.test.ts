@@ -10,7 +10,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 
-jest.mock('../../db/index', () => ({ execute: jest.fn(), query: jest.fn(), queryOne: jest.fn(), transaction: jest.fn() }));
+jest.mock('../../db/index', () => ({
+  execute: jest.fn(), query: jest.fn(), queryOne: jest.fn(), transaction: jest.fn(),
+  withPgAdvisoryLock: async (_key: string, operation: () => Promise<unknown>) => operation(),
+}));
 jest.mock('../merge-handler', () => ({ performMerge: jest.fn() }));
 jest.mock('../github-repository-authority', () => ({
   getGithubRepositoryAuthority: jest.fn(), githubRepoApiUrl: jest.fn(), assertGithubRef: jest.fn(),

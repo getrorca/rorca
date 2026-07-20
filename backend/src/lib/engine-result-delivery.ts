@@ -14,6 +14,7 @@ import {
   persistCanonicalStoryResult,
   type CanonicalStoryResultInput,
   type CanonicalStoryResultOutcome,
+  type StoryResultAtomicFinalizationOptions,
 } from './story-result-persistence';
 import { writeFallbackResult, type FallbackResultEntry } from './resilient-post';
 
@@ -24,7 +25,7 @@ export interface EngineResultDeliveryContext {
 }
 
 export interface EngineResultDeliveryDependencies {
-  persist?: (input: CanonicalStoryResultInput) => Promise<CanonicalStoryResultOutcome>;
+  persist?: (input: CanonicalStoryResultInput, options?: StoryResultAtomicFinalizationOptions) => Promise<CanonicalStoryResultOutcome>;
   journal?: (cwd: string, entry: FallbackResultEntry) => Promise<boolean>;
   now?: () => Date;
 }
@@ -64,27 +65,28 @@ export function isRetryableStoryResultPersistenceError(error: unknown): boolean 
  */
 export async function deliverEngineStoryResult(
   context: EngineResultDeliveryContext,
-  input: Omit<CanonicalStoryResultInput, 'runId' | 'expectedWorkspaceId'>,
+  input: Omit<CanonicalStoryResultInput, 'runId' | 'expectedWorkspaceId'> & StoryResultAtomicFinalizationOptions,
   dependencies: EngineResultDeliveryDependencies = {},
 ): Promise<CanonicalStoryResultOutcome> {
-  const persist = dependencies.persist ?? persistCanonicalStoryResult;
   const journal = dependencies.journal ?? writeFallbackResult;
   const now = dependencies.now ?? (() => new Date());
   // Freeze one observation time before the first DB attempt. A transport-
   // ambiguous commit and its fallback proposal therefore share an exact
   // immutable timestamp and can be compared during host refinalization.
   const finishedAt = input.finishedAt ?? now().toISOString();
+  const { integrationFinalization, ...canonicalPayload } = input;
   const canonicalInput: CanonicalStoryResultInput = {
-    ...input,
+    ...canonicalPayload,
     finishedAt,
     runId: context.runId,
     expectedWorkspaceId: context.workspaceId,
   };
 
   try {
+    const finalizationOptions = { integrationFinalization };
     return dependencies.persist
-      ? await persist(canonicalInput)
-      : await persistCanonicalStoryResult(canonicalInput, EXECUTION_ENGINE_RESULT_AUTHORITY);
+      ? await dependencies.persist(canonicalInput, finalizationOptions)
+      : await persistCanonicalStoryResult(canonicalInput, EXECUTION_ENGINE_RESULT_AUTHORITY, finalizationOptions);
   } catch (error) {
     if (!isRetryableStoryResultPersistenceError(error)) throw error;
     // The stable journal is intentionally untrusted. Preserve the complete
@@ -104,6 +106,7 @@ export async function deliverEngineStoryResult(
         runId: context.runId,
         expectedWorkspaceId: undefined,
         finishedAt,
+        ...(integrationFinalization ? { integrationFinalization } : {}),
       },
     };
     if (!await journal(context.fallbackRoot, entry)) {

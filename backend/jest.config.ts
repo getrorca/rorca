@@ -32,6 +32,9 @@ const config: Config = {
   testPathIgnorePatterns: [
     '/node_modules/',
     '/dist/',
+    // WPE qualification uses node:test under tsx and is invoked explicitly by
+    // test:wave-qualification; Jest must never discover or double-run it.
+    '\\.node\\.test\\.ts$',
     'src/__tests__/pg-boss-cancel\\.test\\.ts',
     'src/__tests__/pg-boss-concurrency\\.test\\.ts',
     'src/__tests__/pg-boss-dlq\\.test\\.ts',

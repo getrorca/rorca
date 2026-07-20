@@ -24,6 +24,7 @@ function result(overrides: Partial<FallbackReplayResult>): FallbackReplayResult 
     criticalInvalid: 0,
     criticalIncomplete: false,
     blocksCompletion: false,
+    atomicFinalizations: 0,
     ...overrides,
   };
 }
@@ -53,7 +54,7 @@ describe('worker fallback terminal gate', () => {
 
   test('both normal and retry workers apply replay before terminal success/sync', () => {
     expect(WORKER_SOURCE.match(/fallbackReplayBlocksCompletion\(fallbackReplay\)/g)).toHaveLength(2);
-    const normalReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayFallbackResults(cwd');
+    const normalReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayWorkerFallbackResults(cwd');
     const normalStatus = WORKER_SOURCE.indexOf("let status = wasCancelled ? 'cancelled'", normalReplay);
     const normalGate = WORKER_SOURCE.indexOf('fallbackReplayBlocksCompletion(fallbackReplay)', normalStatus);
     expect(normalReplay).toBeGreaterThan(0);
@@ -61,12 +62,13 @@ describe('worker fallback terminal gate', () => {
     expect(WORKER_SOURCE).toContain("hostAuthority?.releaseEligible === true");
     expect(WORKER_SOURCE).not.toContain('All stories passed on the run branch despite exit');
 
-    const retryReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayFallbackResults(cwd', normalReplay + 1);
+    const retryReplay = WORKER_SOURCE.indexOf('const fallbackReplay = await replayWorkerFallbackResults(cwd', normalReplay + 1);
     const retryStatus = WORKER_SOURCE.indexOf('let finalStatus: string;', retryReplay);
     const retryGate = WORKER_SOURCE.indexOf('fallbackReplayBlocksCompletion(fallbackReplay)', retryStatus);
-    const retrySync = WORKER_SOURCE.indexOf('syncRetrySpecPassesToOriginalSpec', retryGate);
+    const governedFinalization = WORKER_SOURCE.indexOf('const governedFinalizedStoryIds', retryGate);
     expect(retryReplay).toBeGreaterThan(normalReplay);
     expect(retryGate).toBeGreaterThan(retryStatus);
-    expect(retrySync).toBeGreaterThan(retryGate);
+    expect(governedFinalization).toBeGreaterThan(retryGate);
+    expect(WORKER_SOURCE).not.toContain('syncRetrySpecPassesToOriginalSpec');
   });
 });

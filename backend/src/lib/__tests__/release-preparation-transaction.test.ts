@@ -20,6 +20,7 @@ jest.mock('../../db/index', () => ({
   query: jest.fn(),
   queryOne: (...args: unknown[]) => queryOne(...args),
   transaction: (...args: unknown[]) => transaction(...args),
+  withPgAdvisoryLock: async (_key: string, operation: () => Promise<unknown>) => operation(),
 }));
 jest.mock('../github-repository-authority', () => ({
   getGithubRepositoryAuthority: jest.fn(),

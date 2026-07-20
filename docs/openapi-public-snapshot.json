@@ -1,6 +1,6 @@
 {
-  "contractVersion": "12.0.0",
-  "generatedAt": "2026-07-20T09:07:22.385Z",
+  "contractVersion": "13.0.0",
+  "generatedAt": "2026-07-20T19:56:04.475Z",
   "routes": [
     {
       "method": "GET",
@@ -4598,6 +4598,10 @@
                     "minimum": 1,
                     "type": "integer"
                   },
+                  "qualificationReceiptId": {
+                    "description": "Operator-selected immutable qualification receipt identity for governed wave qualification metadata",
+                    "type": "string"
+                  },
                   "readinessOverride": {
                     "description": "Explicitly run despite readiness blockers; usage is logged to WAL for auditability.",
                     "type": "boolean"
@@ -4605,6 +4609,10 @@
                   "rerunFromScratch": {
                     "description": "Reset passed story state and execute the spec from the first non-excluded story.",
                     "type": "boolean"
+                  },
+                  "rolloutCohort": {
+                    "description": "Explicit governed rollout cohort metadata; it cannot override the non-production wave policy",
+                    "type": "string"
                   },
                   "specPath": {
                     "example": "forge/specs/approved/my-spec.json",
@@ -4698,7 +4706,7 @@
         "404": {},
         "422": {}
       },
-      "hash": "sha256:08173cdf717250a248c5d3c595351e631d30e5181803ec2ef169f0faf263de1d"
+      "hash": "sha256:a6973c83a75fc1b7ef5cfbd80aba48c2005ca9ccd53aaa8d9770fbbd27cf4852"
     },
     {
       "method": "GET",

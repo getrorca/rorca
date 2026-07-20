@@ -256,9 +256,9 @@ describe('execution-engine closeout architecture', () => {
   });
 
   test('covers direct/retry finalization and sequential/parallel worktree integration through one exact-head seam', () => {
-    expect(ENGINE_SOURCE.match(/await finalizeIntegratedStoryPass\(/g)).toHaveLength(2);
+    expect(ENGINE_SOURCE.match(/await finalizeIntegratedStoryPass\(/g)).toHaveLength(3);
     expect(ENGINE_SOURCE).toContain('Single-story wave — direct merge');
-    expect(ENGINE_SOURCE).toContain('await mergeWave(');
+    expect(ENGINE_SOURCE).toContain('await integrateAndFinalizeWaveContribution(');
     expect(ENGINE_SOURCE).toContain('story, config, mode, playbook, logDir, workspaceId, retryCounts');
     expect(ENGINE_SOURCE.match(/const integratedHead = resolveIntegratedRunHead\(config\)/g)).toHaveLength(1);
     expect(ENGINE_SOURCE).not.toContain('commitSha: pending.commitSha');
@@ -288,7 +288,7 @@ describe('execution-engine closeout architecture', () => {
     expect(ENGINE_SOURCE).toContain('config.parallelism > 1 && !isPtyTerminalMode(config.terminalMode) && !config.specificStory');
     expect(PIPELINE_SOURCE).toContain('const storyIsolated = isolatedStoryIds.has(story.id)');
     expect(ENGINE_SOURCE).toContain('compileWaves(waveStories)');
-    expect(ENGINE_SOURCE).toContain('runWithBoundedConcurrency(waveExecutions.map(item => item.task), config.parallelism)');
+    expect(ENGINE_SOURCE).toContain('runWaveTasksWithRejectionFence(waveExecutions.map(item => item.task), config.parallelism)');
     expect(ENGINE_SOURCE).toContain('computeTransitivelyBlockedStories(currentStories, failedIds, processedIds)');
     expect(ENGINE_SOURCE).toContain('Single-story wave — executing directly on the run branch (no per-story worktree)');
     expect(PIPELINE_SOURCE).toContain('if (!requiresPerStoryWorktree(wave.stories.length)) continue');

@@ -102,6 +102,10 @@ async function createRunWithStories(workspaceId = fixtureWorkspaceId) {
   await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES ($1, 'US-001', 'pass', 0, NOW())`, [runId]);
   await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES ($1, 'US-002', 'fail', 0, NOW())`, [runId]);
   await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES ($1, 'US-003', 'fail', 0, NOW())`, [runId]);
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_closeout', $1, $2::jsonb)`,
+    [workspaceId, JSON.stringify({ run_id: Number(runId), status: 'failed' })],
+  );
 
   return runId;
 }
@@ -120,7 +124,7 @@ test('POST /api/pipeline/runs/:runId/retry creates new run and retries all faile
   expect(res.body.runId).not.toBe(originalRunId); // New run created
   expect(res.body.retriedStories).toHaveLength(2);
   expect(res.body.retriedStories.map((s: any) => s.storyId).sort()).toEqual(['US-002', 'US-003']);
-  expect(res.body.retriedStories[0].attempt).toBe(1);
+  expect(res.body.retriedStories[0].attempt).toBe(2);
   expect(res.body.copiedStories).toEqual([]); // Passed evidence is not projected into the retry run
   expect(res.body.effectiveOptions).toMatchObject({
     merge: { strategy: 'branch-only', autoMerge: false },
@@ -154,6 +158,10 @@ test('TaskManifest retry preview uses failed application truth without importing
   `, [syntheticPath, fixtureWorkspaceId, manifestId]);
   await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at)
     VALUES ($1, 'TM-001', 'fail', 0, NOW())`, [run!.id]);
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_closeout', $1, $2::jsonb)`,
+    [fixtureWorkspaceId, JSON.stringify({ run_id: Number(run!.id), status: 'failed' })],
+  );
 
   const preview = await request(app)
     .post(`/api/pipeline/runs/${run!.id}/retry`)
@@ -188,7 +196,7 @@ test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', asy
   expect(res.status).toBe(201);
   expect(res.body.retriedStories).toHaveLength(1);
   expect(res.body.retriedStories[0].storyId).toBe('US-002');
-  expect(res.body.retriedStories[0].attempt).toBe(1);
+  expect(res.body.retriedStories[0].attempt).toBe(2);
 });
 
 // ─── Test 3: New run gets copied pass results + retry placeholders ────────────
@@ -251,7 +259,7 @@ test('Retry emits story_retried WAL events referencing the new run', async () =>
   const payloads = events.map((e: any) => payload(e.payload));
   expect(payloads[0].run_id).toBe(newRunId);
   expect(payloads[0].original_run_id).toBe(Number(originalRunId));
-  expect(payloads[0].attempt).toBe(1);
+  expect(payloads[0].attempt).toBe(2);
   expect(payloads.map((p: any) => p.story_id).sort()).toEqual(['US-002', 'US-003']);
 });
 
@@ -338,7 +346,7 @@ test('story_retried events are broadcast to SSE subscribers', async () => {
   expect(retryEvents[0].story_id).toBe('US-002');
 
   const eventPayload = payload(retryEvents[0].payload);
-  expect(eventPayload.attempt).toBe(1);
+  expect(eventPayload.attempt).toBe(2);
   expect(eventPayload.run_id).toBe(newRunId);
 
   unsubscribe();

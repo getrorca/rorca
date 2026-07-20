@@ -45,11 +45,15 @@ test('worker proves isolation before either fresh or retry lifecycle can become 
   const running = [...worker.matchAll(/transitionRunLifecycle\(runId, 'starting'/g)].map(match => match.index!);
   expect(calls).toHaveLength(2);
   expect(egress).toHaveLength(2);
-  expect(running).toHaveLength(2);
+  expect(running).toHaveLength(1);
+  const freshClaim = worker.indexOf('await claimWaveProductionDispatch');
+  expect(freshClaim).toBeGreaterThan(0);
+  expect(freshClaim).toBeLessThan(calls[0]);
   expect(calls[0]).toBeLessThan(egress[0]);
-  expect(egress[0]).toBeLessThan(running[0]);
+  // Fresh status is atomically fenced by the production-policy claim. Retry
+  // uses the lifecycle transition only after the same boundary proof.
   expect(calls[1]).toBeLessThan(egress[1]);
-  expect(egress[1]).toBeLessThan(running[1]);
+  expect(egress[1]).toBeLessThan(running[0]);
   expect(worker).not.toContain('assertLocalDevHasNoDurableProviderAuthority');
   expect(worker).toContain('providerCapable: payload.safetyOptions.externalSend');
   expect(worker).toContain('providerCapable: approvedPreview.options.safety.externalSend');

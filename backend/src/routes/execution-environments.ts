@@ -23,6 +23,7 @@ import {
   claimNextRunnerJob,
   completeRunnerJob,
   markRunnerJobRunning,
+  revalidateRunnerJobPolicy,
   serializeRunnerJob,
 } from '../lib/execution-runner-jobs';
 
@@ -216,6 +217,43 @@ router.post('/:id/runner/jobs/:jobId/running', validateBody(RunnerPollSchema), a
     await authenticateRunnerRequest(req);
     const job = await markRunnerJobRunning(paramValue(req.params.jobId), req.body.runnerId);
     res.json({ job: serializeRunnerJob(job) });
+  } catch (err) {
+    handleRouteError(res, err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/execution-environments/{id}/runner/jobs/{jobId}/revalidate:
+ *   post:
+ *     summary: Revalidate governed execution policy immediately before local spawn
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Runner pre-spawn fencing is an operator execution boundary and must not be MCP exposed."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Current effective policy fence }
+ */
+router.post('/:id/runner/jobs/:jobId/revalidate', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
+  try {
+    await authenticateRunnerRequest(req);
+    const policy = await revalidateRunnerJobPolicy(paramValue(req.params.jobId), req.body.runnerId);
+    res.json({
+      allowed: policy.allowed,
+      status: policy.status,
+      effective: policy.effective,
+      fence: policy.fence,
+      receipt: policy.receipt,
+      rollout: policy.rollout,
+      fencingPolicy: policy.fencingPolicy,
+    });
   } catch (err) {
     handleRouteError(res, err);
   }

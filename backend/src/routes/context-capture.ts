@@ -88,6 +88,8 @@ function assertInsideWorkspace(workspacePath: string, candidatePath: string, nam
   }
 }
 
+// Retained for compatibility with the reversible bootstrap verification contract.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function assertExpectedBootstrapPath(workspacePath: string, candidatePath: string, name: string, expectedRelativePath: string): void {
   assertInsideWorkspace(workspacePath, candidatePath, name);
   const expectedPath = path.resolve(workspacePath, expectedRelativePath);
@@ -187,6 +189,41 @@ function parseCandidateId(value: unknown): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new ValidationError('candidateId must be a positive integer');
   return parsed;
+}
+
+// Compatibility parsers retained while legacy import routes remain disabled.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function parsePolicyMode(value: unknown): CapturePolicyMode {
+  return normalizeCapturePolicyMode(value, 'metadata-only');
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function parseImportVendor(value: unknown): ExternalMemoryImportVendor {
+  const vendor = assertString(value, 'vendor') as ExternalMemoryImportVendor;
+  return vendor;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function parseImportFormat(value: unknown): ExternalMemoryImportFormat | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === 'json' || value === 'jsonl' || value === 'markdown') return value;
+  throw new ValidationError('Invalid import format', { format: value });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function resolveWorkspaceSourceFile(workspacePath: string, value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const raw = assertString(value, 'sourceFile');
+  const resolved = path.isAbsolute(raw) ? raw : path.resolve(workspacePath, raw);
+  assertInsideWorkspace(workspacePath, resolved, 'sourceFile');
+  return resolved;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function isCliCapturePayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const eventType = (payload as Record<string, unknown>).eventType;
+  return eventType === 'cli_command' || eventType === 'shell_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
 }
 
 function stringValue(value: unknown): string | null {

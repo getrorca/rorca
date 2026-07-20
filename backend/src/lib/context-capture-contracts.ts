@@ -23,6 +23,17 @@ export const ContextEventTypeEnum = z.enum([
   'agent_cli_session', 'ide_session', 'shell_command', 'editor_activity',
   'explicit_memory', 'git_commit', 'ci_pr',
 ]);
+
+/** Stable public guidance for constructing source-owned idempotency material. */
+export const ContextEventIdempotencyGuidance = Object.freeze({
+  agent_cli_session: 'source_system + tool_name + session_id + workspace_id + occurred_at minute + command_hash',
+  ide_session: 'source_system + host_application + session_id + workspace_id + occurred_at hour',
+  shell_command: 'source_system + session_id + workspace_id + occurred_at + phase + command_hash + exit_code',
+  editor_activity: 'source_system + host_application + session_id + workspace_id + occurred_at + activity_type + sorted related_files',
+  explicit_memory: 'source_system + tool_name + session_id + workspace_id + memory_hash + occurred_at',
+  git_commit: 'source_system + workspace_id + git_sha',
+  ci_pr: 'source_system + workspace_id + provider + repository + pr_number + head_sha + run_id',
+} satisfies Record<z.infer<typeof ContextEventTypeEnum>, string>);
 export const TrustTierEnum = z.enum(['untrusted', 'local', 'verified', 'privileged']);
 export const AgentBinaryEnum = z.enum(['claude', 'codex', 'opencode', 'pi', 'aider', 'cursor', 'custom', 'unknown']);
 

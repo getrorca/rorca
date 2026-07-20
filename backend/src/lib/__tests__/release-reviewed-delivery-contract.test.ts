@@ -31,7 +31,10 @@ describe('release PR → evidence → reviewed delivery authority contract', () 
     expect(evidence).toContain('Pull request base SHA does not match the immutable run release intent');
     expect(evidence).toContain('Resolved GitHub App credential differs from immutable run release authority');
     expect(delivery).toContain("currentPr.base?.sha?.toLowerCase() !== evidence.pullRequest.baseSha");
-    expect(delivery).toContain("pr.base?.sha?.toLowerCase() !== evidence.pullRequest.baseSha");
+    // After merge the provider base ref may advance. Recovery instead proves
+    // the immutable pre-merge base is the merge commit's exact ancestor.
+    expect(delivery).toContain('compare/${evidence.pullRequest.baseSha}...${pr.merge_commit_sha}');
+    expect(delivery).toContain("comparison.merge_base_commit?.sha?.toLowerCase() !== evidence.pullRequest.baseSha");
   });
 
   test('requires exact PR number, URL, repository, state, draft, refs, and SHAs at merge and recovery', () => {

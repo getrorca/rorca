@@ -6,6 +6,7 @@
  */
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import type { AuthoritativeRetryScope } from './governed-story-retry';
 
 export const RETRY_PREVIEW_SCHEMA_VERSION = 'retry-preview.v1' as const;
 
@@ -68,6 +69,8 @@ export interface RetryPreviewPacket {
   schemaVersion: typeof RETRY_PREVIEW_SCHEMA_VERSION;
   originalRunId: number;
   scope: RetryScopePacket;
+  /** Present for wave retries; binds accepted integration ancestry and target revision. */
+  authority?: AuthoritativeRetryScope;
   options: RetryExecutionOptions;
   forceSequential: boolean;
   requiresApproval: boolean;

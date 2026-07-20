@@ -52,6 +52,34 @@ describe('fallback replay idempotency', () => {
 
   afterEach(() => fs.rmSync(cwd, { recursive: true, force: true }));
 
+  test('replays wave finalization only through the canonical atomic story-result poster', async () => {
+    const finalization: FallbackResultEntry = {
+      type: 'story_result', storyId: 'US-WAVE', status: 'pass', runId: 9,
+      retries: 3, ts: '2026-07-20T00:00:00.000Z', idempotencyKey: 'wave-finalize:9:US-WAVE',
+      payload: {
+        runId: 9,
+        storyId: 'US-WAVE',
+        status: 'pass',
+        integrationFinalization: {
+          attempt: 1,
+          resultingHead: 'a'.repeat(40),
+          finalizationIdentity: { idempotencyKey: 'wave-finalize:9:US-WAVE', revision: 'a'.repeat(40), receiptHash: 'b'.repeat(64) },
+        },
+      },
+    };
+    await writeFallbackResult(cwd, finalization);
+    await flushFallbackWrites(cwd);
+
+    const withoutPoster = await replayFallbackResults(cwd, 'test-ws');
+    expect(withoutPoster).toMatchObject({ invalid: 1, retained: true, atomicFinalizations: 0 });
+
+    const poster = jest.fn(async () => 'inserted' as const);
+    const replayed = await replayFallbackResults(cwd, 'test-ws', { storyResultPoster: poster });
+    expect(replayed).toMatchObject({ inserted: 1, invalid: 0, retained: false, atomicFinalizations: 1 });
+    expect(poster).toHaveBeenCalledWith(expect.objectContaining({ integrationFinalization: expect.any(Object) }));
+    expect(queryOne).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO story_results'), expect.anything());
+  });
+
   test('retains an interrupted journal and safely skips prior inserts on retry', async () => {
     await writeFallbackResult(cwd, entry('key-1', 'US-001'));
     await writeFallbackResult(cwd, entry('key-2', 'US-002'));

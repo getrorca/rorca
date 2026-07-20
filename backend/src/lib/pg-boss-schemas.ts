@@ -46,6 +46,46 @@ const ExecutionSecretReferencesSchema = z.object({
 export const MergeStrategyEnum = z.enum(['direct', 'pr', 'draft-pr', 'branch-only']);
 export type MergeStrategy = z.infer<typeof MergeStrategyEnum>;
 
+export const WavePolicyEnvelopeSchema = z.object({
+  schemaVersion: z.literal('rorca.wave-production-policy/v1'),
+  policyRevision: z.literal('wave-production-rollout-v1'),
+  requested: z.object({
+    orchestrationMode: z.enum(['sequential', 'wave-parallel']),
+    parallelism: z.number().int().min(1).max(4),
+    qualificationReceiptId: z.string().nullable(),
+    rolloutCohort: z.string().nullable(),
+  }).strict(),
+  effective: z.object({
+    orchestrationMode: z.enum(['sequential', 'wave-parallel']),
+    parallelism: z.number().int().min(1).max(4),
+  }).strict(),
+  status: z.enum([
+    'sequential-default', 'experimental-nonproduction', 'production-disabled',
+    'receipt-missing', 'receipt-stale', 'review-missing', 'activation-missing',
+    'canary-enabled', 'halted', 'draining', 'enabled',
+  ]),
+  allowed: z.boolean(),
+  reason: z.string().min(1),
+  workspaceId: z.string().min(1),
+  runId: z.number().int().positive().nullable(),
+  receipt: z.object({
+    id: z.string().min(1),
+    reportHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    sourceRevision: z.string().regex(/^[0-9a-f]{40,64}$/),
+  }).strict().nullable(),
+  rollout: z.object({
+    cohort: z.string().min(1),
+    maxParallelism: z.number().int().min(1).max(4),
+    maxActiveWaveRuns: z.number().int().min(1).max(16),
+    maxActiveWaveRunsPerWorkspace: z.number().int().min(1).max(4),
+    releaseReadinessPacketId: z.string().uuid().nullable(),
+    productionActivationApprovalId: z.string().uuid().nullable(),
+    policyEpoch: z.number().int().min(0),
+  }).strict(),
+  fencingPolicy: z.literal('dispatch-boundary-v1'),
+  fence: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+}).strict();
+
 export const PipelineRunJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   workspaceId: z.string().min(1).optional(),
@@ -61,6 +101,7 @@ export const PipelineRunJobPayload = z.object({
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
+  wavePolicy: WavePolicyEnvelopeSchema.optional(),
   safetyOptions: z.object({
     deploy: z.boolean(),
     externalSend: z.boolean(),
@@ -110,6 +151,8 @@ export const PipelineRetryJobPayload = z.object({
   previewHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   approvedPreview: z.record(z.string(), z.unknown()),
   generatedPlanHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  /** Exact Rorca-owned idempotency, lineage, revision, manifest, and lease authority. */
+  dispatchIdentity: z.record(z.string(), z.unknown()),
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
   runSpecPath: z.string().min(1),

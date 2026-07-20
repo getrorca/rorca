@@ -23,8 +23,12 @@ test('Check projections freeze exact repository and App authority without rebind
   expect(sql).toContain('GITHUB_CHECK_RUN_LEGACY_AUTHORITY_UNFROZEN');
   expect(sql).not.toContain('github_workspace_repository_authority');
   expect(sql).toContain('Check Run projection repository authority is immutable');
-  expect(sql).toContain('ALTER TABLE github_pr_delivery_evidence');
-  expect(sql).toContain('github_pr_evidence_repository_authority_ck');
-  expect(sql).toContain('GitHub PR evidence repository authority is immutable');
+  // Shipped migration history is immutable. PR evidence strengthening belongs
+  // to the later 130000 forward migration and is upgrade-tested separately.
+  expect(sql).not.toContain('ALTER TABLE github_pr_delivery_evidence');
+  const upgrade = fs.readFileSync(path.join(migrations, '20260720130000_github_pr_evidence_authority_upgrade.sql'), 'utf8');
+  expect(upgrade).toContain('github_pr_evidence_repository_authority_ck');
+  expect(upgrade).toContain('GitHub PR evidence repository authority is immutable');
   expect(sql).not.toMatch(/pgboss\./i);
+  expect(upgrade).not.toMatch(/pgboss\./i);
 });

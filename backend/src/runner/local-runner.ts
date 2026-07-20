@@ -29,8 +29,8 @@ import { hasAgentCredentials } from '../lib/secret-resolver';
 import {
   currentWaveParallelPolicyEnvironment,
   enforceWaveDispatchConsistency,
-  WaveParallelPolicyError,
 } from '../lib/wave-parallel-policy';
+import { assertWavePolicyEnvelopeIntegrity, type WavePolicyEnvelope } from '../lib/wave-production-policy';
 
 const apiUrl = (process.env.RORCA_API_URL ?? 'http://localhost:3030/api').replace(/\/$/, '');
 const environmentId = process.env.RORCA_RUNNER_ENVIRONMENT_ID ?? 'local-user';
@@ -167,27 +167,65 @@ function resolveRunnerPayloadPath(input: {
 
 async function runJob(job: any): Promise<void> {
   const payload = job.payload ?? {};
-  await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/running`, { runnerId });
 
-  let wavePolicy;
+  const embeddedPolicy = payload.wavePolicy as WavePolicyEnvelope | undefined;
+  let effectiveParallelism = 1;
   try {
     const payloadParallelism = Number(payload.parallelism ?? 1);
-    wavePolicy = enforceWaveDispatchConsistency({
-      source: 'local-runner-job',
-      payloadMode: payload.orchestrationMode === 'wave-parallel' ? 'wave-parallel' : 'sequential',
-      payloadParallelism,
-      rowParallelism: payloadParallelism,
-      triggerOptions: payload.triggerOptions,
-      environment: currentWaveParallelPolicyEnvironment(),
-    });
+    if (!Number.isInteger(payloadParallelism) || payloadParallelism < 1) {
+      throw new Error('wave_parallel_denied:local_runner_invalid_parallelism');
+    }
+    const payloadMode = payload.orchestrationMode;
+    if (payloadMode !== 'sequential' && payloadMode !== 'wave-parallel') {
+      throw new Error('wave_parallel_denied:local_runner_invalid_orchestration_mode');
+    }
+    if ((payloadMode === 'wave-parallel') !== (payloadParallelism > 1)) {
+      throw new Error('wave_parallel_denied:local_runner_inconsistent_mode');
+    }
+
+    if (embeddedPolicy) assertWavePolicyEnvelopeIntegrity(embeddedPolicy);
+    if (payloadParallelism > 1 && !embeddedPolicy) {
+      throw new Error('wave_parallel_denied:local_runner_missing_policy');
+    }
+
+    // Keep the legacy non-production experiment gate. Governed production wave
+    // dispatches instead require the stronger persisted envelope and server-side
+    // revalidation below; the legacy gate intentionally cannot authorize them.
+    if (!(process.env.NODE_ENV === 'production' && payloadParallelism > 1)) {
+      enforceWaveDispatchConsistency({
+        source: 'local-runner-job',
+        payloadMode,
+        payloadParallelism,
+        rowParallelism: payloadParallelism,
+        triggerOptions: payload.triggerOptions,
+        environment: currentWaveParallelPolicyEnvironment(),
+      });
+    }
+
+    const currentPolicy = await api<{
+      allowed: boolean;
+      effective: { orchestrationMode: 'sequential' | 'wave-parallel'; parallelism: number };
+      fence: string;
+    }>(`/execution-environments/${environmentId}/runner/jobs/${job.id}/revalidate`, { runnerId });
+    if (!currentPolicy.allowed
+      || (embeddedPolicy && currentPolicy.fence !== embeddedPolicy.fence)
+      || currentPolicy.effective.parallelism !== payloadParallelism
+      || currentPolicy.effective.orchestrationMode !== payloadMode) {
+      throw new Error('wave_parallel_denied:local_runner_policy_drift');
+    }
+    effectiveParallelism = currentPolicy.effective.parallelism;
   } catch (error) {
-    if (!(error instanceof WaveParallelPolicyError)) throw error;
-    await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/complete`, {
-      runnerId,
-      status: 'failed',
-      result: { policy: error.toJSON() },
-      error: 'wave_parallel_policy_denied',
-    });
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/complete`, {
+        runnerId,
+        status: 'failed',
+        result: { policyError: message },
+        error: 'wave_parallel_policy_denied',
+      });
+    } catch {
+      // Revalidation may already have atomically cancelled the claimed job.
+    }
     return;
   }
 
@@ -225,15 +263,19 @@ async function runJob(job: any): Promise<void> {
   if (typeof payload.workspaceId !== 'string' || !payload.workspaceId.trim()) {
     throw new Error('Local runner payload lacks frozen workspaceId');
   }
+  if (payload.wavePolicy?.workspaceId && payload.wavePolicy.workspaceId !== payload.workspaceId) {
+    throw new Error('Local runner wave policy workspace differs from frozen payload workspaceId');
+  }
   args.push('--workspace-id', payload.workspaceId);
   args.push('--port', String(engineApiPort));
-  args.push('--parallelism', String(wavePolicy.parallelism));
+  args.push('--parallelism', String(effectiveParallelism));
   args.push('--agent', String(payload.agent ?? 'claude'));
   if (payload.model) args.push('--model', String(payload.model));
   if (payload.specificStory) args.push('--story', String(payload.specificStory));
   if (payload.startFromStoryId) args.push('--start-from', String(payload.startFromStoryId));
   if (payload.includeGraph) args.push('--include-graph');
-  if (payload.terminalMode) args.push('--terminal-mode', String(payload.terminalMode));
+  const terminalMode = payload.terminalMode ?? payload.terminal_mode;
+  if (terminalMode) args.push('--terminal-mode', String(terminalMode));
   if (payload.branchName) args.push('--branch-name', String(payload.branchName));
   args.push('--execution-manifests', executionManifestPath);
   if (payload.worktreePath) args.push('--worktree-path', executionRoot);
@@ -243,13 +285,28 @@ async function runJob(job: any): Promise<void> {
   if (payload.effortLevel) args.push('--effort-level', String(payload.effortLevel));
   if (payload.reasoningEffort) args.push('--reasoning-effort', String(payload.reasoningEffort));
 
+  await api(`/execution-environments/${environmentId}/runner/jobs/${job.id}/running`, { runnerId });
+
+  const {
+    RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON: _qualificationTrust,
+    RORCA_WAVE_PRODUCTION_ACTIVATION_KEY: _activationKey,
+    ...inheritedEnv
+  } = process.env;
+  const {
+    RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON: _overrideQualificationTrust,
+    RORCA_WAVE_PRODUCTION_ACTIVATION_KEY: _overrideActivationKey,
+    ...safeEnvOverrides
+  } = payload.envOverrides && typeof payload.envOverrides === 'object'
+    ? payload.envOverrides as Record<string, string>
+    : {};
   const child = spawn(command, args, {
     cwd: executionRoot,
     stdio: 'inherit',
     env: {
-      ...process.env,
+      ...inheritedEnv,
       RORCA_ENGINE_API_BASE_URL: engineApiBaseUrl,
-      ...(payload.envOverrides ?? {}),
+      ...safeEnvOverrides,
+      ...(embeddedPolicy ? { RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(embeddedPolicy) } : {}),
     },
   });
 

@@ -1,0 +1,721 @@
+{
+  "schemaVersion": 1,
+  "artifactId": "rorca-wave-parallel-canonical-requirements-v1",
+  "status": "immutable",
+  "sourceSpec": {
+    "id": "state-of-the-art-safe-wave-parallel-execution-qualification-and-production-enabl",
+    "slug": "state-of-the-art-safe-wave-parallel-execution-qualification-and-production-enabl",
+    "title": "State-of-the-Art Safe Wave-Parallel Execution",
+    "fileName": "state-of-the-art-safe-wave-parallel-execution-qualification-and-production-enabl.json",
+    "generatedAt": "2026-07-19T08:17:18.236Z",
+    "hashAlgorithm": "sha256",
+    "sha256": "3e47570b7b654613e2d71d496baeb6fa0e311e5a521459aba700272f98fb69d6",
+    "byteLength": 149963
+  },
+  "requirementIdScheme": "<story-id>-R<one-based two-digit acceptance-criterion ordinal>",
+  "storyCount": 12,
+  "acceptanceCriteriaCount": 125,
+  "integrity": {
+    "canonicalization": "UTF-8 JSON.stringify of flattened [{requirementId,storyId,ordinal,text}] in story and ordinal order",
+    "requirementsSha256": "5f9ddeab24fb892045d619bd0261d0e0324beaa4ad5b52c15e284d2a61f2f9f1"
+  },
+  "stories": [
+    {
+      "storyId": "WPE-001",
+      "title": "Enforce irreversible qualification isolation from production data",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-001-R01",
+          "ordinal": 1,
+          "text": "Every destructive or state-mutating qualification setup verifies a dedicated test database name, dedicated test-role ownership, test-only connection identity, and an explicit per-run isolation marker before performing work; missing or ambiguous proof aborts before any write."
+        },
+        {
+          "requirementId": "WPE-001-R02",
+          "ordinal": 2,
+          "text": "The qualification process is launched with a sanitized environment that contains no production database, queue, workspace, repository, cloud, or provider credentials; runtime checks reject mixed test/production identities even when a caller labels them as test."
+        },
+        {
+          "requirementId": "WPE-001-R03",
+          "ordinal": 3,
+          "text": "Qualification never falls back to the application DATABASE_URL, production credentials, production schemas, production pg-boss queues, or a registered non-test workspace when test configuration is absent or invalid."
+        },
+        {
+          "requirementId": "WPE-001-R04",
+          "ordinal": 4,
+          "text": "All fixture workspaces, repositories, worktrees, branch prefixes, spec IDs, run IDs, queue names, and artifact roots are synthetic and namespaced by an unpredictable qualification-run identifier."
+        },
+        {
+          "requirementId": "WPE-001-R05",
+          "ordinal": 5,
+          "text": "Filesystem cleanup is restricted by realpath containment and an ownership marker under an OS temporary root; symlinks, path traversal, missing markers, repository mismatch, and unrelated worktrees fail closed."
+        },
+        {
+          "requirementId": "WPE-001-R06",
+          "ordinal": 6,
+          "text": "Database cleanup targets only rows and queues created by the current qualification namespace; broad DELETE, TRUNCATE, DROP DATABASE, DROP SCHEMA, and pgboss schema manipulation are prohibited from the suite."
+        },
+        {
+          "requirementId": "WPE-001-R07",
+          "ordinal": 7,
+          "text": "A negative test supplies production-like database, workspace, repository, and queue identities and proves zero filesystem, Git, database, WAL, queue, and run-state mutation."
+        },
+        {
+          "requirementId": "WPE-001-R08",
+          "ordinal": 8,
+          "text": "The test process records redacted isolation identities and before/after sentinels without logging credentials, absolute private paths, or production payloads."
+        },
+        {
+          "requirementId": "WPE-001-R09",
+          "ordinal": 9,
+          "text": "No migration in this work touches hand-managed pgboss tables; pg-boss v10 queues are created through boss.createQueue only inside the dedicated test database, and any application migration is additive, rollback-reviewed, and validated only against an isolated copy/test database."
+        },
+        {
+          "requirementId": "WPE-001-R10",
+          "ordinal": 10,
+          "text": "Publish a machine-checkable invariant registry covering: no pass before integration, any rejection forces semantic failure, failed dependencies never start, only owned resources may be cleaned, accepted integration is exactly once, historical evidence is immutable, and production data is never a qualification target; every later scenario maps to these invariant IDs."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-002",
+      "title": "Prove deterministic concurrent execution and controllable fault injection",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-002-R01",
+          "ordinal": 1,
+          "text": "A deterministic fixture agent supports pass, reject-before-commit, reject-after-commit, dirty-worktree rejection, bounded sleep/barrier synchronization, merge-conflict edits, timeout, cancellation, abrupt process exit, and restart-resume scenarios."
+        },
+        {
+          "requirementId": "WPE-002-R02",
+          "ordinal": 2,
+          "text": "Each fixture runs as a real child process through the same execution adapter contract used by pipeline stories and produces bounded structured output, exit state, timestamps, and a unique execution identity."
+        },
+        {
+          "requirementId": "WPE-002-R03",
+          "ordinal": 3,
+          "text": "A barrier assertion proves at least two fixture processes overlap in wall-clock execution before either is released, so the test cannot pass through accidental sequential execution."
+        },
+        {
+          "requirementId": "WPE-002-R04",
+          "ordinal": 4,
+          "text": "Fixture behavior is selected only from versioned test-owned manifests and cannot execute arbitrary shell supplied by API payloads, inherit production credentials, or connect to external services."
+        },
+        {
+          "requirementId": "WPE-002-R05",
+          "ordinal": 5,
+          "text": "Identical seed, repository revision, and scenario produce identical source changes, commit messages, fault point, and normalized evidence excluding a documented allowlist of volatile fields."
+        },
+        {
+          "requirementId": "WPE-002-R06",
+          "ordinal": 6,
+          "text": "The fixture records whether each story started, committed, was signalled, exited, reached host validation, entered integration, and reached final closeout so dependency-blocking assertions never infer behavior from missing logs."
+        },
+        {
+          "requirementId": "WPE-002-R07",
+          "ordinal": 7,
+          "text": "Tests prove fixture processes and descendants are terminated and reaped on completion, failure, timeout, cancellation, adapter error, and harness teardown."
+        },
+        {
+          "requirementId": "WPE-002-R08",
+          "ordinal": 8,
+          "text": "A fault-point catalog names every durable boundary from queue claim through agent start, commit, host validation, integration preparation, merge/cherry-pick, integrated validation, evidence persistence, and run closeout; later crash/retry scenarios cite catalog IDs."
+        },
+        {
+          "requirementId": "WPE-002-R09",
+          "ordinal": 9,
+          "text": "An optional real-Pi smoke may validate adapter parity only after deterministic tests pass, but provider availability, rate limits, terminal output, or model opinion can never satisfy or block the authoritative qualification gate."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-003",
+      "title": "Make worktree and recovery-branch ownership explicit and leak-free",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-003-R01",
+          "ordinal": 1,
+          "text": "Every temporary story worktree and branch carries verifiable run, wave, story, attempt, base-revision, repository-common-directory, and qualification-namespace ownership metadata before an agent starts."
+        },
+        {
+          "requirementId": "WPE-003-R02",
+          "ordinal": 2,
+          "text": "Cleanup accepts only an allowlisted worktree created by the current wave whose metadata, realpath, repository common directory, branch, and expected base all match; preserve decisions always override deletion."
+        },
+        {
+          "requirementId": "WPE-003-R03",
+          "ordinal": 3,
+          "text": "Successful integration uses an expected-parent-head compare-and-swap or equivalent guarded check so a concurrently advanced run branch cannot receive a story against an unvalidated base."
+        },
+        {
+          "requirementId": "WPE-003-R04",
+          "ordinal": 4,
+          "text": "Successfully integrated story worktrees and temporary branches are removed after canonical pass finalization, while unrelated pre-existing worktrees and branches remain byte-for-byte and ref-for-ref unchanged."
+        },
+        {
+          "requirementId": "WPE-003-R05",
+          "ordinal": 5,
+          "text": "A rejected story with committed changes retains a clearly named immutable recovery branch plus bounded redacted diagnostics, but its temporary worktree directory is normally removed."
+        },
+        {
+          "requirementId": "WPE-003-R06",
+          "ordinal": 6,
+          "text": "For uncommitted or untracked changes, the engine creates a testable safe recovery snapshot that excludes ignored and secret-bearing material; if lossless safe capture cannot be proven, it preserves the worktree as an explicit exceptional fallback and emits an audited reason."
+        },
+        {
+          "requirementId": "WPE-003-R07",
+          "ordinal": 7,
+          "text": "Recovery refs and snapshots are content-addressed, collision-resistant, scoped to one story attempt, and never force-update an existing recovery ref."
+        },
+        {
+          "requirementId": "WPE-003-R08",
+          "ordinal": 8,
+          "text": "Cleanup failures cannot turn a failed story or run into success and produce actionable bounded evidence without deleting the recovery branch."
+        },
+        {
+          "requirementId": "WPE-003-R09",
+          "ordinal": 9,
+          "text": "A singleton compiled wave executes on the run worktree without creating a story worktree or temporary story branch and fails closed when a frozen manifest requires another working directory."
+        },
+        {
+          "requirementId": "WPE-003-R10",
+          "ordinal": 10,
+          "text": "Repository inventory tests compare worktrees, refs, status, active Git operations, and commits before and after every scenario and identify every intentionally preserved recovery artifact."
+        },
+        {
+          "requirementId": "WPE-003-R11",
+          "ordinal": 11,
+          "text": "Cleanup is idempotent across retries and restarts: repeating it cannot delete newly created unrelated refs, accepted run history, or a previously preserved recovery artifact."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-004",
+      "title": "Prove successful concurrent integration exactly once",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-004-R01",
+          "ordinal": 1,
+          "text": "At least two independent stories run concurrently in separate temporary worktrees, commit distinct deterministic changes, and pass the canonical host-validation and closeout contract."
+        },
+        {
+          "requirementId": "WPE-004-R02",
+          "ordinal": 2,
+          "text": "Successful contributions integrate into the run branch in a documented deterministic order derived from compiled wave order plus story ID tie-breaking, with each story commit represented exactly once and no changes copied from another worktree accidentally."
+        },
+        {
+          "requirementId": "WPE-004-R03",
+          "ordinal": 3,
+          "text": "The integration protocol has explicit prepared, integrating, integrated, integrated_validated, finalized, and failed states bound to story attempt, source commit, expected parent head, resulting head, and validation identity; restart can reconcile each state without guessing."
+        },
+        {
+          "requirementId": "WPE-004-R04",
+          "ordinal": 4,
+          "text": "A story is not marked passed in spec state, run state, story results, or WAL until its contribution is present on the run branch, the resulting tree/revision is validated, and durable finalization succeeds."
+        },
+        {
+          "requirementId": "WPE-004-R05",
+          "ordinal": 5,
+          "text": "An integration ledger or equivalent durable idempotency boundary prevents duplicate queue delivery, retry, restart, or repeated closeout from applying or finalizing the same story attempt twice."
+        },
+        {
+          "requirementId": "WPE-004-R06",
+          "ordinal": 6,
+          "text": "Before applying each contribution, the engine verifies source commit ancestry, expected target head, clean run worktree, no in-progress Git operation, and unchanged frozen execution manifest; any mismatch fails closed."
+        },
+        {
+          "requirementId": "WPE-004-R07",
+          "ordinal": 7,
+          "text": "The pipeline run row, story results, WAL events, run-state file, process exit code, and run_closeout all agree on successful completion and identify the integrated run revision."
+        },
+        {
+          "requirementId": "WPE-004-R08",
+          "ordinal": 8,
+          "text": "All successful temporary worktrees, branches, fixture processes, queue jobs, and temporary artifacts are removed after closeout while the disposable run branch remains auditable."
+        },
+        {
+          "requirementId": "WPE-004-R09",
+          "ordinal": 9,
+          "text": "The test verifies no write occurred outside the qualification database, queue namespace, disposable repository, and temporary artifact root."
+        },
+        {
+          "requirementId": "WPE-004-R10",
+          "ordinal": 10,
+          "text": "The same scenario supports bounded parallelism of two and four without changing semantic output, accepted story set, final tree hash, or deterministic integration order."
+        },
+        {
+          "requirementId": "WPE-004-R11",
+          "ordinal": 11,
+          "text": "A second independent implementation of the normalized event/integration trace checker reaches the same verdict as the engine-facing assertions, preventing the system under test from grading its own success."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-005",
+      "title": "Fail closed on rejected stories while preserving sibling progress",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-005-R01",
+          "ordinal": 1,
+          "text": "One story deliberately rejects after committing while an independent sibling in the same wave completes successfully; settled results remain correlated with their original story regardless of completion order."
+        },
+        {
+          "requirementId": "WPE-005-R02",
+          "ordinal": 2,
+          "text": "The policy for an already-running independent sibling is explicit: it may reach its current safe integration/closeout boundary, but no new dependent or later wave starts after rejection is durably accounted; cancellation policy is deterministic and tested."
+        },
+        {
+          "requirementId": "WPE-005-R03",
+          "ordinal": 3,
+          "text": "The rejected story is added to failed, rejected, and processed accounting before dependency analysis and receives failure projections in spec state, run state, WAL, story results, and local diagnostics even if one evidence channel also fails."
+        },
+        {
+          "requirementId": "WPE-005-R04",
+          "ordinal": 4,
+          "text": "The sibling contribution integrates exactly once, receives canonical pass finalization, and has its temporary worktree and branch cleaned normally."
+        },
+        {
+          "requirementId": "WPE-005-R05",
+          "ordinal": 5,
+          "text": "Every direct and transitive dependent of the rejected story is durably marked blocked_by and never starts a fixture process, creates a worktree, claims a queue job, commits, validates, or merges."
+        },
+        {
+          "requirementId": "WPE-005-R06",
+          "ordinal": 6,
+          "text": "The rejected committed recovery branch remains available while its worktree is removed; bounded API-visible reason and stack are secret/path redacted and the mode-0600 local raw diagnostic is bounded and explicitly non-portable."
+        },
+        {
+          "requirementId": "WPE-005-R07",
+          "ordinal": 7,
+          "text": "Pipeline status, run state, WAL, story result, process exit, and authoritative run_closeout all report semantic failure; no process-level run_finished event, successful sibling, cleanup success, or zero agent exit can project run success afterward."
+        },
+        {
+          "requirementId": "WPE-005-R08",
+          "ordinal": 8,
+          "text": "Failure-in-evidence-persistence tests attempt every remaining evidence channel and force an evidence-gap failure rather than silently accepting incomplete closeout."
+        },
+        {
+          "requirementId": "WPE-005-R09",
+          "ordinal": 9,
+          "text": "Rejection values cover Error, string, non-Error object, oversized/multibyte stack, secret-bearing text, absolute POSIX/Windows paths, and serialization failure while retaining bounded valid UTF-8 evidence."
+        },
+        {
+          "requirementId": "WPE-005-R10",
+          "ordinal": 10,
+          "text": "The blocked dependency closure is computed from canonical story IDs and the compiled DAG, terminates on malformed/cyclic defensive input, and never blocks an unrelated independent story."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-006",
+      "title": "Make deterministic merge conflicts recoverable and non-authoritative",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-006-R01",
+          "ordinal": 1,
+          "text": "A deterministic fixture creates a real same-hunk conflict between concurrent story branches and proves the integration order and conflict attribution are stable across completion-order permutations and replays."
+        },
+        {
+          "requirementId": "WPE-006-R02",
+          "ordinal": 2,
+          "text": "A merge-conflicted story cannot receive canonical pass finalization and produces durable failure evidence containing bounded conflicting-file identities, source commit, expected parent head, actual parent head, pre-merge head, and post-abort head."
+        },
+        {
+          "requirementId": "WPE-006-R03",
+          "ordinal": 3,
+          "text": "Any independent story already integrated successfully remains present and is not duplicated, reverted, or retroactively marked failed solely because another story conflicts."
+        },
+        {
+          "requirementId": "WPE-006-R04",
+          "ordinal": 4,
+          "text": "The conflicted recovery branch is preserved and its temporary worktree is removed after safe snapshotting; cleanup never deletes the run branch, successful sibling history, unrelated refs, or conflict evidence."
+        },
+        {
+          "requirementId": "WPE-006-R05",
+          "ordinal": 5,
+          "text": "Automatic conflict resolution, if retained, runs only under explicit bounded policy, records the generated resolution diff and resolver identity, and must re-run integrated validation; unresolved, ambiguous, policy-ineligible, or validation-failing conflicts fail closed."
+        },
+        {
+          "requirementId": "WPE-006-R06",
+          "ordinal": 6,
+          "text": "Partial Git operations are aborted before teardown, the run worktree is left clean and inspectable, and restart reconciliation can distinguish integrated, conflicted, resolution_pending, aborted, and never-attempted stories."
+        },
+        {
+          "requirementId": "WPE-006-R07",
+          "ordinal": 7,
+          "text": "The run exits non-zero and run_closeout reports failure even when every agent subprocess exited zero before the merge conflict."
+        },
+        {
+          "requirementId": "WPE-006-R08",
+          "ordinal": 8,
+          "text": "The engine documents and tests partial-wave semantics: successfully integrated independent siblings remain accepted, conflicted stories fail, dependents block, and the overall run fails without pretending wave-level atomicity."
+        },
+        {
+          "requirementId": "WPE-006-R09",
+          "ordinal": 9,
+          "text": "Conflict-path tests cover rename/delete, add/add, binary, submodule or unsupported entry, generated-file overlap, dirty target, stale target head, and resolver crash without permitting arbitrary source loss."
+        },
+        {
+          "requirementId": "WPE-006-R10",
+          "ordinal": 10,
+          "text": "After every conflict scenario, final repository inventory proves there is no MERGE_HEAD, CHERRY_PICK_HEAD, REBASE_HEAD, lock file, index conflict entry, or unowned temporary ref."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-007",
+      "title": "Harden cancellation, timeout, crash recovery, and resource backpressure",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-007-R01",
+          "ordinal": 1,
+          "text": "Cancellation and timeout signal every active fixture process and descendant, stop scheduling new stories, prevent post-cancel integration/finalization, reap children, and produce terminal story/run evidence that cannot later become success."
+        },
+        {
+          "requirementId": "WPE-007-R02",
+          "ordinal": 2,
+          "text": "A forced worker or backend crash at every cataloged durable boundary—after queue claim, agent start, commit, host validation, integration prepare, Git apply, integrated validation, evidence write, and before run closeout—is reconciled after restart without losing or double-integrating work."
+        },
+        {
+          "requirementId": "WPE-007-R03",
+          "ordinal": 3,
+          "text": "Parallelism, pending output, structured transcript, PTY/raw capture, memory, queue depth, disk usage, open files, child-process count, per-wave duration, and cleanup time have explicit configurable hard limits with fail-closed behavior and actionable diagnostics."
+        },
+        {
+          "requirementId": "WPE-007-R04",
+          "ordinal": 4,
+          "text": "Backpressure pauses or rejects new work without dropping already accepted durable evidence, reordering deterministic integration, or allowing one noisy story to starve sibling closeout."
+        },
+        {
+          "requirementId": "WPE-007-R05",
+          "ordinal": 5,
+          "text": "Crash and cancellation cleanup uses the same ownership allowlist as normal cleanup and cannot touch a worktree, process, queue job, database row, or artifact outside the qualification namespace."
+        },
+        {
+          "requirementId": "WPE-007-R06",
+          "ordinal": 6,
+          "text": "A startup reconciler classifies orphaned test worktrees, recovery refs, integration states, processes, and jobs as integrated, recoverable, safe-to-clean, or manual-review-required using immutable identities and fencing tokens rather than age alone."
+        },
+        {
+          "requirementId": "WPE-007-R07",
+          "ordinal": 7,
+          "text": "Repeated signal, crash, restart, and reconciliation delivery is idempotent and does not duplicate WAL events, story results, integration entries, recovery branches, or cleanup actions."
+        },
+        {
+          "requirementId": "WPE-007-R08",
+          "ordinal": 8,
+          "text": "Each active story attempt holds a renewable lease with a monotonically increasing fencing token; an expired or superseded worker cannot commit, integrate, finalize, or clean resources after a replacement takes ownership."
+        },
+        {
+          "requirementId": "WPE-007-R09",
+          "ordinal": 9,
+          "text": "The test suite proves SIGTERM graceful drain and SIGKILL abrupt recovery separately on supported platforms, with platform-specific process-tree handling and no assumption that POSIX signals exist on Windows."
+        },
+        {
+          "requirementId": "WPE-007-R10",
+          "ordinal": 10,
+          "text": "Resource-limit tests use bounded synthetic output and files and never intentionally exhaust the host, fill a shared disk, or destabilize unrelated services."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-008",
+      "title": "Prove governed retry and restart idempotency",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-008-R01",
+          "ordinal": 1,
+          "text": "Retry scope is derived from authoritative completion, integration-ledger, and run_closeout evidence; accepted integrated siblings are carried forward explicitly and never re-executed, re-validated as new work, or re-merged."
+        },
+        {
+          "requirementId": "WPE-008-R02",
+          "ordinal": 2,
+          "text": "A retry validates exact workspace/spec/revision, original run lineage, story attempt, base and integrated revisions, recovery ref, fencing token, queue payload, execution manifest, and approved preview before dispatch; stale or inconsistent metadata is refused."
+        },
+        {
+          "requirementId": "WPE-008-R03",
+          "ordinal": 3,
+          "text": "Retrying a rejected or conflicted story integrates its corrected contribution exactly once and leaves the original failed run, WAL events, story results, diagnostics, source commit, and recovery branch history immutable."
+        },
+        {
+          "requirementId": "WPE-008-R04",
+          "ordinal": 4,
+          "text": "Restarting the API, worker, or queue consumer before dispatch, during execution, after commit, during integration, after integrated validation, and during closeout does not lose accepted work or create duplicate commits/results."
+        },
+        {
+          "requirementId": "WPE-008-R05",
+          "ordinal": 5,
+          "text": "At-least-once queue delivery is safe: duplicate jobs for the same attempt share an idempotency key and lease identity and cannot start concurrent duplicate agents, apply the same source commit, finalize the same story, or clean each other's resources twice."
+        },
+        {
+          "requirementId": "WPE-008-R06",
+          "ordinal": 6,
+          "text": "A retry that fails again remains failed with a new immutable attempt identity and cannot overwrite prior failure reason, stack, branch, receipt, or evidence."
+        },
+        {
+          "requirementId": "WPE-008-R07",
+          "ordinal": 7,
+          "text": "The retry target is based on the latest accepted run-branch head plus explicit prior integration ancestry; it never starts from an unchanged parent that omits accepted sibling commits."
+        },
+        {
+          "requirementId": "WPE-008-R08",
+          "ordinal": 8,
+          "text": "A replay after the integration Git operation but before durable evidence commit reconciles the resulting tree/commit against prepared identities and either completes finalization once or fails manual-review-required; it never blindly applies the patch again."
+        },
+        {
+          "requirementId": "WPE-008-R09",
+          "ordinal": 9,
+          "text": "Optimistic concurrency and database uniqueness constraints or equivalent transactional guards make story-attempt finalization linearizable under simultaneous duplicate workers."
+        },
+        {
+          "requirementId": "WPE-008-R10",
+          "ordinal": 10,
+          "text": "All retry tests remain confined to the dedicated test database, test queues, disposable repository, and synthetic identifiers, and cleanup never queries or mutates an original production run."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-009",
+      "title": "Run deterministic stress, soak, and leak qualification",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-009-R01",
+          "ordinal": 1,
+          "text": "Run a seeded matrix across parallelism two and four covering success, completion-order permutations, rejection before/after commit, dirty rejection, sibling success, dependency chains, conflicts, cancellation, timeout, each crash boundary, duplicate queue delivery, restart, and retry."
+        },
+        {
+          "requirementId": "WPE-009-R02",
+          "ordinal": 2,
+          "text": "A model-based reference state machine defines allowed story, attempt, integration, wave, and run transitions; property-based generated schedules compare every observed transition and terminal state against that model."
+        },
+        {
+          "requirementId": "WPE-009-R03",
+          "ordinal": 3,
+          "text": "A CI-sized profile executes a documented minimum seed/scenario set within a bounded duration, and a separately invoked soak profile supports longer operator qualification without becoming a normal unit-test dependency."
+        },
+        {
+          "requirementId": "WPE-009-R04",
+          "ordinal": 4,
+          "text": "Normalized final source tree, commit topology, accepted story set, blocked dependency set, semantic closeout, recovery inventory, and event trace are deterministic for the same seed and scenario."
+        },
+        {
+          "requirementId": "WPE-009-R05",
+          "ordinal": 5,
+          "text": "After every iteration there are no unowned child processes, temporary worktrees, successful temporary branches, pending test queue jobs, open Git operations, database leases, or artifacts outside explicitly preserved recovery items."
+        },
+        {
+          "requirementId": "WPE-009-R06",
+          "ordinal": 6,
+          "text": "Database assertions prove every created workspace, spec, run, story result, WAL event, lease, integration record, and queue job belongs to the current qualification namespace and protected production sentinels are unchanged."
+        },
+        {
+          "requirementId": "WPE-009-R07",
+          "ordinal": 7,
+          "text": "Performance budgets cover dispatch latency, merge/closeout latency, peak memory, disk, process count, output backlog, queue lag, lease renewal, and cleanup time; thresholds are checked against explicit absolute caps plus a versioned baseline rather than undocumented machine timing."
+        },
+        {
+          "requirementId": "WPE-009-R08",
+          "ordinal": 8,
+          "text": "Qualification tests cannot hide flakes with automatic retries: the blocking profile must pass on its first attempt, while any diagnostic rerun is reported separately and never replaces the original result."
+        },
+        {
+          "requirementId": "WPE-009-R09",
+          "ordinal": 9,
+          "text": "Failures emit the seed, scenario, fault-point ID, normalized event trace, repository bundle or safe recovery references, resource samples, and exact rerun command without exposing credentials or production paths."
+        },
+        {
+          "requirementId": "WPE-009-R10",
+          "ordinal": 10,
+          "text": "Mutation tests or equivalent deliberate invariant violations prove the suite fails when pass-before-integration, missing dependency blocking, duplicate finalization, false successful closeout, or unsafe cleanup is introduced."
+        },
+        {
+          "requirementId": "WPE-009-R11",
+          "ordinal": 11,
+          "text": "A repeated-run leak sentinel measures baseline and final process, fd, worktree, ref, queue, lease, and test-row inventories and fails on monotonic growth outside documented runtime variance."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-010",
+      "title": "Publish auditable qualification evidence and operator observability",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-010-R01",
+          "ordinal": 1,
+          "text": "Each qualification run produces canonical JSON plus a deterministic human-readable report binding schema version, engine/policy/compiler versions, code revision, configuration digest, test-database identity hash, queue namespace, repository seed, invariant catalog, scenario results, Git inventories, resource budgets, and normalized evidence assertions."
+        },
+        {
+          "requirementId": "WPE-010-R02",
+          "ordinal": 2,
+          "text": "The report distinguishes automated test output, durable database/WAL evidence, Git integration proof, independent checker verdicts, operator observations, skipped checks, and environmental blockers; terminal text alone cannot satisfy a gate."
+        },
+        {
+          "requirementId": "WPE-010-R03",
+          "ordinal": 3,
+          "text": "Runtime telemetry exposes effective mode, requested/effective parallelism, active wave/story counts, attempt/lease identity, rejection/conflict/blocking counts, integration state, cleanup outcomes, preserved recovery artifacts, backpressure, and closeout status with bounded cardinality."
+        },
+        {
+          "requirementId": "WPE-010-R04",
+          "ordinal": 4,
+          "text": "Absolute paths, credentials, raw prompts, production payloads, unredacted stacks, and local-only raw diagnostics are absent from portable reports, API responses, metrics labels, frontend state, and qualification receipts."
+        },
+        {
+          "requirementId": "WPE-010-R05",
+          "ordinal": 5,
+          "text": "A qualification receipt schema contains exact source revision/tree, policy and invariant versions, test-suite digest, required scenario IDs and verdicts, platform/runtime matrix, issued/expiry times, issuer identity, report hash, and signature or authenticated digest; unknown fields and unsupported versions fail closed."
+        },
+        {
+          "requirementId": "WPE-010-R06",
+          "ordinal": 6,
+          "text": "The receipt verifier recomputes all local identities, rejects changed engine/policy/test files, missing scenarios, stale/expired receipts, untrusted issuers, malformed signatures, wrong workspace/repository, and receipts copied from another revision."
+        },
+        {
+          "requirementId": "WPE-010-R07",
+          "ordinal": 7,
+          "text": "The Run View and operator surfaces continue to treat run_closeout and validated integration evidence as authoritative and clearly label scoped retries, carried-forward stories, blocked stories, integration-pending work, and preserved recovery branches."
+        },
+        {
+          "requirementId": "WPE-010-R08",
+          "ordinal": 8,
+          "text": "Report generation, signing, publication, or telemetry failure cannot convert a failed run to success; missing required qualification evidence makes the production-enable gate unavailable."
+        },
+        {
+          "requirementId": "WPE-010-R09",
+          "ordinal": 9,
+          "text": "Publish versioned architecture, state-machine/invariant, qualification, threat-model, operations, rollout, and recovery documentation with a requirement → invariant → scenario → assertion → evidence cross-reference index."
+        },
+        {
+          "requirementId": "WPE-010-R10",
+          "ordinal": 10,
+          "text": "Portable report generation is deterministic from normalized inputs and produces the same digest across two independent invocations on the same artifact set."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-011",
+      "title": "Add governed staged production opt-in and immediate rollback",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-011-R01",
+          "ordinal": 1,
+          "text": "Production remains sequential with parallelism one by default, and ordinary UI, API, retry, queue, worker, scheduler, task-manifest, and local-runner requests cannot silently opt into wave-parallel execution."
+        },
+        {
+          "requirementId": "WPE-011-R02",
+          "ordinal": 2,
+          "text": "Production wave-parallel requires all three independent conditions: exact `RORCA_WAVE_PARALLEL_PRODUCTION_ENABLED=true`, a verified current qualification receipt supplied through a documented operator-owned configuration path, and an explicit request with `orchestrationMode=wave-parallel` plus `parallelism>1`; any missing condition is denied."
+        },
+        {
+          "requirementId": "WPE-011-R03",
+          "ordinal": 3,
+          "text": "The existing non-production `RORCA_EXPERIMENTAL_WAVE_PARALLEL=true` flag never authorizes production and cannot substitute for the production gate or qualification receipt."
+        },
+        {
+          "requirementId": "WPE-011-R04",
+          "ordinal": 4,
+          "text": "API, persisted run row, trigger options, queue payload, worker, retry path, scheduler, task-manifest broker, and local runner independently revalidate the same effective mode, parallelism, receipt identity, source revision, rollout cohort, and fencing policy immediately before spawn."
+        },
+        {
+          "requirementId": "WPE-011-R05",
+          "ordinal": 5,
+          "text": "Enabling the feature does not modify historical runs, rewrite pass flags, migrate or replay queued jobs, alter workspace defaults automatically, or approve any retry, merge, deployment, qualification, or lifecycle decision."
+        },
+        {
+          "requirementId": "WPE-011-R06",
+          "ordinal": 6,
+          "text": "Rollout supports an explicit workspace/run cohort allowlist, strict concurrency/resource caps, health thresholds, automatic stop of new parallel dispatch, and an operator kill switch that returns future work to sequential mode without corrupting in-flight evidence."
+        },
+        {
+          "requirementId": "WPE-011-R07",
+          "ordinal": 7,
+          "text": "Rollback, drain, and cancellation behavior for in-flight parallel runs is documented and tested; disabling the flag never relabels unfinished parallel work as sequential or successful."
+        },
+        {
+          "requirementId": "WPE-011-R08",
+          "ordinal": 8,
+          "text": "Every enable, deny, receipt verification, cohort change, automatic halt, and rollback decision is durably audited with actor, rationale, receipt hash, revision, requested/effective policy, and outcome but without secrets or private paths."
+        },
+        {
+          "requirementId": "WPE-011-R09",
+          "ordinal": 9,
+          "text": "A `NODE_ENV=production` policy test runs only against the dedicated test database and disposable repositories; it proves production-mode code paths without connecting to or mutating a deployed production system."
+        },
+        {
+          "requirementId": "WPE-011-R10",
+          "ordinal": 10,
+          "text": "The operator-facing status surface reports sequential-default, experimental-nonproduction, production-disabled, receipt-missing, receipt-stale, canary-enabled, halted, draining, and enabled states without presenting the environment variable itself as evidence."
+        },
+        {
+          "requirementId": "WPE-011-R11",
+          "ordinal": 11,
+          "text": "No production enablement, deployment, or auto-merge occurs as part of implementing this story; release authority remains a separate explicit human decision after independent review."
+        }
+      ]
+    },
+    {
+      "storyId": "WPE-012",
+      "title": "Complete independent safety review and PR-only release readiness",
+      "acceptanceCriteria": [
+        {
+          "requirementId": "WPE-012-R01",
+          "ordinal": 1,
+          "text": "An architecture review verifies the reference state machine, deterministic integration order, exactly-once finalization, partial-wave semantics, dependency closure, retry lineage, singleton execution, and separation between process completion and semantic success."
+        },
+        {
+          "requirementId": "WPE-012-R02",
+          "ordinal": 2,
+          "text": "A security and data-safety review proves sanitized test-process credentials, dedicated test-role/database isolation, production-data non-mutation, path/branch allowlisting, secret redaction, diagnostic bounds, command safety, fencing, and inability to forge qualification receipts or rollout authority."
+        },
+        {
+          "requirementId": "WPE-012-R03",
+          "ordinal": 3,
+          "text": "A database/queue review confirms dedicated test-role ownership, no production fallback, numbered application SQL placeholders, async access, transaction/uniqueness boundaries, boss.createQueue usage, auto-generated pg-boss UUID job IDs, and no migration or code that hand-manages pgboss tables."
+        },
+        {
+          "requirementId": "WPE-012-R04",
+          "ordinal": 4,
+          "text": "A Git/SRE review validates guarded parent-head integration, branch-only normal failure recovery, exceptional dirty-worktree preservation, cleanup idempotency, crash reconciliation, cancellation, resource budgets, observability, canary halt, drain, and rollback."
+        },
+        {
+          "requirementId": "WPE-012-R05",
+          "ordinal": 5,
+          "text": "CI runs the deterministic blocking qualification profile on supported Node versions, PostgreSQL 16, Linux, and macOS with a correctly owned isolated test database; platform-specific signal/process tests are skipped only with explicit non-blocking rationale and equivalent coverage."
+        },
+        {
+          "requirementId": "WPE-012-R06",
+          "ordinal": 6,
+          "text": "A non-production canary and bounded soak complete with no leaked resources, unexplained state divergence, automatic flaky-test retry, or unresolved critical/high review finding before production opt-in can be considered."
+        },
+        {
+          "requirementId": "WPE-012-R07",
+          "ordinal": 7,
+          "text": "The release checklist maps every requirement and invariant to scenario, assertion, durable evidence, independent checker, and named human review; it blocks on any skipped critical scenario, stale receipt, safety ambiguity, or missing rollback evidence."
+        },
+        {
+          "requirementId": "WPE-012-R08",
+          "ordinal": 8,
+          "text": "Independent reviewers cover architecture, security/red-team, database, Git/SRE, QA, and operator UX; the implementer cannot self-approve all required reviews."
+        },
+        {
+          "requirementId": "WPE-012-R09",
+          "ordinal": 9,
+          "text": "The final PR includes migration uniqueness/fresh-database validation when applicable, backend/frontend typechecks, focused and full tests, lint, build, contract/tier checks, license checks, secret scan, `git diff --check`, and a generated qualification report tied to the PR head."
+        },
+        {
+          "requirementId": "WPE-012-R10",
+          "ordinal": 10,
+          "text": "Delivery is through a reviewed pull request only with auto-merge and deployment disabled; production activation requires a separate explicit operator approval after all gates are green."
+        },
+        {
+          "requirementId": "WPE-012-R11",
+          "ordinal": 11,
+          "text": "Rollback rehearsal proves disabling production opt-in blocks new parallel dispatch immediately, preserves in-flight evidence, supports governed drain/cancel, and leaves sequential execution available."
+        },
+        {
+          "requirementId": "WPE-012-R12",
+          "ordinal": 12,
+          "text": "The final review explicitly confirms that qualification created and cleaned only namespaced test data and did not delete, truncate, reset, rewrite, or otherwise mutate existing production workspaces, specs, runs, story evidence, queues, branches, or operator records."
+        }
+      ]
+    }
+  ]
+}

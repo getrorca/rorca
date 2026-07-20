@@ -33,6 +33,11 @@ import {
   type CanonicalStoryResultStatus,
 } from './story-result-persistence';
 
+export interface FallbackReplayOptions {
+  /** Host-owned persistence seam. Omission keeps every story row proposal-only. */
+  storyResultPoster?: (payload: Record<string, unknown>) => Promise<'inserted' | 'duplicate'>;
+}
+
 export interface FallbackReplayResult {
   total: number;
   inserted: number;
@@ -45,6 +50,7 @@ export interface FallbackReplayResult {
   criticalInvalid: number;
   criticalIncomplete: boolean;
   blocksCompletion: boolean;
+  atomicFinalizations: number;
 }
 
 function isCriticalEntry(entry: FallbackResultEntry): boolean {
@@ -226,6 +232,7 @@ function optionalStringArray(value: unknown): string[] | undefined | null {
 async function replayStoryResult(
   entry: FallbackResultEntry,
   workspaceId: string,
+  options: FallbackReplayOptions,
 ): Promise<'inserted' | 'duplicate' | 'invalid'> {
   const payload = entry.payload;
   const runId = Number(payload.runId ?? entry.runId);
@@ -272,7 +279,6 @@ async function replayStoryResult(
       || Array.isArray(completionPacket) || typeof completionPacket !== 'object'))) {
     return 'invalid';
   }
-
   const input: CanonicalStoryResultInput = {
     runId,
     storyId,
@@ -300,9 +306,12 @@ async function replayStoryResult(
     expectedWorkspaceId: workspaceId,
   };
   try {
-    // Every agent-writable result status is proposal-only. It is accepted only
-    // as an exact reference to an independently immutable host result; replay
-    // never inserts terminal story authority.
+    if (payload.integrationFinalization !== undefined) {
+      if (!options.storyResultPoster) return 'invalid';
+      return await options.storyResultPoster({ ...payload, idempotencyKey: ingestKey });
+    }
+    // Every other agent-writable result status is proposal-only. It is accepted
+    // only as an exact reference to independently immutable host authority.
     return await verifyReleasedHostResultProposal(input) ? 'duplicate' : 'invalid';
   } catch (error) {
     if (error instanceof AppError) return 'invalid';
@@ -315,7 +324,11 @@ async function replayStoryResult(
  * inserted or recognized as a duplicate. A DB failure leaves the complete file
  * for the next worker reconciliation, and ingest keys make reprocessing safe.
  */
-export async function replayFallbackResults(cwd: string, workspaceId: string): Promise<FallbackReplayResult> {
+export async function replayFallbackResults(
+  cwd: string,
+  workspaceId: string,
+  options: FallbackReplayOptions = {},
+): Promise<FallbackReplayResult> {
   await flushFallbackWrites(cwd);
   const journal = readFallbackJournal(cwd);
   const entries = journal.entries;
@@ -331,6 +344,7 @@ export async function replayFallbackResults(cwd: string, workspaceId: string): P
     criticalInvalid: journal.malformed,
     criticalIncomplete: false,
     blocksCompletion: false,
+    atomicFinalizations: 0,
   };
   if (result.total === 0) return result;
 
@@ -343,13 +357,15 @@ export async function replayFallbackResults(cwd: string, workspaceId: string): P
         continue;
       }
       const canonicalSpecId = path.basename(run.spec_path, '.json');
+      const atomicFinalization = entry.type === 'story_result' && Boolean(entry.payload.integrationFinalization);
       const outcome = entry.type === 'wal'
         ? await replayWal(entry, workspaceId, canonicalSpecId)
-        : await replayStoryResult(entry, workspaceId);
+        : await replayStoryResult(entry, workspaceId, options);
       const critical = isCriticalEntry(entry);
       result[outcome === 'inserted' ? 'inserted' : outcome === 'duplicate' ? 'duplicates' : 'invalid']++;
       if (critical && outcome !== 'invalid') result.criticalCompleted++;
       if (critical && outcome === 'invalid') result.criticalInvalid++;
+      if (atomicFinalization && outcome !== 'invalid') result.atomicFinalizations++;
     }
     if (result.invalid === 0) {
       refreshReplayCompleteness(result);

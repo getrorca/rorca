@@ -29,9 +29,10 @@ describe('GitHub authority × parallel-wave reconciliation collisions', () => {
       expect(freshPayload).toContain(field);
     }
 
+    const retryInsertStart = PIPELINE.indexOf('const runResult = await client.query', PIPELINE.indexOf('const retryTriggerOptions'));
     const retryInsert = PIPELINE.slice(
-      PIPELINE.indexOf('const newRunResult = await queryOne'),
-      PIPELINE.indexOf('const newRunId =', PIPELINE.indexOf('const newRunResult = await queryOne')),
+      retryInsertStart,
+      PIPELINE.indexOf('const newRunId =', retryInsertStart),
     );
     for (const column of [
       'trigger_options', 'expected_story_ids', 'excluded_story_ids',
@@ -76,16 +77,14 @@ describe('GitHub authority × parallel-wave reconciliation collisions', () => {
     const settlement = parallel.indexOf('accountWaveSettlement({');
     const rejectionEvidence = parallel.indexOf("reasonCode: 'wave_promise_rejected'", settlement);
     const blocked = parallel.indexOf('await persistNewlyBlockedStories(wave.index)', rejectionEvidence);
-    const merge = parallel.indexOf('await mergeWave(', blocked);
-    const integratedFinalizer = parallel.indexOf('await finalizeMergedWorktree(', merge);
-    const cleanup = parallel.indexOf('selectWaveWorktreeCleanup(', integratedFinalizer);
+    const integration = parallel.indexOf('await integrateAndFinalizeWaveContribution(', blocked);
+    const cleanup = parallel.indexOf('selectWaveWorktreeCleanup(', integration);
 
     expect(settlement).toBeGreaterThan(0);
     expect(rejectionEvidence).toBeGreaterThan(settlement);
     expect(blocked).toBeGreaterThan(rejectionEvidence);
-    expect(merge).toBeGreaterThan(blocked);
-    expect(integratedFinalizer).toBeGreaterThan(merge);
-    expect(cleanup).toBeGreaterThan(integratedFinalizer);
+    expect(integration).toBeGreaterThan(blocked);
+    expect(cleanup).toBeGreaterThan(integration);
     expect(parallel).toContain('pendingCloseoutIds: new Set(pendingIntegratedPasses.keys())');
     expect(parallel).toContain('evidenceFailureIds');
   });

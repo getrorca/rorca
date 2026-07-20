@@ -184,6 +184,16 @@ export async function runPgMigrations(pool) {
                 }
                 catch (err) {
                     console.warn(`[pg-migrate] AGE extension unavailable; continuing in graph-lite mode: ${err.message || err}`);
+                    // Loading AGE can install backend hooks before CREATE EXTENSION later
+                    // fails (for example when a non-superuser owns an otherwise capable
+                    // macOS PostgreSQL installation). Those hooks then reference the
+                    // absent ag_catalog schema and poison unrelated later DDL. Discard the
+                    // backend session before continuing in graph-lite mode.
+                    try {
+                        client.release(true);
+                    }
+                    catch { /* already released or dead */ }
+                    client = await pool.connect();
                 }
                 const catalog = await client.query(`SELECT to_regclass('ag_catalog.ag_graph')::text AS graph_catalog`);
                 let legacyGraphExists = false;

@@ -168,7 +168,7 @@ router.get('/status', async (req: Request, res: Response) => {
  *               workspaceId: { type: string, description: "Workspace ID" }
  *               specId: { type: string, description: "Spec slug identifier" }
  *               specPath: { type: string, description: "Relative spec path within the workspace" }
- *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Effective story parallelism. Values above 1 are experimental and refused in production." }
+ *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Reserved for compatibility; ordinary queue entries are always sequential and wave-parallel opt-in occurs only at governed pipeline dispatch." }
  *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
  *     responses:
  *       201:
@@ -196,6 +196,9 @@ router.post('/', async (req: Request, res: Response) => {
     if (!workspaceId || !specId || !specPath) {
       throw new ValidationError('workspaceId, specId, and specPath are required');
       return;
+    }
+    if (parallelism !== undefined && Number(parallelism) > 1) {
+      throw new ValidationError('wave_parallel_denied:run_queue_is_sequential; use an explicit governed pipeline trigger at dispatch');
     }
 
     const requestedParallelism = Number(parallelism ?? 1);

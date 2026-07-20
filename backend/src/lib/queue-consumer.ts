@@ -59,6 +59,7 @@ async function triggerQueueEntry(entry: RunQueueEntry): Promise<void> {
       source: 'run-queue-consumer',
       requestedMode: entry.parallelism > 1 ? 'wave-parallel' : 'sequential',
       requestedParallelism: entry.parallelism,
+      forceSequential: true,
     }, currentWaveParallelPolicyEnvironment());
   } catch (error) {
     if (!(error instanceof WaveParallelPolicyError)) throw error;
@@ -79,6 +80,7 @@ async function triggerQueueEntry(entry: RunQueueEntry): Promise<void> {
     workspaceId: String(entry.workspace_id),
     orchestrationMode: wavePolicy.mode,
     parallelism: wavePolicy.parallelism,
+    forceSequential: true,
     autoWorktree: entry.auto_worktree === 1,
     triggerType: 'manual',
   });

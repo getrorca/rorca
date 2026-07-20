@@ -7,6 +7,8 @@
 
 import { queryOne, execute } from '../db/index';
 import { ConflictError, NotFoundError, ServiceUnavailableError } from './errors';
+import { revalidatePersistedWavePolicy } from './wave-production-governance';
+import type { WavePolicyEnvelope } from './wave-production-policy';
 
 export interface RunnerJobRow {
   id: string;
@@ -112,6 +114,31 @@ export async function markRunnerJobRunning(jobId: string, runnerId: string): Pro
   if (!row) throw new NotFoundError('Runner job', jobId);
   await execute(`UPDATE pipeline_runs SET status = 'running', started_at = COALESCE(started_at, NOW()), last_heartbeat = NOW() WHERE id = $1`, [row.run_id]);
   return row;
+}
+
+export async function revalidateRunnerJobPolicy(jobId: string, runnerId: string): Promise<WavePolicyEnvelope> {
+  const row = await queryOne<RunnerJobRow>(
+    `SELECT * FROM execution_runner_jobs
+      WHERE id = $1 AND claimed_by = $2 AND status IN ('claimed', 'running')`,
+    [jobId, runnerId],
+  );
+  if (!row) throw new NotFoundError('Runner job', jobId);
+  const payload = parsePayload(row.payload);
+  try {
+    return await revalidatePersistedWavePolicy({ runId: Number(row.run_id), queueEnvelope: payload.wavePolicy });
+  } catch (error) {
+    await execute(
+      `UPDATE execution_runner_jobs
+          SET status = 'cancelled', completed_at = NOW(), error = 'wave_policy_revalidation_denied', updated_at = NOW()
+        WHERE id = $1`,
+      [jobId],
+    );
+    await execute(
+      `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'wave_policy_revalidation_denied' WHERE id = $1`,
+      [row.run_id],
+    );
+    throw error;
+  }
 }
 
 export async function completeRunnerJob(input: {
