@@ -254,6 +254,19 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         }
       }
 
+      if (process.env.RORCA_QUALIFICATION_SKIP_VECTOR_MIGRATIONS === 'true' && /\bmemories\b/i.test(sql)) {
+        const memoriesAvailable = await client.query(`SELECT to_regclass('rorca.memories')::text AS table_name`);
+        if (!memoriesAvailable.rows[0]?.table_name) {
+          await client.query(
+            'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
+            [version, `${file} [skipped: qualification memories dependency unavailable]`],
+          );
+          skippedCount++;
+          console.warn(`[pg-migrate] Skipping memories-dependent qualification migration: ${file}`);
+          continue;
+        }
+      }
+
       // Wrap each migration in a transaction
       try {
         await client.query('BEGIN');
