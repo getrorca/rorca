@@ -100,7 +100,7 @@ jobs:
           cd backend
           DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" \
             DATABASE_URL_TEST="$RORCA_QUALIFICATION_DATABASE_URL" \
-            npm test -- --runInBand
+            npm test -- --runInBand --forceExit
       - name: Exercise real isolation and pg-boss queue ownership boundary
         run: node scripts/run-wave-qualification.mjs backend/src/__tests__/fixtures/wave-isolation-smoke-scenario.mjs > qualification-isolation-evidence.json
       - name: Run deterministic blocking profile with diagnostic-only flaky retry
@@ -226,7 +226,7 @@ jobs:
           cd backend
           DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" \
             DATABASE_URL_TEST="$RORCA_QUALIFICATION_DATABASE_URL" \
-            npm test -- --runInBand
+            npm test -- --runInBand --forceExit
       - name: Exercise real isolation and pg-boss queue ownership boundary
         run: node scripts/run-wave-qualification.mjs backend/src/__tests__/fixtures/wave-isolation-smoke-scenario.mjs > qualification-isolation-evidence.json
       - name: Run deterministic blocking profile with diagnostic-only flaky retry
