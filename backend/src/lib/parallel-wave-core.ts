@@ -214,6 +214,45 @@ export function shouldRouteCompletedRunWorktree(input: {
     && input.allSpecStoriesPassed;
 }
 
+export interface FencedWaveTaskResult<T> {
+  index: number;
+  status: 'fulfilled' | 'rejected' | 'fenced';
+  value?: T;
+  reason?: unknown;
+}
+
+/**
+ * Start at most `limit` entries and synchronously close dispatch at the first
+ * rejection. Entries already claimed keep running; no queued entry is invoked
+ * after the fence closes. This is intentionally independent of completion
+ * order and is shared by production orchestration and qualification tests.
+ */
+export async function runWaveTasksWithRejectionFence<T>(
+  tasks: readonly (() => Promise<T>)[],
+  limit: number,
+): Promise<FencedWaveTaskResult<T>[]> {
+  const results: FencedWaveTaskResult<T>[] = new Array(tasks.length);
+  let cursor = 0;
+  let dispatchClosed = false;
+  const worker = async (): Promise<void> => {
+    while (cursor < tasks.length) {
+      const index = cursor++;
+      if (dispatchClosed) {
+        results[index] = { index, status: 'fenced' };
+        continue;
+      }
+      try {
+        results[index] = { index, status: 'fulfilled', value: await tasks[index]() };
+      } catch (reason: unknown) {
+        dispatchClosed = true;
+        results[index] = { index, status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), tasks.length) }, worker));
+  return results;
+}
+
 export function parallelRunExitCode(input: {
   failedIds: ReadonlySet<string>;
   rejectedIds: ReadonlySet<string>;

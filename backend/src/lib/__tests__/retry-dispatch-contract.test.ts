@@ -11,9 +11,11 @@ import * as path from 'node:path';
 const srcRoot = path.resolve(__dirname, '..', '..');
 const pipelineSource = fs.readFileSync(path.join(srcRoot, 'routes', 'pipeline.ts'), 'utf8');
 const workerSource = fs.readFileSync(path.join(srcRoot, 'worker.ts'), 'utf8');
+const publicationSource = fs.readFileSync(path.join(srcRoot, 'lib', 'governed-retry-publication.ts'), 'utf8');
 const migration = [
   fs.readFileSync(path.join(srcRoot, 'db', 'pg-migrations', '20260715170000_retry_preview_governance.sql'), 'utf8'),
   fs.readFileSync(path.join(srcRoot, 'db', 'pg-migrations', '20260715190000_lifecycle_mutation_apis.sql'), 'utf8'),
+  fs.readFileSync(path.join(srcRoot, 'db', 'pg-migrations', '20260719107000_governed_retry_publication_cancellation.sql'), 'utf8'),
 ].join('\n');
 
 function retryRouteSource(): string {
@@ -37,58 +39,70 @@ describe('governed retry dispatch contract', () => {
   test('creates the existing retry queue, leaves UUID generation to pg-boss, and persists duplicate suppression', () => {
     expect(route).toContain("boss.createQueue('pipeline:retry')");
     expect(route).not.toMatch(/boss\.send\('pipeline:retry',[\s\S]{0,500}\bid\s*:/);
-    expect(route).toContain("data->>'originalRunId'");
-    expect(route).toContain("data->>'scopeHash'");
+    expect(route).toContain('publishGovernedRetryDispatch');
+    expect(route).not.toMatch(/FROM pgboss\.|(?:INSERT|UPDATE|DELETE)[\s\S]{0,40}pgboss\./i);
     expect(migration).toContain('CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_retry_one_dispatched_scope');
     expect(migration).toContain("WHERE status = 'dispatched'");
   });
 
-  test('preview is read-only and cancellation returns before queue creation and dispatch', () => {
-    const preview = route.indexOf('if (!previewHash)');
+  test('preview is read-only and exact cancellation terminalizes before reconciliation or queue work', () => {
     const cancellation = route.indexOf('if (cancelPreview)');
+    const cancellationCall = route.indexOf('cancelGovernedRetryPreview', cancellation);
+    const reconciliation = route.indexOf('reconcileApprovedSpecPasses');
+    const preview = route.indexOf('if (!previewHash)');
     const queueCreation = route.indexOf("boss.createQueue('pipeline:retry')");
-    expect(preview).toBeGreaterThan(-1);
-    expect(cancellation).toBeGreaterThan(preview);
-    expect(queueCreation).toBeGreaterThan(cancellation);
-    expect(route.slice(preview, cancellation)).not.toContain('INSERT INTO pipeline_retry_previews');
-    expect(route.slice(cancellation, queueCreation)).toContain('return;');
+    expect(cancellation).toBeGreaterThan(-1);
+    expect(cancellationCall).toBeGreaterThan(cancellation);
+    expect(reconciliation).toBeGreaterThan(cancellationCall);
+    expect(preview).toBeGreaterThan(reconciliation);
+    expect(queueCreation).toBeGreaterThan(preview);
+    expect(publicationSource).toContain("state = 'cancelled'");
+    expect(publicationSource).toContain("event_type, workspace_id, payload, ingest_key");
   });
 
-  test('queue unavailability refuses the preview and cancels the created retry run', () => {
+  test('queue unavailability refuses the owned preparation and queued run', () => {
     expect(route).toContain('if (!bossJobId)');
-    expect(route).toContain("refusal_reason = 'pgboss_send_returned_null'");
-    expect(route).toContain("summary = 'retry_dispatch_failed'");
+    expect(route).toContain("preparationRefusalReason = 'pgboss_send_returned_null'");
+    expect(route).toContain('refuseGovernedRetryPreparation');
+    expect(publicationSource).toContain("status = 'cancelled'");
     expect(route).toContain("throw new ServiceUnavailableError('Retry queue rejected dispatch')");
   });
 
-  test('restart/network replay returns the existing dispatched run before creating another', () => {
-    const duplicate = route.indexOf("storedPreviewRow?.status === 'dispatched'");
-    const insertRun = route.indexOf('INSERT INTO pipeline_runs');
-    expect(duplicate).toBeGreaterThan(-1);
-    expect(insertRun).toBeGreaterThan(duplicate);
-    expect(route.slice(duplicate, insertRun)).toContain('duplicate: true');
+  test('restart/network replay returns or publishes the one durably owned run', () => {
+    const reservation = route.indexOf('const reservation = await transaction');
+    const duplicate = route.indexOf("reservation.action === 'duplicate'", reservation);
+    const publish = route.indexOf("reservation.action === 'publish'", reservation);
+    const sideEffect = route.indexOf('INSERT INTO story_results', reservation);
+    expect(reservation).toBeGreaterThan(-1);
+    expect(duplicate).toBeGreaterThan(reservation);
+    expect(publish).toBeGreaterThan(duplicate);
+    expect(sideEffect).toBeGreaterThan(publish);
+    expect(route.slice(duplicate, sideEffect)).toContain('duplicate: true');
   });
 
-  test('an atomic preview claim makes concurrent/restart replay fail closed before another run insert', () => {
+  test('preview owner and queued run are committed together before preparation side effects', () => {
     const claim = route.indexOf('INSERT INTO pipeline_retry_previews');
-    const noClaim = route.indexOf('if (!approvalClaim)');
-    const inProgress = route.indexOf('Retry preview dispatch is already in progress');
-    const insertRun = route.indexOf('INSERT INTO pipeline_runs');
+    const insertRun = route.indexOf('INSERT INTO pipeline_runs', claim);
+    const owner = route.indexOf('preparation_owner', claim);
+    const sideEffect = route.indexOf('INSERT INTO story_results', insertRun);
     expect(claim).toBeGreaterThan(-1);
-    expect(noClaim).toBeGreaterThan(claim);
-    expect(inProgress).toBeGreaterThan(noClaim);
-    expect(insertRun).toBeGreaterThan(inProgress);
+    expect(insertRun).toBeGreaterThan(claim);
+    expect(owner).toBeGreaterThan(claim);
+    expect(sideEffect).toBeGreaterThan(insertRun);
+    expect(route).toContain('ambiguous_pre_run_hook_after_preparation_crash');
   });
 
-  test('worker refuses unauthorized or mismatched previews before setting running status', () => {
+  test('worker repairs or waits for publication before validation and never fails the run for prepared/approved', () => {
     const handler = workerSource.slice(workerSource.indexOf('async function handlePipelineRetry'), workerSource.indexOf('// ── Job handler: pipeline:cancel'));
-    const authorization = handler.indexOf("previewRow?.status !== 'dispatched'");
+    const publication = handler.indexOf('publishGovernedRetryDispatch');
+    const wait = handler.indexOf('waitForGovernedRetryPublication');
     const comparison = handler.indexOf('compareRetryPlanToPreview(actualRetrySpec, approvedPreview)');
-    const running = handler.indexOf("status = 'running', started_at = NOW()");
-    expect(authorization).toBeGreaterThan(-1);
-    expect(comparison).toBeGreaterThan(authorization);
+    const running = handler.indexOf("status = 'running', started_at = COALESCE(started_at, NOW())");
+    expect(publication).toBeGreaterThan(-1);
+    expect(wait).toBeGreaterThan(publication);
+    expect(comparison).toBeGreaterThan(wait);
     expect(running).toBeGreaterThan(comparison);
-    expect(handler).toContain("emitWalEvent('retry_scope_mismatch'");
+    expect(handler).not.toContain('retry_preview_not_authorized');
   });
 
   test('destructive capabilities require explicit approval and policy defaults are host enforced', () => {

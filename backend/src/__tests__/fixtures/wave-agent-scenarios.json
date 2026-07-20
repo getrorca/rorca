@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "rorca-deterministic-wave-agent-v1",
+  "scenarios": {
+    "pass": {
+      "behavior": "pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/pass.txt",
+      "commitMessage": "test(fixture): deterministic pass",
+      "spawnDescendant": true
+    },
+    "reject-before-commit": {
+      "behavior": "reject-before-commit",
+      "faultPoint": "WPE-FP-002",
+      "file": "fixture-output/reject-before.txt",
+      "commitMessage": "test(fixture): unreachable pre-commit",
+      "spawnDescendant": true
+    },
+    "reject-after-commit": {
+      "behavior": "reject-after-commit",
+      "faultPoint": "WPE-FP-004",
+      "file": "fixture-output/reject-after.txt",
+      "commitMessage": "test(fixture): deterministic post-commit rejection",
+      "spawnDescendant": true
+    },
+    "same-wave-post-commit-rejection": {
+      "behavior": "barrier-reject-after-commit",
+      "faultPoint": "WPE-FP-004",
+      "file": "fixture-output/same-wave-rejected.txt",
+      "commitMessage": "test(fixture): same-wave post-commit rejection",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "same-wave-independent-sibling": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/same-wave-sibling.txt",
+      "commitMessage": "test(fixture): same-wave independent sibling",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "dirty-worktree-rejection": {
+      "behavior": "dirty-worktree-rejection",
+      "faultPoint": "WPE-FP-004",
+      "file": "fixture-output/dirty.txt",
+      "commitMessage": "test(fixture): unreachable dirty commit",
+      "spawnDescendant": false
+    },
+    "bounded-sleep": {
+      "behavior": "bounded-sleep",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/sleep.txt",
+      "commitMessage": "test(fixture): deterministic bounded sleep",
+      "sleepMs": 40,
+      "spawnDescendant": false
+    },
+    "barrier-pass": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/barrier.txt",
+      "commitMessage": "test(fixture): deterministic barrier pass",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "parallel-a": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-a.txt",
+      "commitMessage": "test(fixture): deterministic parallel A",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "parallel-b": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-b.txt",
+      "commitMessage": "test(fixture): deterministic parallel B",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "parallel-c": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-c.txt",
+      "commitMessage": "test(fixture): deterministic parallel C",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "parallel-d": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-003",
+      "file": "fixture-output/parallel-d.txt",
+      "commitMessage": "test(fixture): deterministic parallel D",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "merge-conflict-left": {
+      "behavior": "pass",
+      "faultPoint": "WPE-FP-006",
+      "file": "shared-conflict.txt",
+      "commitMessage": "test(fixture): deterministic conflict left",
+      "spawnDescendant": false
+    },
+    "merge-conflict-right": {
+      "behavior": "pass",
+      "faultPoint": "WPE-FP-006",
+      "file": "shared-conflict.txt",
+      "commitMessage": "test(fixture): deterministic conflict right",
+      "spawnDescendant": false
+    },
+    "merge-conflict-concurrent-left": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-006",
+      "file": "shared-conflict.txt",
+      "commitMessage": "test(fixture): concurrent conflict left",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "merge-conflict-concurrent-right": {
+      "behavior": "barrier-pass",
+      "faultPoint": "WPE-FP-006",
+      "file": "shared-conflict.txt",
+      "commitMessage": "test(fixture): concurrent conflict right",
+      "barrier": { "participants": 2, "pollMs": 5, "maxWaitMs": 2000 },
+      "spawnDescendant": false
+    },
+    "timeout": {
+      "behavior": "timeout",
+      "faultPoint": "WPE-FP-002",
+      "file": "fixture-output/timeout.txt",
+      "commitMessage": "test(fixture): unreachable timeout commit",
+      "sleepMs": 10000,
+      "spawnDescendant": true
+    },
+    "cancellation": {
+      "behavior": "cancellation",
+      "faultPoint": "WPE-FP-002",
+      "file": "fixture-output/cancel.txt",
+      "commitMessage": "test(fixture): unreachable cancellation commit",
+      "sleepMs": 10000,
+      "spawnDescendant": true
+    },
+    "abrupt-exit": {
+      "behavior": "abrupt-exit",
+      "faultPoint": "WPE-FP-002",
+      "file": "fixture-output/abrupt.txt",
+      "commitMessage": "test(fixture): unreachable abrupt commit",
+      "spawnDescendant": true
+    },
+    "restart-resume": {
+      "behavior": "restart-resume",
+      "faultPoint": "WPE-FP-008",
+      "file": "fixture-output/restart.txt",
+      "commitMessage": "test(fixture): deterministic restart resume",
+      "spawnDescendant": false
+    }
+  }
+}

@@ -36,6 +36,10 @@ export type HostValidationRequirement = Readonly<Omit<StoryValidationRequirement
 
 export interface HostValidationRunnerOptions {
   env?: Record<string, string>;
+  /** Validate the immutable command against an allowed integrated target instead of its source story worktree. */
+  workingDirectoryOverride?: string;
+  /** Runtime policy may shorten, but never extend, the immutable manifest timeout. */
+  timeoutCapMs?: number;
   outputReference?: string;
   criterionIds?: string[];
   now?: () => Date;
@@ -138,7 +142,7 @@ export function runHostValidationRequirement(
 
   const now = options.now ?? (() => new Date());
   const startedAt = now().toISOString();
-  const cwd = manifest.commandSafety.guardedWorkingDirectory;
+  const cwd = options.workingDirectoryOverride ?? manifest.commandSafety.guardedWorkingDirectory;
   const baseEnv = { ...(process.env as Record<string, string>), ...(options.env ?? {}) };
   const environment = environmentProfile(manifest, baseEnv);
   const fallbackRevision = manifest.execution.worktree.baseRevision;
@@ -162,11 +166,14 @@ export function runHostValidationRequirement(
     branch = gitValue(actualCwd, ['branch', '--show-current'], branch);
     const guard = createAutonomousCommandGuard({ cwd: actualCwd, env: baseEnv });
     guardBinDir = guard.guardBinDir;
+    const timeoutMs = options.timeoutCapMs === undefined
+      ? requirement.timeoutMs
+      : Math.max(1, Math.min(requirement.timeoutMs, Math.floor(options.timeoutCapMs)));
     const result = spawnSync(requirement.command, [...requirement.args], {
       cwd: actualCwd,
       env: guard.env,
       encoding: 'utf8',
-      timeout: requirement.timeoutMs,
+      timeout: timeoutMs,
       maxBuffer: HOST_VALIDATION_MAX_BUFFER,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -178,7 +185,7 @@ export function runHostValidationRequirement(
 
     if (result.error && (result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
       classification = 'environment_unavailable';
-      termination = { kind: 'timed_out', timeoutMs: requirement.timeoutMs };
+      termination = { kind: 'timed_out', timeoutMs };
       remediation = 'Increase the governed timeout or make the required validation bounded, then rerun it.';
     } else if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') {
       classification = 'environment_unavailable';

@@ -20,7 +20,8 @@ interface QueuedRunRow {
   auto_merge: boolean;
   merge_strategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' | null;
   include_graph: boolean;
-  terminal_mode: 'ansi-html' | 'pty' | null;
+  terminal_mode: 'ansi-html' | 'pty' | 'native-pty' | null;
+  execution_environment: 'remote-rorca' | 'local-user' | null;
   agent_type: 'claude' | 'opencode' | 'codex' | 'pi';
   agent_model: string | null;
   effective_options: { effort?: string | null } | null;
@@ -84,6 +85,17 @@ async function getQueueMaxConcurrent(): Promise<number> {
   return DEFAULT_QUEUE_MAX_CONCURRENT;
 }
 
+async function failQueuedDispatch(runId: number | string, reason: string): Promise<void> {
+  await queryOne(
+    `UPDATE pipeline_runs
+        SET status = 'failed', finished_at = NOW(), summary = $2
+      WHERE id = $1 AND status = 'queued'
+      RETURNING id`,
+    [runId, reason],
+  );
+  logger.error(`[RunQueue] Failed to dispatch queued run ${runId}: ${reason}`);
+}
+
 /**
  * Advance the run queue for a workspace: find the next queued run,
  * promote it to 'running' by triggering the pipeline internally.
@@ -118,8 +130,8 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
     // Find the next queued run (oldest first), including auto_worktree
     const nextQueued = await queryOne<QueuedRunRow>(
       `SELECT id, spec_path, workspace_id, queued_at, queue_position, parallelism, auto_worktree,
-              auto_merge, merge_strategy, include_graph, terminal_mode, agent_type,
-              agent_model, effective_options, trigger_options
+              auto_merge, merge_strategy, include_graph, terminal_mode, execution_environment,
+              agent_type, agent_model, effective_options, trigger_options
          FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
        ORDER BY queued_at ASC NULLS LAST, id ASC LIMIT 1`,
@@ -163,25 +175,33 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
         orchestrationMode: nextQueued.parallelism > 1 ? 'wave-parallel' : 'sequential',
         parallelism: nextQueued.parallelism,
         forceSequential: nextQueued.parallelism <= 1,
+        qualificationReceiptId: nextQueued.trigger_options?.qualificationReceiptId,
+        rolloutCohort: nextQueued.trigger_options?.rolloutCohort,
         triggerOptions: nextQueued.trigger_options ?? undefined,
         autoWorktree: nextQueued.auto_worktree,
         autoMerge: nextQueued.auto_merge,
         mergeStrategy: nextQueued.merge_strategy ?? 'branch-only',
         includeGraph: nextQueued.include_graph,
         terminalMode: nextQueued.terminal_mode ?? 'ansi-html',
+        executionEnvironment: nextQueued.execution_environment ?? 'remote-rorca',
+        executionEnvironmentId: nextQueued.trigger_options?.executionEnvironmentId,
         agentOverride: nextQueued.agent_type,
         modelOverride: nextQueued.agent_model ?? undefined,
-        effortLevel: nextQueued.effective_options?.effort ?? undefined,
+        thinkingEnabled: nextQueued.trigger_options?.thinkingEnabled,
+        thinkingBudget: nextQueued.trigger_options?.thinkingBudget,
+        effortLevel: nextQueued.effective_options?.effort ?? nextQueued.trigger_options?.effortLevel,
+        reasoningEffort: nextQueued.trigger_options?.reasoningEffort,
       }),
     }).then(async (resp) => {
       if (!resp.ok) {
         const body = await resp.text();
-        logger.error(`[RunQueue] Failed to trigger queued run ${nextQueued.id}: ${resp.status} ${body}`);
+        await failQueuedDispatch(nextQueued.id, `HTTP ${resp.status}: ${body.slice(0, 500)}`);
       } else {
         logger.info(`[RunQueue] Successfully triggered queued run ${nextQueued.id}`);
       }
-    }).catch((err) => {
-      logger.error(`[RunQueue] HTTP trigger failed for run ${nextQueued.id}:`, err);
+    }).catch(async (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      await failQueuedDispatch(nextQueued.id, `HTTP trigger failed: ${message}`);
     });
   } catch (err) {
     logger.error(`[RunQueue] advanceQueue error: ${err}`);
