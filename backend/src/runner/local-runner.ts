@@ -31,6 +31,7 @@ import {
   enforceWaveDispatchConsistency,
   WaveParallelPolicyError,
 } from '../lib/wave-parallel-policy';
+import { assertWavePolicyEnvelopeIntegrity, type WavePolicyEnvelope } from '../lib/wave-production-policy';
 
 const apiUrl = (process.env.RORCA_API_URL ?? 'http://localhost:3030/api').replace(/\/$/, '');
 const environmentId = process.env.RORCA_RUNNER_ENVIRONMENT_ID ?? 'local-user';
@@ -183,13 +184,36 @@ async function runJob(job: any): Promise<void> {
   if (payload.effortLevel) args.push('--effort-level', String(payload.effortLevel));
   if (payload.reasoningEffort) args.push('--reasoning-effort', String(payload.reasoningEffort));
 
+  // The remote authority revalidates the persisted receipt/fence immediately
+  // before local spawn. The local runner never inherits verifier credentials.
+  const embeddedPolicy = payload.wavePolicy as WavePolicyEnvelope | undefined;
+  if (Number(payload.parallelism ?? 1) > 1 && !embeddedPolicy) {
+    throw new Error('wave_parallel_denied:local_runner_missing_policy');
+  }
+  if (embeddedPolicy) assertWavePolicyEnvelopeIntegrity(embeddedPolicy);
+  const currentPolicy = await api<{
+    allowed: boolean;
+    effective: { orchestrationMode: 'sequential' | 'wave-parallel'; parallelism: number };
+    fence: string;
+  }>(`/execution-environments/${environmentId}/runner/jobs/${job.id}/revalidate`, { runnerId });
+  if ((embeddedPolicy && currentPolicy.fence !== embeddedPolicy.fence)
+    || currentPolicy.effective.parallelism !== Number(payload.parallelism ?? 1)
+    || currentPolicy.effective.orchestrationMode !== (Number(payload.parallelism ?? 1) > 1 ? 'wave-parallel' : 'sequential')) {
+    throw new Error('wave_parallel_denied:local_runner_policy_drift');
+  }
+  const {
+    RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON: _qualificationTrust,
+    RORCA_WAVE_PRODUCTION_ACTIVATION_KEY: _activationKey,
+    ...inheritedEnv
+  } = process.env;
   const child = spawn(command, args, {
     cwd: workspacePath,
     stdio: 'inherit',
     env: {
-      ...process.env,
+      ...inheritedEnv,
       RORCA_ENGINE_API_BASE_URL: engineApiBaseUrl,
       ...(payload.envOverrides ?? {}),
+      ...(embeddedPolicy ? { RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(embeddedPolicy) } : {}),
     },
   });
 

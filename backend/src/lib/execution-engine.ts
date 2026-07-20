@@ -37,6 +37,7 @@
  */
 
 import { spawn, execSync, type ChildProcess } from 'child_process';
+import { assertWavePolicyEnvelopeIntegrity, type WavePolicyEnvelope } from './wave-production-policy';
 import { createHash, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import * as fs from 'fs';
@@ -1256,7 +1257,9 @@ async function postStoryResult(
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)
+      && k !== 'RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON'
+      && k !== 'RORCA_WAVE_PRODUCTION_ACTIVATION_KEY') {
       env[k] = v;
     }
   }
@@ -7862,6 +7865,42 @@ async function runWithBoundedConcurrency<T>(
 
 async function main(): Promise<void> {
   const config = parseArgs();
+
+  // Parallel engine invocations must carry immutable dispatch authority. Direct
+  // experimental execution remains non-production-only; production is always
+  // fenced to a current, governed receipt.
+  if (config.parallelism > 1) {
+    const serializedPolicy = process.env.RORCA_GOVERNED_WAVE_POLICY;
+    if (!serializedPolicy) {
+      if (process.env.NODE_ENV === 'production' || process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL !== 'true') {
+        throw new Error('[wave-production-policy] direct parallel engine start lacks governed dispatch evidence');
+      }
+    } else {
+      let policy: WavePolicyEnvelope;
+      try {
+        policy = JSON.parse(serializedPolicy) as WavePolicyEnvelope;
+        assertWavePolicyEnvelopeIntegrity(policy);
+      } catch {
+        throw new Error('[wave-production-policy] engine dispatch envelope is invalid');
+      }
+      if (!policy.allowed || policy.runId !== config.runId || policy.workspaceId !== config.workspaceId
+        || policy.effective.orchestrationMode !== 'wave-parallel' || policy.effective.parallelism !== config.parallelism
+        || policy.requested.rolloutCohort !== policy.rollout.cohort) {
+        throw new Error('[wave-production-policy] engine mode, parallelism, run, workspace, cohort, or fence differs from dispatch evidence');
+      }
+      const currentRevision = execSync('git rev-parse HEAD', { cwd: config.cwd, encoding: 'utf8' }).trim();
+      if (policy.receipt && policy.receipt.sourceRevision !== currentRevision) {
+        throw new Error('[wave-production-policy] engine source revision differs from dispatch receipt');
+      }
+      if (process.env.NODE_ENV === 'production' || policy.status === 'canary-enabled' || policy.status === 'enabled') {
+        if (process.env.RORCA_WAVE_PARALLEL_PRODUCTION_ENABLED !== 'true' || !policy.receipt
+          || policy.receipt.id !== policy.requested.qualificationReceiptId
+          || policy.receipt.sourceRevision !== currentRevision) {
+          throw new Error('[wave-production-policy] production engine receipt or source revision is not current');
+        }
+      }
+    }
+  }
 
   if (process.env.RORCA_AGENT === 'pi' && process.env.RORCA_PROCESS_ROLE === 'engine' && isPiExternalOrchestrationEnabled()) {
     logger.info('[Pi-native] External Pi orchestration enabled — execution engine standing by');
