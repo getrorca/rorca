@@ -112,10 +112,13 @@ export async function ensureQueues(boss: PgBoss): Promise<void> {
   await boss.createQueue('workspace:hydrate');
   await boss.createQueue('context:capture');
   await boss.createQueue('context:distill');
+  // pg-boss v10+ requires scheduled queue names to exist before schedule().
+  await boss.createQueue('queue-snapshot-prune');
+  await boss.createQueue('integration:health-check');
   await boss.createQueue('spec:match-skills');
   await boss.createQueue('spec:memory-synthesis');
   await boss.createQueue('spec:suggest-skills');
-  logger.debug('[pg-boss] ensureQueues — pipeline, reviewed PR delivery, context capture/distillation, and spec job queues created');
+  logger.debug('[pg-boss] ensureQueues — pipeline, reviewed PR delivery, maintenance, context capture/distillation, and spec job queues created');
 }
 
 /**
