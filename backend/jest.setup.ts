@@ -54,6 +54,7 @@ export default async function globalSetup(): Promise<void> {
 
     // Test harness shim for Supabase/PostgREST auth helpers used by RLS migrations.
     // Local Postgres doesn't provide auth schema/functions, so create minimal stubs.
+    let authenticatedRoleAvailable = true;
     try {
       await testPool.query(`
         DO $$
@@ -67,6 +68,7 @@ export default async function globalSetup(): Promise<void> {
       // Qualification uses a deliberately least-privilege owner role. Its
       // isolated database does not need a cluster-global test helper role.
       if ((error as { code?: string }).code !== '42501') throw error;
+      authenticatedRoleAvailable = false;
       console.warn('[jest-setup] authenticated helper role unavailable under least-privilege qualification role');
     }
 
@@ -145,10 +147,12 @@ export default async function globalSetup(): Promise<void> {
     `);
 
     // Test-only grant shim so RLS tests exercise policies instead of failing on SQL GRANTs.
-    await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
-    await testPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, rorca, auth TO authenticated`);
-    await testPool.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public, rorca TO authenticated`);
-    await testPool.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public, rorca, auth TO authenticated`);
+    if (authenticatedRoleAvailable) {
+      await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
+      await testPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, rorca, auth TO authenticated`);
+      await testPool.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public, rorca TO authenticated`);
+      await testPool.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public, rorca, auth TO authenticated`);
+    }
 
     console.log('[jest-setup] Migrations applied to test database');
   } finally {
