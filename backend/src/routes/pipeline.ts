@@ -158,10 +158,10 @@ import {
 } from '../lib/execution-secret-references';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
 import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
+import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
 import {
   currentWaveParallelPolicyEnvironment,
   enforceWaveParallelPolicy,
-  type EffectiveWaveParallelPolicy,
   type WaveExecutionMode,
 } from '../lib/wave-parallel-policy';
 
@@ -248,57 +248,54 @@ function autoSelectOrchestration(userStories: WaveUserStory[]): {
   };
 }
 
-function resolveTriggerWavePolicy(input: {
+async function resolveTriggerWavePolicy(input: {
+  workspaceId: string;
   workspacePath: string;
   stories: WaveUserStory[];
   requestedMode?: WaveExecutionMode;
   requestedParallelism?: number;
+  qualificationReceiptId?: string;
+  rolloutCohort?: string;
   forceSequential?: boolean;
   terminalMode: TerminalMode;
   specificStory?: string;
-}): {
-  policy: EffectiveWaveParallelPolicy;
+}): Promise<{
+  policy: { mode: WaveExecutionMode; parallelism: number };
   orchestration: ReturnType<typeof autoSelectOrchestration>;
-} {
+}> {
   const analysis = autoSelectOrchestration(input.stories);
-  let workspaceParallelRequested = false;
-  try {
-    const configPath = path.join(input.workspacePath, '.rorca', 'config.json');
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { execution?: { waveParallelism?: boolean } };
-      workspaceParallelRequested = config.execution?.waveParallelism === true;
-    }
-  } catch {
-    // Invalid/missing config is never authority to broaden execution.
+  const forcedSequential = input.forceSequential === true || Boolean(input.specificStory);
+  const explicitWave = !forcedSequential
+    && input.requestedMode === 'wave-parallel'
+    && (input.requestedParallelism ?? 1) > 1;
+  const envelope = await resolveWaveProductionPolicy({
+    workspaceId: input.workspaceId,
+    workspacePath: input.workspacePath,
+    request: forcedSequential
+      ? { orchestrationMode: 'sequential', parallelism: 1 }
+      : {
+          orchestrationMode: input.requestedMode,
+          parallelism: input.requestedParallelism,
+          qualificationReceiptId: input.qualificationReceiptId,
+          rolloutCohort: input.rolloutCohort,
+        },
+  });
+  if (explicitWave && !envelope.allowed) {
+    await auditWaveProductionDecision({ envelope, actor: 'local-operator', rationale: `API dispatch denied: ${envelope.reason}` });
+    throw new ForbiddenError(`wave_parallel_denied:${envelope.status}:${envelope.reason}`);
   }
-
-  const explicitlyParallel = input.requestedMode === 'wave-parallel'
-    || (input.requestedParallelism ?? 1) > 1;
-  const forcedSequential = input.forceSequential === true
-    || isPtyTerminalMode(input.terminalMode)
-    || Boolean(input.specificStory);
-  const parallelRequested = explicitlyParallel
-    || (workspaceParallelRequested && !forcedSequential);
-  const policy = enforceWaveParallelPolicy({
-    source: 'pipeline-trigger',
-    requestedMode: input.requestedMode ?? (parallelRequested ? 'wave-parallel' : 'sequential'),
-    requestedParallelism: parallelRequested
-      ? (input.requestedParallelism ?? Math.max(2, analysis.parallelism))
-      : 1,
-    forceSequential: forcedSequential,
-  }, currentWaveParallelPolicyEnvironment());
-
+  if (explicitWave && isPtyTerminalMode(input.terminalMode)) {
+    await auditWaveProductionDecision({ envelope, actor: 'local-operator', rationale: 'PTY terminal requires sequential wave execution', eventType: 'deny', outcome: 'denied' });
+    throw new ValidationError('wave_parallel_denied:pty_terminal_requires_sequential');
+  }
+  const policy = { mode: envelope.effective.orchestrationMode, parallelism: envelope.effective.parallelism };
   return {
     policy,
     orchestration: {
       ...analysis,
       mode: policy.mode,
       parallelism: policy.parallelism,
-      reason: policy.mode === 'wave-parallel'
-        ? `experimental opt-in; ${analysis.reason}`
-        : forcedSequential
-          ? 'sequential execution explicitly or terminal/story scoped'
-          : 'safe control-plane default',
+      reason: policy.mode === 'wave-parallel' ? envelope.reason : 'safe control-plane default',
     },
   };
 }
@@ -1332,7 +1329,9 @@ const PipelineTriggerSchema = z.object({
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional(),
-  parallelism: z.number().int().min(1).max(10).optional(),
+  parallelism: z.number().int().min(1).max(4).optional(),
+  qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]).optional(),
+  rolloutCohort: z.string().min(1).max(128).optional(),
   forceSequential: z.boolean().optional(),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
@@ -1405,7 +1404,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, qualificationReceiptId, rolloutCohort, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1569,11 +1568,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       passes: story.passes,
       excluded: story.excluded,
     }));
-    const { policy: waveExecutionPolicy, orchestration } = resolveTriggerWavePolicy({
+    const { policy: waveExecutionPolicy, orchestration } = await resolveTriggerWavePolicy({
+      workspaceId: workspace.id,
       workspacePath: workspace.path,
       stories: waveStories,
       requestedMode: orchestrationMode,
       requestedParallelism,
+      qualificationReceiptId: qualificationReceiptId === undefined ? undefined : String(qualificationReceiptId),
+      rolloutCohort,
       forceSequential,
       terminalMode: resolvedTerminalMode,
       specificStory: storyId,

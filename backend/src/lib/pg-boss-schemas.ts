@@ -115,7 +115,6 @@ export const PipelineRunJobPayload = z.object({
   specificStory: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional().default('sequential'),
-  parallelism: z.number().int().min(1).max(10).optional().default(1),
   includeGraph: z.boolean().optional().default(false),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
