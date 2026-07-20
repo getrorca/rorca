@@ -189,35 +189,6 @@ function parseCandidateId(value: unknown): number {
   return parsed;
 }
 
-function parsePolicyMode(value: unknown): CapturePolicyMode {
-  return normalizeCapturePolicyMode(value, 'metadata-only');
-}
-
-function parseImportVendor(value: unknown): ExternalMemoryImportVendor {
-  const vendor = assertString(value, 'vendor') as ExternalMemoryImportVendor;
-  return vendor;
-}
-
-function parseImportFormat(value: unknown): ExternalMemoryImportFormat | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (value === 'json' || value === 'jsonl' || value === 'markdown') return value;
-  throw new ValidationError('Invalid import format', { format: value });
-}
-
-function resolveWorkspaceSourceFile(workspacePath: string, value: unknown): string | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  const raw = assertString(value, 'sourceFile');
-  const resolved = path.isAbsolute(raw) ? raw : path.resolve(workspacePath, raw);
-  assertInsideWorkspace(workspacePath, resolved, 'sourceFile');
-  return resolved;
-}
-
-function isCliCapturePayload(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') return false;
-  const eventType = (payload as Record<string, unknown>).eventType;
-  return eventType === 'cli_command' || eventType === 'shell_command' || eventType === 'agent_cli_session' || typeof (payload as Record<string, unknown>).command === 'string';
-}
-
 function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -428,18 +399,26 @@ function publish(workspaceId: string, event: Record<string, unknown>): void { br
 router.post('/bootstrap/verify', async (req, res) => {
   const workspaceId = requiredString(req.body.workspaceId, 'workspaceId');
   const workspace = await loadWorkspace(workspaceId);
-  const workspacePath = path.resolve(requiredString(req.body.workspacePath, 'workspacePath'));
-  if (workspacePath !== path.resolve(workspace.path)) throw new ValidationError('workspacePath does not match registered workspace path');
-  if (!fs.existsSync(workspacePath)) throw new ValidationError('Registered workspace path does not exist');
-  const expected = {
-    queuePath: path.join(workspacePath, '.rorca-capture-queue.jsonl'),
-    redactionConfigPath: path.join(workspacePath, '.rorca', 'capture', 'redaction.json'),
-    captureIgnorePath: path.join(workspacePath, '.rorca-captureignore'),
-  };
-  for (const [name, value] of Object.entries(expected)) {
-    if (path.resolve(requiredString(req.body[name], name)) !== path.resolve(value)) throw new ValidationError(`${name} must be ${path.relative(workspacePath, value)}`);
-  }
-  res.json({ ok: true, workspace, checks: Object.entries(expected).map(([id, value]) => ({ id, ok: true, path: value })) });
+  const registeredPath = path.resolve(requiredString(req.body.workspacePath, 'workspacePath'));
+  if (registeredPath !== path.resolve(workspace.path)) throw new ValidationError('workspacePath does not match registered workspace path');
+  if (!fs.existsSync(registeredPath)) throw new ValidationError('Registered workspace path does not exist');
+
+  const queuePath = path.resolve(requiredString(req.body.queuePath, 'queuePath'));
+  const redactionConfigPath = path.resolve(requiredString(req.body.redactionConfigPath, 'redactionConfigPath'));
+  const captureIgnorePath = path.resolve(requiredString(req.body.captureIgnorePath, 'captureIgnorePath'));
+  assertExpectedBootstrapPath(registeredPath, queuePath, 'queuePath', '.rorca-capture-queue.jsonl');
+  assertExpectedBootstrapPath(registeredPath, redactionConfigPath, 'redactionConfigPath', path.join('.rorca', 'capture', 'redaction.json'));
+  assertExpectedBootstrapPath(registeredPath, captureIgnorePath, 'captureIgnorePath', '.rorca-captureignore');
+
+  res.json({
+    ok: true,
+    workspace,
+    checks: [
+      { id: 'queuePath', ok: true, path: queuePath },
+      { id: 'redactionConfigPath', ok: true, path: redactionConfigPath },
+      { id: 'captureIgnorePath', ok: true, path: captureIgnorePath },
+    ],
+  });
 });
 
 /**
@@ -450,6 +429,18 @@ router.post('/bootstrap/verify', async (req, res) => {
  *     summary: Submit a policy-gated context event
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Always-on telemetry submission is an operator-controlled write gated by explicit local policy and pause state."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, source, occurredAt, payload]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               source: { type: string }
+ *               occurredAt: { type: string, format: date-time }
+ *               payload: { type: object }
  *     responses:
  *       200: { description: Event accepted or safely suppressed }
  *       503: { description: Queue unavailable; caller retains its redacted local copy }

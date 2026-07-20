@@ -116,6 +116,15 @@ Migration path:
 - Existing metadata updates may omit the new execution-control fields.
 - Clients should validate supported agent/reasoning values before sending them.
 
+<!-- contract-break: 2026-07-19 POST /api/pipeline/runs/{runId}/input -->
+## 2026-07-19 `POST /api/pipeline/runs/{runId}/input`
+
+Justification: PTY v2 binds interactive input to the exact active generation token and accepts only bounded base64-encoded UTF-8, preventing a stale browser or prior retry from writing into a replacement process.
+
+Migration path:
+- Obtain `generationToken` from the active generation metadata and send it with `dataBase64`.
+- Stop sending the legacy unscoped input shape; refresh generation metadata after rollover or HTTP 403/409.
+
 <!-- contract-break: 2026-07-15 GET /api/pipeline/runs/{runId}/output -->
 ## 2026-07-15 `GET /api/pipeline/runs/{runId}/output`
 

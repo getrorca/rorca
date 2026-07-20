@@ -114,12 +114,18 @@ describe('interactive PTY agent adapter primitives', () => {
       agentType: 'pi',
       completionMarker: marker,
       markerFilePath: '.rorca/progress/run-7/PTY-123.done.json',
+      generationId: '11111111-1111-4111-8111-111111111111',
+      generationToken: '22222222-2222-4222-8222-222222222222',
+      attempt: 2,
     });
 
     expect(prompt).toContain('Implement the feature.');
     expect(prompt).not.toContain(marker);
     expect(prompt).toContain('Build it by concatenating these JSON string parts');
     expect(prompt).toContain('.rorca/progress/run-7/PTY-123.done.json');
+    expect(prompt).toContain('generationId "11111111-1111-4111-8111-111111111111"');
+    expect(prompt).toContain('generationToken "22222222-2222-4222-8222-222222222222"');
+    expect(prompt).toContain('and attempt 2');
     expect(prompt).toContain('status file is Rorca\'s primary turn-completion signal');
     expect(prompt).toContain('does not mean the story passed');
     expect(prompt).toContain('merge and validation gates');

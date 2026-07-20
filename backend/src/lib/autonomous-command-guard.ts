@@ -99,11 +99,11 @@ function writeExecutable(filePath: string, content: string): void {
 }
 
 function buildWrapper(command: string, realCommand: string | null, profile: 'general' | 'conflict-resolution'): string {
-  const execTarget = realCommand ? shellQuote(realCommand) : command;
   return `#!/usr/bin/env bash
 set -euo pipefail
 
 cmd_name=${shellQuote(command)}
+real_command=${shellQuote(realCommand ?? '')}
 workspace_root="\${RORCA_AUTONOMOUS_WORKSPACE_ROOT:-}"
 allow_backend_jest="\${RORCA_ALLOW_BACKEND_JEST:-}"
 database_url="\${DATABASE_URL:-}"
@@ -182,11 +182,13 @@ if [[ $is_jest_like -eq 1 ]]; then
     if [[ -n "\${RORCA_AUTONOMOUS_BACKEND_JEST_PGUSER:-}" ]]; then export PGUSER="$RORCA_AUTONOMOUS_BACKEND_JEST_PGUSER"; fi
     if [[ -n "\${RORCA_AUTONOMOUS_BACKEND_JEST_PGPASSWORD:-}" ]]; then export PGPASSWORD="$RORCA_AUTONOMOUS_BACKEND_JEST_PGPASSWORD"; fi
     if [[ -n "\${RORCA_AUTONOMOUS_BACKEND_JEST_PGDATABASE:-}" ]]; then export PGDATABASE="$RORCA_AUTONOMOUS_BACKEND_JEST_PGDATABASE"; fi
-    exec ${execTarget} "$@"
+    if [[ -z "$real_command" ]]; then echo "[Rorca autonomous command guard] Allowed test command is unavailable outside the guard PATH." >&2; exit 127; fi
+    exec "$real_command" "$@"
   fi
 
   if [[ "$allow_backend_jest" == "true" && "$database_url" =~ _test($|[?&/]) ]]; then
-    exec ${execTarget} "$@"
+    if [[ -z "$real_command" ]]; then echo "[Rorca autonomous command guard] Allowed test command is unavailable outside the guard PATH." >&2; exit 127; fi
+    exec "$real_command" "$@"
   fi
   cat >&2 <<'RORCA_GUARD_MESSAGE'
 [Rorca autonomous command guard] Blocked backend/Jest-style test command.
@@ -200,7 +202,8 @@ RORCA_GUARD_MESSAGE
   exit 126
 fi
 
-exec ${execTarget} "$@"
+if [[ -z "$real_command" ]]; then echo "[Rorca autonomous command guard] Command is unavailable outside the guard PATH." >&2; exit 127; fi
+exec "$real_command" "$@"
 `;
 }
 

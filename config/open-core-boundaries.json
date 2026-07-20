@@ -77,6 +77,26 @@
       "reason": "PTY release evidence and remaining manual gates apply to both repositories."
     },
     {
+      "path": "docs/wave-parallel-experimental-gate.md",
+      "reason": "Experimental parallel-wave safety and rollout guidance applies to both repositories."
+    },
+    {
+      "path": "docs/pty-recovery-operations.md",
+      "reason": "PTY recovery operations and rollback guidance apply to both repositories."
+    },
+    {
+      "path": "docs/pty-transcript-raw-archive.md",
+      "reason": "PTY transcript and raw-archive guarantees apply to both repositories."
+    },
+    {
+      "path": "docs/pty-noisy-recovery-release-evidence.md",
+      "reason": "Deterministic PTY release evidence and review gates apply to both repositories."
+    },
+    {
+      "path": "docs/evidence/pty-noisy-recovery-benchmark.json",
+      "reason": "Bounded deterministic PTY benchmark evidence is part of the shared release gate."
+    },
+    {
       "path": ".github/workflows/secret-scan.yml",
       "reason": "Shared repo safety automation can be imported into OpenCore if desired."
     },

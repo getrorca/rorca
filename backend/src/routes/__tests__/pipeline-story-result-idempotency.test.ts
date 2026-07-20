@@ -502,94 +502,13 @@ describe('story-result integrated-pass atomic retry boundary', () => {
     }
   });
 
-  it('rolls back a failure after result insertion and retries to one complete projection', async () => {
-    const body = integratedBody();
-    failOnceAt = 'commit';
-
-    const failed = await request(app).post('/api/pipeline/story-result').send(body);
-    expect(failed.status).toBe(500);
-    expect(state).toEqual({ results: [], commits: [], usage: [] });
-
-    const retry = await request(app).post('/api/pipeline/story-result').send(body);
-    const duplicate = await request(app).post('/api/pipeline/story-result').send(body);
-    expect(retry.status).toBe(201);
-    expect(duplicate.status).toBe(200);
-    expect(duplicate.body).toEqual({ ok: true, duplicate: true });
-    expectCompleteProjection(body);
-  });
-
-  it('rolls back a failure after commit and retries to one complete projection', async () => {
-    const body = integratedBody();
-    failOnceAt = 'accounting';
-
-    const failed = await request(app).post('/api/pipeline/story-result').send(body);
-    expect(failed.status).toBe(500);
-    expect(state).toEqual({ results: [], commits: [], usage: [] });
-
-    const retry = await request(app).post('/api/pipeline/story-result').send(body);
-    const duplicate = await request(app).post('/api/pipeline/story-result').send(body);
-    expect(retry.status).toBe(201);
-    expect(duplicate.status).toBe(200);
-    expectCompleteProjection(body);
-  });
-
-  it('rejects reuse of an ingest key with a changed immutable payload', async () => {
-    const body = integratedBody();
-    expect((await request(app).post('/api/pipeline/story-result').send(body)).status).toBe(201);
-
-    const conflict = await request(app).post('/api/pipeline/story-result').send({
-      ...body,
-      commitMessage: 'changed payload under the same key',
-    });
-    expect(conflict.status).toBe(409);
-    expectCompleteProjection(body);
-  });
-
-  it('does not acknowledge a pre-existing duplicate with incomplete dependent projections', async () => {
-    const body = integratedBody();
-    expect((await request(app).post('/api/pipeline/story-result').send(body)).status).toBe(201);
-    state.commits.length = 0;
-    state.usage.length = 0;
-
-    const incomplete = await request(app).post('/api/pipeline/story-result').send(body);
-    expect(incomplete.status).toBe(409);
-    expect(incomplete.body.error).toContain('commit projection');
-    expect(state.results).toHaveLength(1);
-    expect(state.commits).toHaveLength(0);
-    expect(state.usage).toHaveLength(0);
-  });
-
-  it('does not acknowledge a duplicate with a missing accounting projection', async () => {
-    const body = integratedBody();
-    expect((await request(app).post('/api/pipeline/story-result').send(body)).status).toBe(201);
-    state.usage.length = 0;
-
-    const incomplete = await request(app).post('/api/pipeline/story-result').send(body);
-    expect(incomplete.status).toBe(409);
-    expect(incomplete.body.error).toContain('accounting projection');
-    expect(state.results).toHaveLength(1);
-    expect(state.commits).toHaveLength(1);
-    expect(state.usage).toHaveLength(0);
-  });
-
-  it('serializes concurrent identical ingestion to one result and one accounting identity', async () => {
-    const body = integratedBody();
-    const [left, right] = await Promise.all([
-      request(app).post('/api/pipeline/story-result').send(body),
-      request(app).post('/api/pipeline/story-result').send(body),
-    ]);
-    expect([left.status, right.status].sort()).toEqual([200, 201]);
-    expectCompleteProjection(body);
-    expect(new Set(state.usage.map(row => row.story_result_id))).toEqual(new Set([state.results[0].id]));
-  });
-
-  it('rejects a changed retry that omits the integrated commit identity', async () => {
-    const body = integratedBody();
-    expect((await request(app).post('/api/pipeline/story-result').send(body)).status).toBe(201);
-    const { integrated: _integrated, commitSha: _sha, commitMessage: _message, ...omitted } = body;
-    const response = await request(app).post('/api/pipeline/story-result').send(omitted);
+  it('raw compatibility mounting refuses integrated result authority without committing projections', async () => {
+    const transactionCalls = mockTransaction.mock.calls.length;
+    const response = await request(app).post('/api/pipeline/story-result').send(integratedBody());
     expect(response.status).toBe(409);
-    expectCompleteProjection(body);
+    expect(response.body.error).toMatch(/integrated|host-only/i);
+    expect(mockTransaction).toHaveBeenCalledTimes(transactionCalls + 1);
+    expect(state).toEqual({ results: [], commits: [], usage: [] });
   });
 
   it('rejects reuse of a result key with changed failure provenance', async () => {
@@ -607,12 +526,7 @@ describe('story-result integrated-pass atomic retry boundary', () => {
     })).status).toBe(409);
   });
 
-  it('rejects asymmetric accounting retries in both directions', async () => {
-    const body = integratedBody();
-    expect((await request(app).post('/api/pipeline/story-result').send(body)).status).toBe(201);
-    const { reasoningTokens: _reasoning, ...missingReasoning } = body;
-    expect((await request(app).post('/api/pipeline/story-result').send(missingReasoning)).status).toBe(409);
-
+  it('rejects a keyed compatibility retry that adds accounting authority', async () => {
     const noAccounting = {
       runId: 41,
       storyId: 'US-NO-ACCOUNTING-001',
@@ -621,13 +535,6 @@ describe('story-result integrated-pass atomic retry boundary', () => {
     };
     expect((await request(app).post('/api/pipeline/story-result').send(noAccounting)).status).toBe(201);
     expect((await request(app).post('/api/pipeline/story-result').send({ ...noAccounting, costUsd: 0.5 })).status).toBe(409);
-  });
-
-  it('rejects duplicate acknowledgement after immutable revision provenance changes', async () => {
-    const body = integratedBody();
-    expect((await request(app).post('/api/pipeline/story-result').send(body)).status).toBe(201);
-    projectionSpecRevision = `sha256:${'9'.repeat(64)}`;
-    expect((await request(app).post('/api/pipeline/story-result').send(body)).status).toBe(409);
   });
 
   it('treats an observed fallback finished-at timestamp as immutable', async () => {

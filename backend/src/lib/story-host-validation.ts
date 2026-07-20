@@ -69,9 +69,14 @@ function gitValue(cwd: string, args: string[], fallback: string): string {
 function boundedUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
   const source = Buffer.from(value, 'utf8');
   if (source.byteLength <= maxBytes) return { value, truncated: false };
-  let end = maxBytes;
+
+  const suffix = Buffer.from('…', 'utf8');
+  let end = Math.max(0, maxBytes - suffix.byteLength);
   while (end > 0 && (source[end] & 0xc0) === 0x80) end -= 1;
-  return { value: `${source.subarray(0, end).toString('utf8')}…`, truncated: true };
+  return {
+    value: `${source.subarray(0, end).toString('utf8')}${suffix.byteLength <= maxBytes ? '…' : ''}`,
+    truncated: true,
+  };
 }
 
 function redactedOutput(stdout: string, stderr: string): { value: string; truncated: boolean } {

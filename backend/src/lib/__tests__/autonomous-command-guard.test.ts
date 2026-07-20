@@ -200,7 +200,7 @@ describe('autonomous-command-guard', () => {
 
       expect(safe.status).toBe(0);
 
-      const explicitlyAllowed = spawnSync('jest', ['--version'], {
+      const explicitlyAllowedButUnavailable = spawnSync('jest', ['--version'], {
         cwd: backend,
         env: {
           ...guarded.env,
@@ -210,7 +210,10 @@ describe('autonomous-command-guard', () => {
         encoding: 'utf8',
       });
 
-      expect(explicitlyAllowed.status).toBe(0);
+      // Authorization must not fall back to the wrapper name on its own PATH:
+      // that recursively execs the guard forever when no real Jest exists.
+      expect(explicitlyAllowedButUnavailable.status).toBe(127);
+      expect(explicitlyAllowedButUnavailable.stderr).toMatch(/unavailable outside the guard PATH/i);
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
       fs.rmSync(guarded.guardBinDir, { recursive: true, force: true });

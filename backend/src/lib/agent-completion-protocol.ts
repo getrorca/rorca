@@ -17,7 +17,10 @@ export function normalizeOpenCodeModel(model: string): string {
   return normalized;
 }
 
-/** Pi may emit turn_end for intermediate turns; only agent_end completes a story. */
+/**
+ * Pi may emit turn_end and agent_end before automatic retry, compaction retry,
+ * or queued continuation. The documented RPC authority is agent_settled.
+ */
 export function shouldResolvePiRpcStory(eventType: string): boolean {
-  return eventType === 'agent_end';
+  return eventType === 'agent_settled';
 }

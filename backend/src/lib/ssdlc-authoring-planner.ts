@@ -23,7 +23,6 @@ import {
   normalizeSsdlcContractJson,
 } from './ssdlc-contracts';
 import {
-  AUTHORING_SPEC_LIMITS,
   AuthoringPlanSchema,
   AuthoringPlannerInputSchema,
   AuthoringPreflightInputSchema,

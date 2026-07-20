@@ -17,6 +17,7 @@ import {
   buildPiProgressLogPath,
   buildPiServerSkillFiles,
   buildPiStoryPromptContext,
+  cleanupPiRunTempArtifacts,
   ensurePiStoryProgressLog,
   filterUnsafeAutonomousValidationCommands,
   inferPiCandidateTests,
@@ -77,6 +78,18 @@ describe('pi-autonomous-runner', () => {
 
     fs.rmSync(wsDir, { recursive: true, force: true });
     fs.rmSync(result.generatedSkillFile, { force: true });
+  });
+
+  test('cleanupPiRunTempArtifacts removes private structured prompt files after cancellation', async () => {
+    const promptPath = path.join(os.tmpdir(), `rorca-pi-4242-US-001-${process.pid}-${Date.now()}.txt`);
+    const sessionPath = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pi-session-4242-US-001-'));
+    fs.writeFileSync(promptPath, 'secret prompt', { mode: 0o600 });
+    fs.writeFileSync(path.join(sessionPath, 'session.jsonl'), '{}\n');
+
+    await cleanupPiRunTempArtifacts(4242);
+
+    expect(fs.existsSync(promptPath)).toBe(false);
+    expect(fs.existsSync(sessionPath)).toBe(false);
   });
 
   test('ensurePiStoryProgressLog creates a seeded template and never overwrites an existing log', () => {
