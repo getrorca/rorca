@@ -254,7 +254,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         }
       }
 
-      if (process.env.RORCA_QUALIFICATION_SKIP_VECTOR_MIGRATIONS === 'true' && /\bmemories\b/i.test(sql)) {
+      if (process.env.RORCA_QUALIFICATION_SKIP_VECTOR_MIGRATIONS === 'true' && /\b(?:memories|memory_candidates)\b/i.test(sql)) {
         const memoriesAvailable = await client.query(`SELECT to_regclass('rorca.memories')::text AS table_name`);
         if (!memoriesAvailable.rows[0]?.table_name) {
           await client.query(
