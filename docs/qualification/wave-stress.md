@@ -81,7 +81,7 @@ they must not be rewritten to bless a failing run.
 
 Every stress invocation runs `build-wave-qualification-evidence.ts` as a separate blocking phase and writes canonical JSON, deterministic Markdown, and a strict authenticated receipt under the owned `.rorca/qualification/<digest>/` namespace. The builder receives only normalized status and seeded model inputs, never captured terminal output. Report generation, signing, telemetry, or publication failure fails the launcher.
 
-The provider-free stress profile cannot by itself provide durable database/WAL, Git integration, or independent-checker proof, so its receipt accurately leaves production enable unavailable. The complete production qualification must attach those authoritative classes and pass local receipt verification described in [`wave-parallel-v1/qualification.md`](./wave-parallel-v1/qualification.md).
+The provider-free stress profile is explicitly `synthetic_diagnostic`: it cannot provide durable measured database/WAL, Git integration, independent-checker, canary/soak, or rollback-rehearsal proof. It always leaves production enable unavailable, even when its model scenarios pass. A blocking production qualification requires each of those durable measured artifacts to be bound to the exact Git HEAD and resolved by the trusted artifact store; caller-supplied digest strings and terminal output are not evidence. The complete qualification must then pass local receipt verification and release-readiness artifact resolution described in [`wave-parallel-v1/qualification.md`](./wave-parallel-v1/qualification.md).
 
 ## Failure evidence
 

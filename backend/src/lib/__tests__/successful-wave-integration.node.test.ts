@@ -23,6 +23,7 @@ import {
 } from '../story-worktree-lifecycle';
 import {
   deterministicWaveIntegrationOrder,
+  rollbackRejectedWaveTarget,
   waveIntegrationLedgerKey,
   WaveIntegrationLedger,
   type WaveContributionIdentity,
@@ -31,8 +32,13 @@ import {
 
 const checkerPath = path.resolve(process.cwd(), 'backend', 'src', '__tests__', 'fixtures', 'independent-wave-trace-checker.mjs');
 const migrationPath = path.resolve(process.cwd(), 'backend', 'src', 'db', 'pg-migrations', '20260719090500_wave_story_integration_ledger.sql');
+// Git fixtures must not inherit CI credentials, DB URLs, or operator settings.
 const gitEnvironment = {
-  ...process.env,
+  PATH: process.env.PATH ?? '',
+  HOME: os.tmpdir(),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_TERMINAL_PROMPT: '0',
   GIT_AUTHOR_NAME: 'Rorca Successful Wave',
   GIT_AUTHOR_EMAIL: 'wave-success@rorca.invalid',
   GIT_COMMITTER_NAME: 'Rorca Successful Wave',
@@ -119,9 +125,29 @@ function createBaseRepository(root: string): { repository: string; revision: str
   return { repository, revision: git(repository, ['rev-parse', 'HEAD']) };
 }
 
+test('rejected post-integration validation restores the exact clean parent before any sibling continues', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-wave-rollback-'));
+  try {
+    const { repository, revision: parentHead } = createBaseRepository(root);
+    fs.appendFileSync(path.join(repository, 'README.md'), 'rejected contribution\n');
+    git(repository, ['add', 'README.md']);
+    git(repository, ['commit', '-m', 'test: rejected contribution']);
+    const integratedHead = git(repository, ['rev-parse', 'HEAD']);
+    fs.writeFileSync(path.join(repository, 'validation-artifact.tmp'), 'must be removed\n');
+
+    rollbackRejectedWaveTarget(repository, parentHead, integratedHead);
+
+    assert.equal(git(repository, ['rev-parse', 'HEAD']), parentHead);
+    assert.equal(git(repository, ['status', '--porcelain', '--untracked-files=all']), '');
+    assert.equal(fs.existsSync(path.join(repository, 'validation-artifact.tmp')), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function cloneRunRepository(source: string, root: string, parallelism: number): string {
   const repository = path.join(root, `run-p${parallelism}`);
-  execFileSync('git', ['clone', '--quiet', '--no-hardlinks', source, repository], { stdio: 'ignore' });
+  execFileSync('git', ['clone', '--quiet', '--no-hardlinks', source, repository], { env: gitEnvironment, stdio: 'ignore' });
   git(repository, ['checkout', '-b', `qualification/run-p${parallelism}`]);
   return repository;
 }
@@ -301,8 +327,8 @@ async function runSuccessfulWave(root: string, source: string, baseRevision: str
         treeHash: git(repository, ['rev-parse', 'HEAD^{tree}']),
         contractHash: sha256('git-fsck\ngit-diff-tree-check\nprojection-contract-v1\n'),
       };
-      execFileSync('git', ['fsck', '--no-dangling'], { cwd: repository, stdio: 'ignore' });
-      execFileSync('git', ['diff-tree', '--check', 'HEAD'], { cwd: repository, stdio: 'ignore' });
+      execFileSync('git', ['fsck', '--no-dangling'], { cwd: repository, env: gitEnvironment, stdio: 'ignore' });
+      execFileSync('git', ['diff-tree', '--check', 'HEAD'], { cwd: repository, env: gitEnvironment, stdio: 'ignore' });
       previous = record.transitions.length;
       record = ledger.markIntegratedValidated(identity, validationIdentity);
       appendNewTransitions(traceEvents, record, previous);

@@ -37,7 +37,7 @@ export function buildQualificationChildEnv(source, scenarioPath) {
   const token = runId.slice('qrun_'.length);
   const database = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
   const role = decodeURIComponent(parsed.username);
-  if (database !== `rorca_qtest_${token}` || role !== `rorca_qrole_${token}` || !parsed.password) {
+  if (database !== `rorca_qtest_${token}_test` || role !== `rorca_qrole_${token}` || !parsed.password) {
     fail('qualification database and role must exactly match the run namespace');
   }
   if (parsed.searchParams.get('application_name') !== `rorca-qualification:${runId}`) {

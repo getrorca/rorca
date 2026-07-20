@@ -4,9 +4,11 @@
  */
 
 import { execFileSync } from 'child_process';
-import { queryOne } from '../db/index';
+import { queryOne, transaction } from '../db/index';
+import type { PoolClient } from 'pg';
 import {
   computeLocalQualificationIdentity,
+  loadCanonicalQualificationAssertionIds,
   verifyQualificationReceipt,
   type QualificationReceipt,
   type QualificationReport,
@@ -45,6 +47,7 @@ interface RolloutRow {
   production_activation_approval_id: string | null;
   release_readiness_current: boolean;
   operator_activation_current: boolean;
+  policy_epoch: number | string;
 }
 
 interface ReceiptRow {
@@ -95,6 +98,7 @@ function rolloutFrom(row: RolloutRow | undefined): WaveRolloutPolicy {
     productionActivationApprovalId: row.production_activation_approval_id,
     releaseReadinessCurrent: row.release_readiness_current,
     operatorActivationCurrent: row.operator_activation_current,
+    policyEpoch: Number(row.policy_epoch ?? 0),
   };
 }
 
@@ -124,7 +128,8 @@ export async function resolveWaveProductionPolicy(input: {
                WHERE approval.id = control.production_activation_approval_id
                  AND approval.workspace_id = control.workspace_id
                  AND approval.release_readiness_packet_id = control.release_readiness_packet_id
-            ) AS operator_activation_current
+            ) AS operator_activation_current,
+            control.policy_epoch
        FROM wave_parallel_rollout_controls control
       WHERE control.workspace_id = $1`,
     [input.workspaceId],
@@ -158,6 +163,7 @@ export async function resolveWaveProductionPolicy(input: {
             receipt: json(receiptRow.receipt),
             localIdentity,
             requiredScenarioIds: QUALIFICATION_SCENARIOS,
+            requiredAssertionIds: loadCanonicalQualificationAssertionIds(),
             trustedIssuers: issuers,
             now: new Date().toISOString(),
           });
@@ -276,4 +282,99 @@ export async function revalidatePersistedWavePolicy(input: {
   });
   if (current.fence !== envelope.fence) throw new Error(`[wave-production-policy] persisted policy is stale: ${current.reason}`);
   return current;
+}
+
+export type WaveDispatchClaim = { claimed: boolean; reason?: string; leaseExpiresAt?: string };
+
+/**
+ * The only queued -> starting transition for governed dispatch.  The control row,
+ * capacity check/reservation and ownership fence are committed together, so two
+ * workers cannot both observe a free slot or start the same queue message.
+ */
+export async function claimWaveProductionDispatch(input: {
+  runId: number;
+  owner: string;
+  envelope: WavePolicyEnvelope;
+  leaseSeconds?: number;
+}): Promise<WaveDispatchClaim> {
+  assertWavePolicyEnvelopeIntegrity(input.envelope);
+  const leaseSeconds = Math.max(30, Math.min(input.leaseSeconds ?? 300, 3600));
+  return transaction(async (client: PoolClient) => {
+    // Advisory locks serialize global and workspace capacity accounting without
+    // pretending a snapshot COUNT is a reservation.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('rorca:wave-capacity:global'))`);
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('rorca:wave-capacity:' || $1))`, [input.envelope.workspaceId]);
+    const run = await client.query<{
+      workspace_id: string; status: string; orchestration_mode: string | null;
+      wave_policy_fence: string | null; wave_policy_epoch: string | null;
+    }>(`SELECT workspace_id, status, orchestration_mode, wave_policy_fence, wave_policy_epoch
+          FROM pipeline_runs WHERE id = $1 FOR UPDATE`, [input.runId]);
+    const row = run.rows[0];
+    if (!row || row.status !== 'queued') return { claimed: false, reason: 'run_not_queued' };
+    if (row.workspace_id !== input.envelope.workspaceId || row.wave_policy_fence !== input.envelope.fence
+      || Number(row.wave_policy_epoch ?? 0) !== input.envelope.rollout.policyEpoch) {
+      return { claimed: false, reason: 'persisted_policy_mismatch' };
+    }
+    const control = await client.query<{
+      policy_epoch: string; max_active_wave_runs: string; max_active_wave_runs_per_workspace: string;
+    }>(`SELECT policy_epoch, max_active_wave_runs, max_active_wave_runs_per_workspace
+          FROM wave_parallel_rollout_controls WHERE workspace_id = $1 FOR UPDATE`, [row.workspace_id]);
+    const controlRow = control.rows[0];
+    // Sequential runs have epoch zero when no rollout row exists.  A rollout
+    // control appearing after enqueue intentionally fences that stale payload.
+    const currentEpoch = Number(controlRow?.policy_epoch ?? 0);
+    if (currentEpoch !== input.envelope.rollout.policyEpoch) return { claimed: false, reason: 'policy_epoch_stale' };
+
+    if (input.envelope.effective.orchestrationMode === 'wave-parallel') {
+      if (!controlRow || !input.envelope.allowed) return { claimed: false, reason: 'parallel_not_authorized' };
+      const counts = await client.query<{ global_count: string; workspace_count: string }>(
+        `SELECT COUNT(*) FILTER (
+                  WHERE orchestration_mode = 'wave-parallel' AND status IN ('starting', 'running')
+                )::text AS global_count,
+                COUNT(*) FILTER (
+                  WHERE workspace_id = $1 AND orchestration_mode = 'wave-parallel'
+                    AND status IN ('starting', 'running')
+                )::text AS workspace_count
+           FROM pipeline_runs`, [row.workspace_id]);
+      const active = counts.rows[0];
+      if (Number(active?.global_count ?? 0) >= Number(controlRow.max_active_wave_runs)
+        || Number(active?.workspace_count ?? 0) >= Number(controlRow.max_active_wave_runs_per_workspace)) {
+        return { claimed: false, reason: 'capacity_exhausted' };
+      }
+      await client.query(
+        `INSERT INTO wave_parallel_capacity_reservations (run_id, workspace_id, policy_epoch, owner, fence, lease_expires_at)
+         VALUES ($1, $2, $3, $4, $5, NOW() + ($6 * INTERVAL '1 second'))`,
+        [input.runId, row.workspace_id, currentEpoch, input.owner, input.envelope.fence, leaseSeconds],
+      );
+    }
+    const updated = await client.query<{ lease_expires_at: Date }>(
+      `UPDATE pipeline_runs
+          SET status = 'starting', started_at = COALESCE(started_at, NOW()), worker_id = $2,
+              dispatch_owner = $2, dispatch_fence = $3,
+              dispatch_lease_expires_at = NOW() + ($4 * INTERVAL '1 second'),
+              lifecycle_status = 'starting', lifecycle_diagnostics = lifecycle_diagnostics || $5::jsonb,
+              lifecycle_updated_at = NOW()
+        WHERE id = $1 AND status = 'queued'
+        RETURNING dispatch_lease_expires_at`,
+      [input.runId, input.owner, input.envelope.fence, leaseSeconds, JSON.stringify({ owner: input.owner, process: 'atomic_dispatch_claim' })],
+    );
+    return updated.rows[0]
+      ? { claimed: true, leaseExpiresAt: updated.rows[0].lease_expires_at.toISOString() }
+      : { claimed: false, reason: 'claim_raced' };
+  });
+}
+
+/** Guard worker lifecycle/status writes after a claim against a stale owner. */
+export async function advanceClaimedWaveDispatch(input: {
+  runId: number; owner: string; fence: string; lifecycle: 'starting' | 'running';
+}): Promise<boolean> {
+  const result = await queryOne<{ id: number }>(
+    `UPDATE pipeline_runs SET status = 'running', lifecycle_status = $4,
+       lifecycle_updated_at = NOW(), lifecycle_diagnostics = lifecycle_diagnostics || $5::jsonb
+     WHERE id = $1 AND dispatch_owner = $2 AND dispatch_fence = $3
+       AND dispatch_lease_expires_at > NOW() AND status = 'starting'
+     RETURNING id`,
+    [input.runId, input.owner, input.fence, input.lifecycle, JSON.stringify({ owner: input.owner, process: 'engine_spawned' })],
+  );
+  return Boolean(result);
 }

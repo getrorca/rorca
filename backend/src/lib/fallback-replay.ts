@@ -24,6 +24,11 @@ export interface FallbackReplayResult {
   duplicates: number;
   invalid: number;
   retained: boolean;
+  atomicFinalizations: number;
+}
+
+export interface FallbackReplayOptions {
+  storyResultPoster?: (payload: Record<string, unknown>) => Promise<'inserted' | 'duplicate'>;
 }
 
 function derivedIngestKey(entry: FallbackResultEntry): string {
@@ -95,7 +100,10 @@ async function isLegacyStoryResultDuplicate(entry: FallbackResultEntry): Promise
   return Boolean(existing);
 }
 
-async function replayStoryResult(entry: FallbackResultEntry): Promise<'inserted' | 'duplicate' | 'invalid'> {
+async function replayStoryResult(
+  entry: FallbackResultEntry,
+  options: FallbackReplayOptions,
+): Promise<'inserted' | 'duplicate' | 'invalid'> {
   const payload = entry.payload;
   const runId = Number(payload.runId ?? entry.runId);
   const storyId = payload.storyId ?? entry.storyId;
@@ -104,6 +112,10 @@ async function replayStoryResult(entry: FallbackResultEntry): Promise<'inserted'
     return 'invalid';
   }
   if (await isLegacyStoryResultDuplicate(entry)) return 'duplicate';
+  if (payload.integrationFinalization) {
+    if (!options.storyResultPoster) return 'invalid';
+    return options.storyResultPoster({ ...payload, idempotencyKey: derivedIngestKey(entry) });
+  }
 
   const inserted = await queryOne<{ id: number }>(
     `INSERT INTO story_results
@@ -138,7 +150,11 @@ async function replayStoryResult(entry: FallbackResultEntry): Promise<'inserted'
  * inserted or recognized as a duplicate. A DB failure leaves the complete file
  * for the next worker reconciliation, and ingest keys make reprocessing safe.
  */
-export async function replayFallbackResults(cwd: string, workspaceId: string): Promise<FallbackReplayResult> {
+export async function replayFallbackResults(
+  cwd: string,
+  workspaceId: string,
+  options: FallbackReplayOptions = {},
+): Promise<FallbackReplayResult> {
   await flushFallbackWrites(cwd);
   const entries = readFallbackResults(cwd);
   const result: FallbackReplayResult = {
@@ -147,15 +163,18 @@ export async function replayFallbackResults(cwd: string, workspaceId: string): P
     duplicates: 0,
     invalid: 0,
     retained: false,
+    atomicFinalizations: 0,
   };
   if (entries.length === 0) return result;
 
   try {
     for (const entry of entries) {
+      const atomicFinalization = entry.type === 'story_result' && Boolean(entry.payload.integrationFinalization);
       const outcome = entry.type === 'wal'
         ? await replayWal(entry, workspaceId)
-        : await replayStoryResult(entry);
+        : await replayStoryResult(entry, options);
       result[outcome === 'inserted' ? 'inserted' : outcome === 'duplicate' ? 'duplicates' : 'invalid']++;
+      if (atomicFinalization && outcome !== 'invalid') result.atomicFinalizations++;
     }
     if (result.invalid === 0) {
       deleteFallbackFile(cwd);

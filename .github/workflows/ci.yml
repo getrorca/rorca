@@ -40,18 +40,20 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_USER: rorca
-          POSTGRES_PASSWORD: rorca
-          POSTGRES_DB: rorca_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
         ports:
           - 5433:5432
         options: >-
-          --health-cmd="pg_isready -U rorca -d rorca_test"
+          --health-cmd="pg_isready -U postgres -d postgres"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
     env:
-      DATABASE_URL_TEST: postgres://rorca:rorca@localhost:5433/rorca_test
+      DATABASE_URL: postgres://rorca_ci_test_runner:rorca_ci_password@localhost:5433/rorca_ci_test?application_name=rorca-ci-test
+      DATABASE_URL_TEST: postgres://rorca_ci_test_runner:rorca_ci_password@localhost:5433/rorca_ci_test?application_name=rorca-ci-test
+      RORCA_TEST_DATABASE_URL: postgres://rorca_ci_test_runner:rorca_ci_password@localhost:5433/rorca_ci_test?application_name=rorca-ci-test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -60,6 +62,18 @@ jobs:
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
       - run: cd backend && npm ci
+      - name: Provision dedicated non-superuser test database
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d postgres <<'SQL'
+          CREATE ROLE rorca_ci_test_runner LOGIN PASSWORD 'rorca_ci_password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE authenticated NOLOGIN
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE DATABASE rorca_ci_test OWNER rorca_ci_test_runner;
+          SQL
+          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d rorca_ci_test -c 'CREATE EXTENSION IF NOT EXISTS vector'
       - name: Run backend PR-critical tests
         run: >-
           cd backend && npm test --

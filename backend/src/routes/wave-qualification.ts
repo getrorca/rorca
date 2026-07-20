@@ -6,8 +6,8 @@
 import { createHash } from 'crypto';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { z } from 'zod';
-import { execute, queryOne } from '../db/index';
-import { AppError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
+import { execute, query, queryOne } from '../db/index';
+import { AdminRequiredError, AppError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import {
   assertPortableQualificationReport,
   computeLocalQualificationIdentity,
@@ -16,16 +16,33 @@ import {
   type QualificationReceipt,
   type QualificationReport,
 } from '../lib/wave-qualification-evidence';
+import { WAVE_CANONICAL_ASSERTION_IDS } from '../lib/wave-canonical-assertions';
 import { QUALIFICATION_SCENARIOS } from '../lib/wave-qualification-model';
-import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
+import { resolveWaveProductionPolicy } from '../lib/wave-production-governance';
 import {
   assertWaveReleaseReadinessPacket,
   verifyWaveProductionActivation,
+  verifyWaveReleaseEvidence,
   waveReleaseReadinessPacketHash,
+  type WaveEvidenceResolver,
   type WaveReleaseReadinessPacket,
+  type WaveResolvedEvidence,
 } from '../lib/wave-release-readiness';
 
 const router = Router();
+
+/** Defense in depth: these operator routes can authorize production rollout. */
+function requireWaveQualificationAdmin(req: Request, _res: Response, next: NextFunction): void {
+  if (req.user?.role !== 'admin') {
+    next(new AdminRequiredError());
+    return;
+  }
+  next();
+}
+
+router.use(requireWaveQualificationAdmin);
+
+const CANONICAL_WAVE_ASSERTION_IDS: ReadonlySet<string> = new Set(WAVE_CANONICAL_ASSERTION_IDS);
 
 const RolloutControlSchema = z.object({
   workspaceId: z.string().min(1).max(256),
@@ -45,6 +62,12 @@ const RolloutControlSchema = z.object({
   draining: z.boolean().optional().default(false),
   actor: z.string().min(1).max(256),
   rationale: z.string().min(1).max(2048),
+}).strict();
+
+const ReleaseEvidenceSchema = z.object({
+  workspaceId: z.string().min(1).max(256),
+  attestation: z.unknown(),
+  authorization: z.string().regex(/^[0-9a-f]{64}$/),
 }).strict();
 
 const ReleaseReadinessSchema = z.object({
@@ -91,6 +114,18 @@ interface ReleasePacketRow {
 }
 
 interface ActivationRow { id: string }
+interface ReleaseEvidenceRow {
+  id: string;
+  workspace_id: string;
+  evidence_digest: string;
+  source_revision: string;
+  evidence_kind: WaveResolvedEvidence['kind'];
+  subject_id: string | null;
+  operator_id: string;
+  attested_at: Date | string;
+  attestation: Record<string, unknown>;
+  authorization_digest: string;
+}
 
 interface ReceiptRow {
   id: string;
@@ -106,6 +141,56 @@ interface ReceiptRow {
   receipt: QualificationReceipt;
   telemetry: QualificationReport['telemetry'];
   verified_at: Date | string;
+}
+
+async function durableEvidenceResolver(
+  workspaceId: string,
+  sourceRevision: string,
+): Promise<WaveEvidenceResolver> {
+  const rows = await query<ReleaseEvidenceRow>(
+    `SELECT * FROM wave_release_evidence_artifacts
+      WHERE workspace_id = $1 AND source_revision = $2
+      ORDER BY id ASC LIMIT 4096`,
+    [workspaceId, sourceRevision],
+  );
+  const evidence = new Map(rows.map(row => [row.evidence_digest, {
+    digest: row.evidence_digest,
+    sourceRevision: row.source_revision,
+    kind: row.evidence_kind,
+    durable: true as const,
+    authenticated: true as const,
+    ...(row.subject_id ? { subjectId: row.subject_id } : {}),
+  }]));
+  return digest => evidence.get(digest);
+}
+
+function assertReportDurableEvidenceResolved(
+  report: QualificationReport,
+  resolve: WaveEvidenceResolver,
+): void {
+  for (const assertion of report.evidenceAssertions) {
+    if (!assertion.durable || assertion.authority !== 'measured') continue;
+    const resolved = resolve(assertion.sourceDigest);
+    const acceptedKinds: Partial<Record<QualificationReport['evidenceAssertions'][number]['evidenceClass'], WaveResolvedEvidence['kind'][]>> = {
+      durable_database_wal: ['durable_db_wal'],
+      git_integration: ['git_integration'],
+      independent_checker: ['independent_checker'],
+      canary_soak: ['canary', 'soak'],
+      rollback_rehearsal: ['rollback'],
+    };
+    const kinds = acceptedKinds[assertion.evidenceClass] ?? [];
+    if (!resolved
+      || resolved.digest !== assertion.sourceDigest
+      || resolved.sourceRevision !== assertion.sourceRevision
+      || !resolved.durable
+      || !resolved.authenticated
+      || !kinds.includes(resolved.kind)) {
+      throw new UnprocessableError(
+        `Qualification assertion ${assertion.id} has no authenticated durable evidence artifact`,
+        'QUALIFICATION_DURABLE_EVIDENCE_UNRESOLVED',
+      );
+    }
+  }
 }
 
 function productionActivationKey(): string {
@@ -154,6 +239,7 @@ function verifyPortable(input: { report: unknown; receipt: unknown }, local: Ret
     receipt: input.receipt,
     localIdentity: local,
     requiredScenarioIds: QUALIFICATION_SCENARIOS,
+    requiredAssertionIds: [...CANONICAL_WAVE_ASSERTION_IDS],
     trustedIssuers: trustedIssuers(),
     now: new Date().toISOString(),
   });
@@ -249,6 +335,12 @@ router.post('/verify', async (req: Request, res: Response, next: NextFunction) =
     const currentWorkspace = await workspace(workspaceId);
     const local = computeLocalQualificationIdentity(currentWorkspace.path, workspaceId);
     const verified = verifyPortable({ report: req.body?.report, receipt: req.body?.receipt }, local);
+    const report = req.body?.report as unknown;
+    assertPortableQualificationReport(report);
+    assertReportDurableEvidenceResolved(
+      report,
+      await durableEvidenceResolver(workspaceId, verified.sourceRevision),
+    );
     await auditReceiptVerification({
       workspaceId,
       reportHash: verified.reportHash,
@@ -298,7 +390,12 @@ router.post('/receipts', async (req: Request, res: Response, next: NextFunction)
     const local = computeLocalQualificationIdentity(currentWorkspace.path, workspaceId);
     const receipt = verifyPortable({ report, receipt: req.body?.receipt }, local);
     assertPortableQualificationReport(report);
-    const humanReport = renderQualificationReport(report, receipt);
+    const portableReport = report;
+    assertReportDurableEvidenceResolved(
+      portableReport,
+      await durableEvidenceResolver(workspaceId, receipt.sourceRevision),
+    );
+    const humanReport = renderQualificationReport(portableReport, receipt);
     const inserted = await queryOne<ReceiptRow>(`
       INSERT INTO wave_qualification_receipts (
         workspace_id, report_hash, source_revision, source_tree, policy_version,
@@ -310,8 +407,8 @@ router.post('/receipts', async (req: Request, res: Response, next: NextFunction)
     `, [
       workspaceId, receipt.reportHash, receipt.sourceRevision, receipt.sourceTree,
       receipt.policyVersion, receipt.invariantVersion, receipt.issuer.id, receipt.issuer.keyId,
-      receipt.issuedAt, receipt.expiresAt, JSON.stringify(report), JSON.stringify(receipt),
-      humanReport, JSON.stringify(report.telemetry),
+      receipt.issuedAt, receipt.expiresAt, JSON.stringify(portableReport), JSON.stringify(receipt),
+      humanReport, JSON.stringify(portableReport.telemetry),
     ]);
     const row = inserted ?? await queryOne<ReceiptRow>('SELECT * FROM wave_qualification_receipts WHERE report_hash = $1 AND workspace_id = $2', [receipt.reportHash, workspaceId]);
     if (!row) throw new UnprocessableError('Qualification receipt publication was not durable', 'QUALIFICATION_PUBLICATION_FAILED');
@@ -370,6 +467,80 @@ router.get('/receipts/latest', async (req: Request, res: Response, next: NextFun
 
 /**
  * @swagger
+ * /api/admin/wave-qualification/evidence:
+ *   post:
+ *     tags: [Wave Qualification]
+ *     summary: Verify and append an authenticated durable release-evidence artifact
+ *     operationId: publishWaveReleaseEvidence
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Durable release authority is a signed operator-only action and is never inferred from caller-provided digest strings."
+ *     responses:
+ *       201: { description: Evidence attestation verified and stored immutably }
+ *       422: { description: Attestation is invalid, stale, or conflicts with existing evidence }
+ */
+router.post('/evidence', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const input = ReleaseEvidenceSchema.parse(req.body);
+    const currentWorkspace = await workspace(input.workspaceId);
+    const attestation = verifyWaveReleaseEvidence({
+      attestation: input.attestation,
+      authorization: input.authorization,
+      trustedKey: productionActivationKey(),
+    });
+    const local = computeLocalQualificationIdentity(currentWorkspace.path, input.workspaceId);
+    if (attestation.workspaceId !== input.workspaceId
+      || attestation.sourceRevision !== local.sourceRevision) {
+      throw new UnprocessableError(
+        'Release evidence is not bound to the current workspace and source revision',
+        'WAVE_RELEASE_EVIDENCE_IDENTITY_MISMATCH',
+      );
+    }
+    const authorizationDigest = `sha256:${createHash('sha256').update(input.authorization).digest('hex')}`;
+    const inserted = await queryOne<ReleaseEvidenceRow>(
+      `INSERT INTO wave_release_evidence_artifacts (
+         workspace_id, evidence_digest, source_revision, evidence_kind, subject_id,
+         operator_id, attested_at, attestation, authorization_digest
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+       ON CONFLICT (workspace_id, evidence_digest) DO NOTHING
+       RETURNING *`,
+      [
+        input.workspaceId, attestation.digest, attestation.sourceRevision,
+        attestation.kind, attestation.subjectId ?? null, attestation.operatorId,
+        attestation.attestedAt, JSON.stringify(attestation), authorizationDigest,
+      ],
+    );
+    const persisted = inserted ?? await queryOne<ReleaseEvidenceRow>(
+      `SELECT * FROM wave_release_evidence_artifacts
+        WHERE workspace_id = $1 AND evidence_digest = $2`,
+      [input.workspaceId, attestation.digest],
+    );
+    if (!persisted
+      || persisted.source_revision !== attestation.sourceRevision
+      || persisted.evidence_kind !== attestation.kind
+      || persisted.subject_id !== (attestation.subjectId ?? null)
+      || persisted.operator_id !== attestation.operatorId
+      || persisted.authorization_digest !== authorizationDigest) {
+      throw new UnprocessableError(
+        'Evidence digest is already bound to different immutable authority',
+        'WAVE_RELEASE_EVIDENCE_CONFLICT',
+      );
+    }
+    res.status(inserted ? 201 : 200).json({
+      id: persisted.id,
+      digest: persisted.evidence_digest,
+      sourceRevision: persisted.source_revision,
+      kind: persisted.evidence_kind,
+      subjectId: persisted.subject_id,
+      authenticated: true,
+      durable: true,
+    });
+  } catch (error) {
+    try { qualificationFailure(error); } catch (mapped) { next(mapped); }
+  }
+});
+
+/**
+ * @swagger
  * /api/admin/wave-qualification/release-readiness:
  *   post:
  *     tags: [Wave Qualification]
@@ -392,7 +563,12 @@ router.post('/release-readiness', async (req: Request, res: Response, next: Next
     if (!receiptRow) throw new NotFoundError('Wave qualification receipt', String(input.qualificationReceiptId));
     const local = computeLocalQualificationIdentity(currentWorkspace.path, input.workspaceId);
     const receipt = verifyPortable({ report: receiptRow.report, receipt: receiptRow.receipt }, local);
-    const packet = assertWaveReleaseReadinessPacket(input.packet);
+    const packet = assertWaveReleaseReadinessPacket(
+      input.packet,
+      new Date().toISOString(),
+      await durableEvidenceResolver(input.workspaceId, receipt.sourceRevision),
+      CANONICAL_WAVE_ASSERTION_IDS,
+    );
     if (packet.workspaceId !== input.workspaceId
       || packet.qualification.receiptId !== String(input.qualificationReceiptId)
       || packet.qualification.reportHash !== receipt.reportHash
@@ -457,7 +633,12 @@ router.post('/production-activation', async (req: Request, res: Response, next: 
       [input.releaseReadinessPacketId, input.workspaceId],
     );
     if (!packetRow) throw new NotFoundError('Wave release-readiness packet', input.releaseReadinessPacketId);
-    const packet = assertWaveReleaseReadinessPacket(packetRow.packet);
+    const packet = assertWaveReleaseReadinessPacket(
+      packetRow.packet,
+      new Date().toISOString(),
+      await durableEvidenceResolver(input.workspaceId, packetRow.source_revision),
+      CANONICAL_WAVE_ASSERTION_IDS,
+    );
     const local = computeLocalQualificationIdentity(currentWorkspace.path, input.workspaceId);
     verifyPortable({ report: packetRow.report, receipt: packetRow.receipt }, local);
     const reviewers = new Set(packet.reviews.map(review => review.reviewerId));
@@ -637,19 +818,9 @@ router.put('/rollout', async (req: Request, res: Response, next: NextFunction) =
         rolloutCohort: input.cohort,
       },
     });
-    await auditWaveProductionDecision({
-      envelope: policy,
-      actor: input.actor,
-      rationale: input.rationale,
-      eventType: 'cohort_change',
-      outcome: 'recorded',
-    });
-    if (input.enabled) {
-      await auditWaveProductionDecision({ envelope: policy, actor: input.actor, rationale: input.rationale, eventType: 'enable', outcome: 'recorded' });
-    }
-    if (input.draining) {
-      await auditWaveProductionDecision({ envelope: policy, actor: input.actor, rationale: input.rationale, eventType: 'drain', outcome: 'draining' });
-    }
+    // The rollout-control trigger appends the immutable audit row in the same
+    // transaction as this control mutation; do not create a split-brain audit
+    // write after the control has committed.
     res.json({ staged: true, status: policy.status, effective: policy.effective, receipt: policy.receipt, rollout: policy.rollout });
   } catch (error) {
     try { qualificationFailure(error); } catch (mapped) { next(mapped); }
@@ -688,9 +859,7 @@ router.post('/rollout/health', async (req: Request, res: Response, next: NextFun
     );
     if (!updated) throw new NotFoundError('Wave rollout control', input.workspaceId);
     const policy = await resolveWaveProductionPolicy({ workspaceId: input.workspaceId, workspacePath: currentWorkspace.path, request: {} });
-    if (updated.halted) {
-      await auditWaveProductionDecision({ envelope: policy, actor: input.actor, rationale: input.rationale, eventType: 'automatic_halt', outcome: 'halted' });
-    }
+    // The UPDATE's audit trigger records both normal observations and halts atomically.
     res.json({ status: policy.status, halted: updated.halted, effective: policy.effective });
   } catch (error) {
     next(error);
@@ -722,7 +891,7 @@ router.post('/rollout/rollback', async (req: Request, res: Response, next: NextF
     );
     if (changed.rowCount !== 1) throw new NotFoundError('Wave rollout control', input.workspaceId);
     const policy = await resolveWaveProductionPolicy({ workspaceId: input.workspaceId, workspacePath: currentWorkspace.path, request: {} });
-    await auditWaveProductionDecision({ envelope: policy, actor: input.actor, rationale: input.rationale, eventType: 'rollback', outcome: 'halted' });
+    // The rollback UPDATE and its append-only audit row commit together in DB.
     res.json({ rolledBack: true, status: policy.status, effective: policy.effective, inFlightEvidenceChanged: false });
   } catch (error) {
     next(error);

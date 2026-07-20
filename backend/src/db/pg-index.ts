@@ -214,6 +214,14 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           await client.query('CREATE EXTENSION IF NOT EXISTS age');
         } catch (err) {
           console.warn(`[pg-migrate] AGE extension unavailable; continuing in graph-lite mode: ${(err as Error).message || err}`);
+
+          // Loading AGE can install backend hooks before CREATE EXTENSION later
+          // fails (for example when a non-superuser owns an otherwise capable
+          // macOS PostgreSQL installation). Those hooks then reference the
+          // absent ag_catalog schema and poison unrelated later DDL. Discard the
+          // backend session before continuing in graph-lite mode.
+          try { client.release(true); } catch { /* already released or dead */ }
+          client = await pool.connect();
         }
 
         const catalog = await client.query<{ graph_catalog: string | null }>(
@@ -238,34 +246,6 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       }
 
       const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-      // Qualification runners intentionally use a stock isolated PostgreSQL 16
-      // image. They may exercise ownership and wave migrations without the
-      // optional pgvector extension; never pretend production has that limit.
-      if (process.env.RORCA_QUALIFICATION_SKIP_VECTOR_MIGRATIONS === 'true' && /\bvector\b/i.test(sql)) {
-        const vectorAvailable = await client.query(`SELECT to_regtype('vector')::text AS type`);
-        if (!vectorAvailable.rows[0]?.type) {
-          await client.query(
-            'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
-            [version, `${file} [skipped: qualification pgvector unavailable]`],
-          );
-          skippedCount++;
-          console.warn(`[pg-migrate] Skipping vector-dependent qualification migration: ${file}`);
-          continue;
-        }
-      }
-
-      if (process.env.RORCA_QUALIFICATION_SKIP_VECTOR_MIGRATIONS === 'true' && /\b(?:memories|memory_candidates)\b/i.test(sql)) {
-        const memoriesAvailable = await client.query(`SELECT to_regclass('rorca.memories')::text AS table_name`);
-        if (!memoriesAvailable.rows[0]?.table_name) {
-          await client.query(
-            'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
-            [version, `${file} [skipped: qualification memories dependency unavailable]`],
-          );
-          skippedCount++;
-          console.warn(`[pg-migrate] Skipping memories-dependent qualification migration: ${file}`);
-          continue;
-        }
-      }
 
       // Wrap each migration in a transaction
       try {

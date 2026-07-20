@@ -32,6 +32,9 @@ const config: Config = {
   testPathIgnorePatterns: [
     '/node_modules/',
     '/dist/',
+    // WPE qualification uses node:test under tsx and is invoked explicitly by
+    // test:wave-qualification; Jest must never discover or double-run it.
+    '\\.node\\.test\\.ts$',
     'src/__tests__/pg-boss-cancel\\.test\\.ts',
     'src/__tests__/pg-boss-concurrency\\.test\\.ts',
     'src/__tests__/pg-boss-dlq\\.test\\.ts',
@@ -40,10 +43,6 @@ const config: Config = {
     'src/__tests__/pg-boss-restart\\.test\\.ts',
     'src/__tests__/pg-boss-scheduler\\.test\\.ts',
     'src/__tests__/pg-boss-zero-downtime\\.test\\.ts',
-    // node:test WPE suites are executed by the root test:wave-node command.
-    // Jest importing them would execute TAP tests as side effects, then fail
-    // because those files intentionally contain no Jest test registrations.
-    '\\.node\\.test\\.ts$',
   ],
   modulePathIgnorePatterns: ['<rootDir>/dist/'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],

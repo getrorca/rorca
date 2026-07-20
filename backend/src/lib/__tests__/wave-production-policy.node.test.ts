@@ -135,6 +135,12 @@ test('dispatch fence detects queue, worker or runner policy drift without relabe
     () => assertWavePolicyEnvelope(envelope, productionInput({ environment: { ...productionInput().environment, killSwitch: 'true' } })),
     /dispatch policy changed/,
   );
+  // A control mutation advances the epoch and therefore invalidates an already
+  // queued fence even if its human-readable limits happen to be unchanged.
+  assert.throws(
+    () => assertWavePolicyEnvelope(envelope, productionInput({ rollout: { ...productionInput().rollout, policyEpoch: 2 } })),
+    /dispatch policy changed/,
+  );
   assert.equal(envelope.effective.orchestrationMode, 'wave-parallel');
   assert.equal(envelope.allowed, true);
 });
@@ -164,4 +170,23 @@ test('governance migration is additive and never touches pg-boss or historical r
   assert.match(migration, /CREATE TABLE IF NOT EXISTS wave_parallel_governance_audit/);
   assert.doesNotMatch(migration, /(?:UPDATE|DELETE FROM)\s+pipeline_runs/i);
   assert.doesNotMatch(migration, /(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE)[^;]*\bpgboss\b/i);
+});
+
+test('dispatch claim has a deterministic single transaction ownership/capacity boundary', () => {
+  const migration = fs.readFileSync(path.join(repositoryRoot, 'backend/src/db/pg-migrations/20260719106000_wave_dispatch_atomicity.sql'), 'utf8');
+  const governance = fs.readFileSync(path.join(repositoryRoot, 'backend/src/lib/wave-production-governance.ts'), 'utf8');
+  assert.match(migration, /dispatch_owner TEXT/);
+  assert.match(migration, /dispatch_fence TEXT/);
+  assert.match(migration, /wave_parallel_capacity_reservations/);
+  assert.match(migration, /bump_wave_rollout_policy_epoch/);
+  assert.match(migration, /audit_wave_rollout_control_mutation/);
+  assert.match(migration, /release_wave_capacity_reservation/);
+  assert.match(migration, /ON DELETE CASCADE/);
+  const claim = governance.slice(governance.indexOf('export async function claimWaveProductionDispatch'));
+  assert.match(claim, /transaction\(async \(client/);
+  assert.match(claim, /pg_advisory_xact_lock/);
+  assert.match(claim, /FOR UPDATE/);
+  assert.match(claim, /INSERT INTO wave_parallel_capacity_reservations/);
+  assert.match(claim, /orchestration_mode = 'wave-parallel' AND status IN \('starting', 'running'\)/);
+  assert.match(claim, /status = 'starting'/);
 });

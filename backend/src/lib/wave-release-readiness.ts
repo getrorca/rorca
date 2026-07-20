@@ -7,6 +7,7 @@ import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { canonicalJson } from './wave-qualification-evidence';
 
 export const WAVE_RELEASE_READINESS_SCHEMA = 'rorca.wave-release-readiness/v1' as const;
+export const WAVE_RELEASE_EVIDENCE_SCHEMA = 'rorca.wave-release-evidence/v1' as const;
 
 export const WAVE_REVIEW_ROLES = [
   'architecture',
@@ -61,6 +62,79 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const GIT_OID = /^[0-9a-f]{40,64}$/;
 const MAX_DURATION_SECONDS = 7 * 24 * 60 * 60;
+
+// Resolution is intentionally supplied by a trusted durable artifact store, never
+// by packet fields. A digest-shaped caller string is only a lookup key.
+export interface WaveResolvedEvidence {
+  digest: string;
+  sourceRevision: string;
+  kind: 'reviewer_attestation' | 'ci_attestation' | 'durable_db_wal' | 'git_integration' | 'independent_checker' | 'canary' | 'soak' | 'rollback' | 'nonmutation' | 'wpe_evidence_bundle';
+  durable: true;
+  authenticated: true;
+  subjectId?: string;
+}
+export type WaveEvidenceResolver = (digest: string) => WaveResolvedEvidence | undefined;
+
+export interface WaveReleaseEvidenceAttestation {
+  schemaVersion: typeof WAVE_RELEASE_EVIDENCE_SCHEMA;
+  workspaceId: string;
+  digest: string;
+  sourceRevision: string;
+  kind: WaveResolvedEvidence['kind'];
+  subjectId?: string;
+  operatorId: string;
+  attestedAt: string;
+}
+
+function evidenceAttestationSignature(
+  attestation: WaveReleaseEvidenceAttestation,
+  trustedKey: string,
+): string {
+  if (Buffer.byteLength(trustedKey) < 32) fail('evidence attestation key must be at least 32 bytes');
+  return createHmac('sha256', trustedKey).update(canonicalJson(attestation)).digest('hex');
+}
+
+export function signWaveReleaseEvidence(
+  attestation: WaveReleaseEvidenceAttestation,
+  trustedKey: string,
+): string {
+  assertWaveReleaseEvidenceAttestation(attestation);
+  return evidenceAttestationSignature(attestation, trustedKey);
+}
+
+export function assertWaveReleaseEvidenceAttestation(value: unknown): WaveReleaseEvidenceAttestation {
+  const item = exactKeys(value, [
+    'schemaVersion', 'workspaceId', 'digest', 'sourceRevision', 'kind',
+    'subjectId', 'operatorId', 'attestedAt',
+  ].filter(key => key !== 'subjectId' || Object.prototype.hasOwnProperty.call(record(value, 'evidence attestation'), key)), 'evidence attestation');
+  if (item.schemaVersion !== WAVE_RELEASE_EVIDENCE_SCHEMA) fail('unsupported evidence attestation version');
+  token(item.workspaceId, 'evidence workspace ID');
+  digest(item.digest, 'evidence digest');
+  revision(item.sourceRevision, 'evidence source revision');
+  const kinds: WaveResolvedEvidence['kind'][] = [
+    'reviewer_attestation', 'ci_attestation', 'durable_db_wal', 'git_integration',
+    'independent_checker', 'canary', 'soak', 'rollback', 'nonmutation', 'wpe_evidence_bundle',
+  ];
+  if (!kinds.includes(item.kind as WaveResolvedEvidence['kind'])) fail('evidence kind is unsupported');
+  if (item.subjectId !== undefined) token(item.subjectId, 'evidence subject ID');
+  token(item.operatorId, 'evidence operator ID');
+  const attestedAt = Date.parse(String(item.attestedAt));
+  if (!Number.isFinite(attestedAt)) fail('evidence attestation time is invalid');
+  return item as unknown as WaveReleaseEvidenceAttestation;
+}
+
+export function verifyWaveReleaseEvidence(input: {
+  attestation: unknown;
+  authorization: string;
+  trustedKey: string;
+}): WaveReleaseEvidenceAttestation {
+  const attestation = assertWaveReleaseEvidenceAttestation(input.attestation);
+  if (!/^[0-9a-f]{64}$/.test(input.authorization)) fail('evidence authorization is malformed');
+  const expected = Buffer.from(evidenceAttestationSignature(attestation, input.trustedKey), 'hex');
+  const actual = Buffer.from(input.authorization, 'hex');
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) fail('evidence authorization is invalid');
+  return attestation;
+}
 
 export interface WaveIndependentReview {
   role: WaveReviewRole;
@@ -192,7 +266,16 @@ function exactInventory<T extends string>(observed: readonly T[], required: read
     || required.some(item => !observed.includes(item))) fail(`${label} is incomplete or duplicated`);
 }
 
-function assertBoundedRun(value: unknown, label: string): void {
+function resolveEvidence(resolve: WaveEvidenceResolver | undefined, evidenceDigest: unknown, sourceRevision: string, kinds: readonly WaveResolvedEvidence['kind'][], label: string, subjectId?: string): void {
+  digest(evidenceDigest, `${label} evidence`);
+  if (!resolve) fail('trusted durable evidence resolver is required');
+  const evidence = resolve(evidenceDigest);
+  if (!evidence || evidence.digest !== evidenceDigest || evidence.sourceRevision !== sourceRevision || evidence.durable !== true || evidence.authenticated !== true || !kinds.includes(evidence.kind) || (subjectId && evidence.subjectId !== subjectId)) {
+    fail(`${label} evidence does not resolve to an authenticated durable artifact at the PR head`);
+  }
+}
+
+function assertBoundedRun(value: unknown, label: string, sourceRevision: string, resolve: WaveEvidenceResolver | undefined, kind: 'canary' | 'soak'): void {
   const run = exactKeys(value, [
     'environment', 'verdict', 'durationSeconds', 'automaticFlakyRetries', 'leakedResourceCount',
     'unexplainedStateDivergenceCount', 'unresolvedCriticalHighFindings', 'evidenceDigest',
@@ -205,10 +288,15 @@ function assertBoundedRun(value: unknown, label: string): void {
   if (Number(run.leakedResourceCount) !== 0 || Number(run.unexplainedStateDivergenceCount) !== 0 || Number(run.unresolvedCriticalHighFindings) !== 0) {
     fail(`${label} has unresolved safety findings`);
   }
-  digest(run.evidenceDigest, `${label} evidence`);
+  resolveEvidence(resolve, run.evidenceDigest, sourceRevision, [kind], label);
 }
 
-export function assertWaveReleaseReadinessPacket(value: unknown, now = new Date().toISOString()): WaveReleaseReadinessPacket {
+export function assertWaveReleaseReadinessPacket(
+  value: unknown,
+  now: string,
+  resolve: WaveEvidenceResolver,
+  requiredAssertionIds: ReadonlySet<string>,
+): WaveReleaseReadinessPacket {
   const packet = exactKeys(value, [
     'schemaVersion', 'workspaceId', 'qualification', 'pullRequest', 'implementerId', 'reviews',
     'checklist', 'platformMatrix', 'canary', 'soak', 'rollback', 'nonMutation', 'validations',
@@ -243,9 +331,9 @@ export function assertWaveReleaseReadinessPacket(value: unknown, now = new Date(
     if (!WAVE_REVIEW_ROLES.includes(item.role as WaveReviewRole)) fail('review role is unsupported');
     token(item.reviewerId, 'reviewer ID');
     revision(item.reviewedSourceRevision, 'reviewed source revision');
-    digest(item.evidenceDigest, 'review evidence');
     if (item.reviewerId === packet.implementerId) fail('implementer cannot approve an independent review');
     if (item.reviewedSourceRevision !== pullRequest.headRevision || item.verdict !== 'approved' || item.unresolvedCriticalHighFindings !== 0) fail('independent review is stale or not approved');
+    resolveEvidence(resolve, item.evidenceDigest, String(item.reviewedSourceRevision), ['reviewer_attestation'], 'review', String(item.reviewerId));
     return item.reviewerId;
   });
   if (new Set(reviewerIds).size !== reviewerIds.length) fail('each independent review role requires a distinct named reviewer');
@@ -254,6 +342,7 @@ export function assertWaveReleaseReadinessPacket(value: unknown, now = new Date(
   const checklist = packet.checklist.map((value, index) => exactKeys(value, ['requirementId', 'critical', 'verdict', 'invariantIds', 'scenarioIds', 'assertionIds', 'durableEvidenceDigests', 'independentCheckerId', 'humanReviewerId'], `checklist item ${index}`));
   exactInventory(checklist.map(item => item.requirementId as WaveReleaseRequirement), WAVE_RELEASE_REQUIREMENTS, 'release requirement inventory');
   const coveredInvariants = new Set<string>();
+  const coveredAssertions = new Set<string>();
   for (const item of checklist) {
     if (item.critical !== true || item.verdict !== 'passed') fail('critical release requirement is skipped, failed, or ambiguous');
     for (const key of ['invariantIds', 'scenarioIds', 'assertionIds', 'durableEvidenceDigests'] as const) {
@@ -264,14 +353,22 @@ export function assertWaveReleaseReadinessPacket(value: unknown, now = new Date(
       coveredInvariants.add(invariant);
     }
     for (const scenario of item.scenarioIds as unknown[]) token(scenario, 'scenario ID');
-    for (const assertion of item.assertionIds as unknown[]) token(assertion, 'assertion ID');
-    for (const evidence of item.durableEvidenceDigests as unknown[]) digest(evidence, 'durable evidence digest');
+    for (const assertion of item.assertionIds as unknown[]) {
+      token(assertion, 'assertion ID');
+      coveredAssertions.add(assertion);
+    }
+    for (const evidence of item.durableEvidenceDigests as unknown[]) resolveEvidence(resolve, evidence, String(pullRequest.headRevision), ['durable_db_wal', 'git_integration', 'independent_checker', 'canary', 'soak', 'rollback', 'nonmutation'], 'checklist');
     token(item.independentCheckerId, 'independent checker ID');
     token(item.humanReviewerId, 'human reviewer ID');
     if (!reviewerIds.includes(item.humanReviewerId)) fail('checklist human reviewer is not an approved independent reviewer');
     if (item.independentCheckerId === packet.implementerId) fail('implementer cannot be the independent checker');
   }
   if (INVARIANT_IDS.some(id => !coveredInvariants.has(id))) fail('release checklist does not cover every invariant');
+  if (requiredAssertionIds.size === 0
+    || coveredAssertions.size !== requiredAssertionIds.size
+    || [...requiredAssertionIds].some(id => !coveredAssertions.has(id))) {
+    fail('release checklist does not cover the canonical executable assertion registry');
+  }
 
   if (!Array.isArray(packet.platformMatrix)) fail('platform matrix must be an array');
   const matrix = packet.platformMatrix.map((value, index) => exactKeys(value, ['platform', 'nodeMajor', 'postgresMajor', 'isolatedDatabaseOwnedByTestRole', 'criticalChecksSkipped', 'verdict', 'evidenceDigest'], `platform result ${index}`));
@@ -280,23 +377,23 @@ export function assertWaveReleaseReadinessPacket(value: unknown, now = new Date(
   for (const item of matrix) {
     if (!['linux', 'darwin'].includes(String(item.platform)) || ![20, 22].includes(Number(item.nodeMajor)) || item.postgresMajor !== 16
       || item.isolatedDatabaseOwnedByTestRole !== true || item.criticalChecksSkipped !== false || item.verdict !== 'passed') fail('platform qualification is not blocking and isolated');
-    digest(item.evidenceDigest, 'platform evidence');
+    resolveEvidence(resolve, item.evidenceDigest, String(pullRequest.headRevision), ['ci_attestation'], 'platform');
   }
 
-  assertBoundedRun(packet.canary, 'canary');
-  assertBoundedRun(packet.soak, 'soak');
+  assertBoundedRun(packet.canary, 'canary', String(pullRequest.headRevision), resolve, 'canary');
+  assertBoundedRun(packet.soak, 'soak', String(pullRequest.headRevision), resolve, 'soak');
 
   const rollback = exactKeys(packet.rollback, ['productionOptInDisabled', 'newParallelDispatchBlockedImmediately', 'inFlightEvidencePreserved', 'governedDrainVerified', 'governedCancelVerified', 'sequentialExecutionAvailable', 'evidenceDigest'], 'rollback');
   for (const key of ['productionOptInDisabled', 'newParallelDispatchBlockedImmediately', 'inFlightEvidencePreserved', 'governedDrainVerified', 'governedCancelVerified', 'sequentialExecutionAvailable'] as const) {
     if (rollback[key] !== true) fail(`rollback ${key} is not proven`);
   }
-  digest(rollback.evidenceDigest, 'rollback evidence');
+  resolveEvidence(resolve, rollback.evidenceDigest, String(pullRequest.headRevision), ['rollback'], 'rollback');
 
   const nonMutation = exactKeys(packet.nonMutation, ['namespacedTestDataOnly', 'protectedInventoryBeforeDigest', 'protectedInventoryAfterDigest', 'cleanupEvidenceDigest', 'mutations'], 'non-mutation');
   if (nonMutation.namespacedTestDataOnly !== true) fail('qualification data was not proven namespaced');
   digest(nonMutation.protectedInventoryBeforeDigest, 'protected before inventory');
   digest(nonMutation.protectedInventoryAfterDigest, 'protected after inventory');
-  digest(nonMutation.cleanupEvidenceDigest, 'cleanup evidence');
+  resolveEvidence(resolve, nonMutation.cleanupEvidenceDigest, String(pullRequest.headRevision), ['nonmutation'], 'cleanup');
   if (nonMutation.protectedInventoryBeforeDigest !== nonMutation.protectedInventoryAfterDigest) fail('protected production inventory changed');
   const mutations = exactKeys(nonMutation.mutations, ['workspaces', 'specs', 'runs', 'storyEvidence', 'queues', 'branches', 'operatorRecords', 'wal', 'receipts', 'rolloutControls'], 'protected mutations');
   if (Object.values(mutations).some(count => count !== 0)) fail('qualification mutated protected production data');
@@ -306,15 +403,16 @@ export function assertWaveReleaseReadinessPacket(value: unknown, now = new Date(
   exactInventory(validations.map(item => item.id as WaveReleaseValidation), WAVE_RELEASE_VALIDATIONS, 'PR validation inventory');
   for (const validation of validations) {
     revision(validation.sourceRevision, 'validation source revision');
-    digest(validation.evidenceDigest, 'validation evidence');
     if (validation.verdict !== 'passed' || validation.sourceRevision !== pullRequest.headRevision) fail('PR validation is skipped, failed, or stale');
+    resolveEvidence(resolve, validation.evidenceDigest, String(validation.sourceRevision), ['ci_attestation'], 'validation');
   }
 
   return value as WaveReleaseReadinessPacket;
 }
 
 export function waveReleaseReadinessPacketHash(packet: WaveReleaseReadinessPacket): string {
-  assertWaveReleaseReadinessPacket(packet);
+  // Hashing is serialization only; it deliberately does not claim readiness.
+  if (!packet || typeof packet !== 'object') fail('packet must be an object');
   return `sha256:${createHash('sha256').update(canonicalJson(packet)).digest('hex')}`;
 }
 

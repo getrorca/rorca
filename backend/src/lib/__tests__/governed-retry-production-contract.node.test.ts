@@ -48,9 +48,10 @@ test('route persists complete outbox and unique attempts before send and never s
   assert.ok(outbox > 0 && attempts > outbox && createQueue > attempts && send > createQueue);
   assert.doesNotMatch(source.slice(send, send + 500), /\bid\s*:/);
   assert.match(source.slice(send, send + 500), /retryLimit: 5/);
-  assert.match(source, /state = 'prepared'/);
-  assert.match(source, /Durable outbox replay/);
-  assert.match(source, /data->'dispatchIdentity'->>'identityHash'/);
+  assert.match(source, /'outbox_ready'/);
+  assert.match(source, /publishGovernedRetryDispatch/);
+  assert.match(source, /Retry queue rejected durable outbox replay/);
+  assert.doesNotMatch(source, /FROM pgboss\.|(?:INSERT|UPDATE|DELETE)[\s\S]{0,40}pgboss\./i);
 });
 
 test('strict queue payload carries the exact governed dispatch identity', () => {
@@ -65,13 +66,14 @@ test('strict queue payload carries the exact governed dispatch identity', () => 
 test('worker validates identity, revisions, preview, manifest, and durable row before running', () => {
   const source = retryWorker();
   const identity = source.indexOf('verifyGovernedRetryDispatchIdentity');
+  const publication = source.indexOf('publishGovernedRetryDispatch');
   const revisions = source.indexOf("execFileSync('git', ['rev-parse', dispatchIdentity.recoveryRef]");
-  const preview = source.indexOf("previewRow?.status !== 'dispatched'");
-  const manifest = source.indexOf('immutable execution manifest bundle changed');
-  const durable = source.indexOf('durable dispatch identity is missing or inconsistent');
-  const running = source.indexOf("status = 'running', started_at = NOW()");
-  assert.ok(identity > 0 && revisions > identity && preview > revisions && manifest > preview && durable > manifest);
+  const manifest = source.indexOf("refuseBeforeClaim('retry_execution_manifest_changed')");
+  const durable = source.indexOf("refuseBeforeClaim('retry_durable_dispatch_identity_inconsistent')");
+  const running = source.indexOf("status = 'running', started_at = COALESCE(started_at, NOW())");
+  assert.ok(identity > 0 && publication > identity && revisions > publication && manifest > revisions && durable > manifest);
   assert.ok(running > durable);
+  assert.doesNotMatch(source, /retry_preview_not_authorized/);
 });
 
 test('duplicate deliveries are fenced before agent start and leases renew while executing', () => {
@@ -97,6 +99,15 @@ test('worker finalization is optimistic and prior evidence is never updated or d
   assert.doesNotMatch(source, /UPDATE\s+(?:wal_events|story_closeout_decisions|story_integration_ledger|story_commits)\b/i);
   assert.match(migration, /BEFORE UPDATE OR DELETE ON governed_retry_carry_forward/);
   assert.match(migration, /BEFORE UPDATE OR DELETE ON governed_retry_attempt_events/);
+});
+
+test('worker replays queued wave finalization through the canonical endpoint before deriving terminal status', () => {
+  const source = worker;
+  assert.match(source, /replayWorkerFallbackResults/);
+  assert.match(source, /\/api\/pipeline\/story-result/);
+  assert.match(source, /fallbackReplay\.atomicFinalizations > 0/);
+  assert.match(source, /expectedRetryStoryIds\.every\(storyId => latest\.get\(storyId\) === 'pass'\)/);
+  assert.doesNotMatch(source, /INSERT INTO story_results[\s\S]{0,400}integrationFinalization/);
 });
 
 test('migration owns no pg-boss tables and constrains one append-only identity per attempt', () => {

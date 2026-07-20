@@ -7,6 +7,7 @@ import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { WAVE_CANONICAL_ASSERTION_IDS } from './wave-canonical-assertions';
 
 export const QUALIFICATION_REPORT_SCHEMA = 'rorca.wave-qualification.report/v1' as const;
 export const QUALIFICATION_RECEIPT_SCHEMA = 'rorca.wave-qualification.receipt/v1' as const;
@@ -21,6 +22,8 @@ export const EVIDENCE_CLASSES = [
   'durable_database_wal',
   'git_integration',
   'independent_checker',
+  'canary_soak',
+  'rollback_rehearsal',
   'operator_observation',
   'skipped_check',
   'environmental_blocker',
@@ -29,40 +32,123 @@ export type EvidenceClass = typeof EVIDENCE_CLASSES[number];
 export type EvidenceVerdict = 'passed' | 'failed' | 'skipped' | 'blocked';
 
 const AUTHORITATIVE_CLASSES = new Set<EvidenceClass>([
-  'durable_database_wal', 'git_integration', 'independent_checker',
+  'durable_database_wal', 'git_integration', 'independent_checker', 'canary_soak', 'rollback_rehearsal',
 ]);
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const GIT_OID = /^[0-9a-f]{40,64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ABSOLUTE_OR_SECRET = /(?:^|[\s"'])(?:\/(?:[^\s"/]+\/)+[^\s"/]*|[A-Za-z]:\\|(?:postgres(?:ql)?|https?):\/\/[^\s/@:]+:[^\s/@]+@)|(?:api[_-]?key|password|credential|raw[_-]?prompt|production[_-]?payload|stack[_-]?trace)/i;
 const MAX_COUNT = 65_535;
+export const SYNTHETIC_DIAGNOSTIC_AUTHORITY = 'synthetic_diagnostic' as const;
+export const MEASURED_EVIDENCE_AUTHORITY = 'measured' as const;
+export type EvidenceAuthority = typeof SYNTHETIC_DIAGNOSTIC_AUTHORITY | typeof MEASURED_EVIDENCE_AUTHORITY;
 
+export function loadCanonicalQualificationAssertionIds(): string[] {
+  if (WAVE_CANONICAL_ASSERTION_IDS.some(id => !SAFE_ID.test(id))
+    || new Set(WAVE_CANONICAL_ASSERTION_IDS).size !== WAVE_CANONICAL_ASSERTION_IDS.length) {
+    fail('compiled canonical qualification assertion registry is missing, malformed, or duplicated');
+  }
+  return [...WAVE_CANONICAL_ASSERTION_IDS];
+}
+
+// Every transitive implementation, policy, migration, fixture, test, and artifact
+// reader that can affect WPE conclusions is bound into the identity manifest.
 const IDENTITY_FILES = {
   engine: [
-    'backend/src/lib/wave-integration-protocol.ts',
-    'backend/src/lib/wave-qualification-model.ts',
+    'backend/src/lib/execution-engine.ts',
+    'backend/src/worker.ts',
+    'backend/src/runner/local-runner.ts',
+    'backend/src/server.ts',
+    'backend/src/db/index.ts',
+    'backend/src/lib/errors.ts',
+    'backend/src/lib/fallback-replay.ts',
+    'backend/src/lib/resilient-post.ts',
+    'backend/src/lib/pg-boss-schemas.ts',
+    'backend/src/routes/pipeline.ts',
+    'backend/src/routes/wave-qualification.ts',
+    'backend/src/lib/parallel-wave-core.ts',
+    'backend/src/lib/qualification-isolation.ts',
     'backend/src/lib/rejected-wave-closeout.ts',
+    'backend/src/lib/story-execution-adapter.ts',
+    'backend/src/lib/story-execution-packet.ts',
+    'backend/src/lib/wave-compiler.ts',
+    'backend/src/lib/wave-execution-safety.ts',
+    'backend/src/lib/wave-integration-protocol.ts',
+    'backend/src/lib/wave-integration-store.ts',
+    'backend/src/lib/story-host-validation.ts',
+    'backend/src/lib/governed-retry-publication.ts',
+    'backend/src/lib/wave-parallel-policy.ts',
+    'backend/src/lib/wave-production-governance.ts',
+    'backend/src/lib/wave-production-policy.ts',
+    'backend/src/lib/wave-canonical-assertions.ts',
+    'backend/src/lib/wave-qualification-evidence.ts',
+    'backend/src/lib/wave-qualification-model.ts',
+    'backend/src/lib/wave-release-readiness.ts',
+    'backend/src/scripts/build-wave-qualification-evidence.ts',
+    'backend/src/scripts/wave-qualification-runner.ts',
+    'scripts/run-wave-qualification.mjs',
+    'scripts/run-wave-stress-qualification.mjs',
   ],
   policy: [
-    'docs/qualification/wave-stress-baseline-v1.json',
     'docs/qualification/wave-parallel-invariants.json',
+    'docs/qualification/wave-parallel-release-checklist.md',
+    'docs/qualification/wave-production-rollout.md',
+    'docs/qualification/wave-stress-baseline-v1.json',
+    'docs/qualification/wave-parallel-v1/cross-reference.json',
+    'docs/qualification/wave-parallel-v1/requirements.json',
+    'docs/qualification/wave-parallel-v1/qualification.md',
   ],
   compiler: [
     'backend/src/lib/wave-compiler.ts',
+    'backend/src/lib/wave-integration-protocol.ts',
   ],
   tests: [
     'backend/src/lib/__tests__/qualification-isolation.node.test.ts',
     'backend/src/lib/__tests__/deterministic-fixture-agent.node.test.ts',
+    'backend/src/lib/__tests__/parallel-wave-core.test.ts',
+    'backend/src/lib/__tests__/story-execution-packet.test.ts',
+    'backend/src/lib/__tests__/wave-compiler.test.ts',
+    'backend/src/lib/__tests__/wave-execution-safety.node.test.ts',
+    'backend/src/lib/__tests__/wave-parallel-policy.test.ts',
+    'backend/src/lib/__tests__/wave-production-policy.node.test.ts',
     'backend/src/lib/__tests__/successful-wave-integration.node.test.ts',
     'backend/src/lib/__tests__/rejected-wave-closeout.node.test.ts',
     'backend/src/lib/__tests__/conflicted-wave-integration.node.test.ts',
     'backend/src/lib/__tests__/wave-qualification-model.node.test.ts',
+    'backend/src/lib/__tests__/wave-qualification-evidence.node.test.ts',
+    'backend/src/lib/__tests__/wave-release-readiness.node.test.ts',
+    'backend/src/lib/__tests__/wave-integration-store.test.ts',
+    'backend/src/lib/__tests__/governed-retry-publication.test.ts',
+    'backend/src/lib/__tests__/fallback-replay.test.ts',
     'backend/src/__tests__/fixtures/independent-wave-trace-checker.mjs',
+    'backend/src/__tests__/fixtures/wave-fixture-agent.mjs',
+    'backend/src/__tests__/fixtures/wave-isolation-smoke-scenario.mjs',
+    'scripts/__tests__/wave-qualification-launcher.test.mjs',
+    'scripts/__tests__/wave-qualification-traceability.test.mjs',
+    'scripts/check-wave-qualification-invariants.mjs',
   ],
   configuration: [
     'docs/qualification/wave-stress-baseline-v1.json',
     'backend/src/__tests__/fixtures/wave-agent-scenarios.json',
     'backend/src/__tests__/fixtures/wave-fault-points.json',
+    'backend/src/db/pg-migrations/20260719090500_wave_story_integration_ledger.sql',
+    'backend/src/db/pg-migrations/20260719091000_wave_conflict_recovery.sql',
+    'backend/src/db/pg-migrations/20260719092000_wave_execution_safety.sql',
+    'backend/src/db/pg-migrations/20260719102000_wave_stress_qualification.sql',
+    'backend/src/db/pg-migrations/20260719103000_wave_qualification_receipts.sql',
+    'backend/src/db/pg-migrations/20260719104000_wave_production_governance.sql',
+    'backend/src/db/pg-migrations/20260719105000_wave_release_readiness.sql',
+    'backend/src/db/pg-migrations/20260719106000_wave_dispatch_atomicity.sql',
+    'backend/src/db/pg-migrations/20260719106500_wave_release_evidence_artifacts.sql',
+    'backend/src/db/pg-migrations/20260719107000_governed_retry_publication_cancellation.sql',
+    '.github/workflows/ci.yml',
+    '.github/workflows/wave-qualification.yml',
+    'Dockerfile',
+    'Dockerfile.backend',
+    'package.json',
+    'package-lock.json',
+    'backend/package.json',
+    'backend/tsconfig.json',
   ],
 } as const;
 
@@ -73,6 +159,8 @@ export interface QualificationEvidenceAssertion {
   evidenceClass: EvidenceClass;
   verdict: EvidenceVerdict;
   sourceDigest: string;
+  sourceRevision: string;
+  authority: EvidenceAuthority;
   durable: boolean;
   assertionCode: string;
 }
@@ -321,8 +409,9 @@ function validateAssertions(assertions: readonly QualificationEvidenceAssertion[
     validateToken(assertion.scenarioId, 'scenario ID');
     validateToken(assertion.assertionCode, 'assertion code');
     if (ids.has(assertion.id)) fail('duplicate assertion ID');
-    if (!EVIDENCE_CLASSES.includes(assertion.evidenceClass) || !DIGEST.test(assertion.sourceDigest)) fail('assertion evidence source is invalid');
-    if (assertion.evidenceClass === 'automated_test_output' && assertion.durable) fail('terminal/test output cannot be promoted to durable proof');
+    if (!EVIDENCE_CLASSES.includes(assertion.evidenceClass) || !DIGEST.test(assertion.sourceDigest) || !GIT_OID.test(assertion.sourceRevision)) fail('assertion evidence source is invalid');
+    if (assertion.authority !== MEASURED_EVIDENCE_AUTHORITY && assertion.authority !== SYNTHETIC_DIAGNOSTIC_AUTHORITY) fail('assertion evidence authority is invalid');
+    if ((assertion.evidenceClass === 'automated_test_output' || assertion.authority === SYNTHETIC_DIAGNOSTIC_AUTHORITY) && assertion.durable) fail('synthetic or terminal/test output cannot be promoted to durable proof');
     ids.add(assertion.id);
   }
 }
@@ -338,7 +427,7 @@ function gateReasons(input: {
   if (input.semanticCloseout !== 'succeeded') reasons.add('semantic-closeout-not-succeeded');
   if (input.scenarios.length === 0 || input.scenarios.some(item => item.verdict !== 'passed')) reasons.add('required-scenario-not-passed');
   for (const required of AUTHORITATIVE_CLASSES) {
-    if (!input.assertions.some(item => item.evidenceClass === required && item.verdict === 'passed' && item.durable)) {
+    if (!input.assertions.some(item => item.evidenceClass === required && item.verdict === 'passed' && item.durable && item.authority === MEASURED_EVIDENCE_AUTHORITY)) {
       reasons.add(`missing-${required}`);
     }
   }
@@ -360,6 +449,7 @@ export function buildQualificationReport(input: {
   commitTopologyDigest: string;
   resourceBudgets: QualificationReport['resourceBudgets'];
   evidenceAssertions: QualificationEvidenceAssertion[];
+  requiredAssertionIds: readonly string[];
   telemetry: QualificationTelemetry[];
   semanticCloseout: QualificationReport['semanticCloseout'];
 }): QualificationReport {
@@ -367,7 +457,15 @@ export function buildQualificationReport(input: {
   validateToken(input.queueNamespace, 'queue namespace');
   validateToken(input.repositorySeed, 'repository seed');
   validateAssertions(input.evidenceAssertions);
+  if (input.evidenceAssertions.some(assertion => assertion.sourceRevision !== input.localIdentity.sourceRevision)) fail('evidence is not bound to the exact source HEAD');
   const assertionIds = new Set(input.evidenceAssertions.map(item => item.id));
+  const requiredAssertionIds = new Set(input.requiredAssertionIds);
+  if (requiredAssertionIds.size === 0
+    || requiredAssertionIds.size !== input.requiredAssertionIds.length
+    || assertionIds.size !== requiredAssertionIds.size
+    || [...requiredAssertionIds].some(id => !assertionIds.has(id))) {
+    fail('qualification assertion inventory does not exactly match the canonical registry');
+  }
   const scenarioResults = [...input.scenarioResults].sort((a, b) => a.id.localeCompare(b.id)).map(item => ({
     ...item,
     assertionIds: [...item.assertionIds].sort(),
@@ -507,8 +605,9 @@ export function assertPortableQualificationReport(value: unknown): asserts value
     if (!['passed', 'failed', 'skipped', 'blocked'].includes(scenario.verdict) || !Array.isArray(scenario.assertionIds) || scenario.assertionIds.length === 0 || scenario.assertionIds.some(id => typeof id !== 'string' || !SAFE_ID.test(id))) fail('scenario result is malformed');
   }
   if (!Array.isArray(report.evidenceAssertions)) fail('evidence assertions must be an array');
-  for (const assertion of report.evidenceAssertions) exactKeys(assertion, ['id', 'invariantId', 'scenarioId', 'evidenceClass', 'verdict', 'sourceDigest', 'durable', 'assertionCode'], 'evidence assertion');
+  for (const assertion of report.evidenceAssertions) exactKeys(assertion, ['id', 'invariantId', 'scenarioId', 'evidenceClass', 'verdict', 'sourceDigest', 'sourceRevision', 'authority', 'durable', 'assertionCode'], 'evidence assertion');
   validateAssertions(report.evidenceAssertions);
+  if (report.evidenceAssertions.some(assertion => assertion.sourceRevision !== report.source.revision)) fail('report evidence is not bound to the exact source HEAD');
   const assertionIds = new Set(report.evidenceAssertions.map(assertion => assertion.id));
   if (report.scenarioResults.some(scenario => scenario.assertionIds.some(id => !assertionIds.has(id)))) fail('scenario assertion binding is incomplete');
   exactKeys(report.gitInventories, ['refsDigest', 'worktreesDigest', 'refCount', 'worktreeCount', 'commitTopologyDigest'], 'Git inventories');
@@ -554,6 +653,7 @@ export function verifyQualificationReceipt(input: {
   report: QualificationReport;
   localIdentity: LocalQualificationIdentity;
   requiredScenarioIds: readonly string[];
+  requiredAssertionIds: readonly string[];
   trustedIssuers: Record<string, Record<string, string>>;
   now: string;
 }): QualificationReceipt {
@@ -610,6 +710,14 @@ export function verifyQualificationReceipt(input: {
     [receipt.testSuiteDigest, input.localIdentity.testSuiteDigest], [receipt.configurationDigest, input.localIdentity.configurationDigest],
   ];
   if (identityPairs.some(([receiptValue, localValue]) => receiptValue !== localValue)) fail('receipt does not match local repository, workspace, revision, policy, compiler, engine, invariant, test, or configuration identity');
+  const reportAssertionIds = new Set(input.report.evidenceAssertions.map(item => item.id));
+  const requiredAssertionIds = new Set(input.requiredAssertionIds);
+  if (requiredAssertionIds.size === 0
+    || requiredAssertionIds.size !== input.requiredAssertionIds.length
+    || reportAssertionIds.size !== requiredAssertionIds.size
+    || [...requiredAssertionIds].some(id => !reportAssertionIds.has(id))) {
+    fail('receipt report does not contain the exact canonical assertion inventory');
+  }
   const verdicts = new Map(receipt.requiredScenarios.map(item => [item.id, item.verdict]));
   if (new Set(receipt.requiredScenarios.map(item => item.id)).size !== receipt.requiredScenarios.length) fail('receipt scenario IDs are duplicated');
   if (input.requiredScenarioIds.some(id => verdicts.get(id) !== 'passed')) fail('receipt is missing a required passing scenario');
@@ -635,7 +743,7 @@ export function renderQualificationReport(report: QualificationReport, receipt: 
     ...EVIDENCE_CLASSES.flatMap(kind => [
       `### ${kind}`,
       ...report.evidenceAssertions.filter(item => item.evidenceClass === kind)
-        .map(item => `- ${item.id}: ${item.verdict}; durable=${item.durable}; source=${item.sourceDigest}`),
+        .map(item => `- ${item.id}: ${item.verdict}; authority=${item.authority}; durable=${item.durable}; head=${item.sourceRevision}; source=${item.sourceDigest}`),
       ...(report.evidenceAssertions.some(item => item.evidenceClass === kind) ? [] : ['- none']),
     ]),
     '', '## Runtime telemetry',

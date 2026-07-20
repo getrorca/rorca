@@ -54,23 +54,14 @@ export default async function globalSetup(): Promise<void> {
 
     // Test harness shim for Supabase/PostgREST auth helpers used by RLS migrations.
     // Local Postgres doesn't provide auth schema/functions, so create minimal stubs.
-    let authenticatedRoleAvailable = true;
-    try {
-      await testPool.query(`
-        DO $$
-        BEGIN
-          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-            CREATE ROLE authenticated;
-          END IF;
-        END $$;
-      `);
-    } catch (error: unknown) {
-      // Qualification uses a deliberately least-privilege owner role. Its
-      // isolated database does not need a cluster-global test helper role.
-      if ((error as { code?: string }).code !== '42501') throw error;
-      authenticatedRoleAvailable = false;
-      console.warn('[jest-setup] authenticated helper role unavailable under least-privilege qualification role');
-    }
+    await testPool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+          CREATE ROLE authenticated;
+        END IF;
+      END $$;
+    `);
 
     await testPool.query(`CREATE SCHEMA IF NOT EXISTS auth`);
 
@@ -98,9 +89,9 @@ export default async function globalSetup(): Promise<void> {
     try {
       await testPool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto');
     } catch { /* extension may not be available, non-fatal */ }
-    try {
-      await testPool.query('CREATE EXTENSION IF NOT EXISTS vector');
-    } catch { /* pgvector may not be installed, non-fatal */ }
+    // Wave qualification requires pgvector; fail immediately rather than
+    // silently reducing coverage when the platform image is incomplete.
+    await testPool.query('CREATE EXTENSION IF NOT EXISTS vector');
     // Tests run in lite-mode semantics. Pre-mark the AGE graph migration as
     // skipped so globalSetup never executes LOAD 'age', which poisons later DDL
     // in this local harness even when the migration is rolled back.
@@ -147,12 +138,10 @@ export default async function globalSetup(): Promise<void> {
     `);
 
     // Test-only grant shim so RLS tests exercise policies instead of failing on SQL GRANTs.
-    if (authenticatedRoleAvailable) {
-      await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
-      await testPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, rorca, auth TO authenticated`);
-      await testPool.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public, rorca TO authenticated`);
-      await testPool.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public, rorca, auth TO authenticated`);
-    }
+    await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
+    await testPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, rorca, auth TO authenticated`);
+    await testPool.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public, rorca TO authenticated`);
+    await testPool.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public, rorca, auth TO authenticated`);
 
     console.log('[jest-setup] Migrations applied to test database');
   } finally {

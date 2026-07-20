@@ -58,6 +58,8 @@ export interface WaveRolloutPolicy {
   productionActivationApprovalId: string | null;
   releaseReadinessCurrent: boolean;
   operatorActivationCurrent: boolean;
+  /** Monotonically increases on every rollout-control mutation. */
+  policyEpoch: number;
 }
 
 export interface WavePolicyEnvironment {
@@ -109,6 +111,7 @@ export interface WavePolicyEnvelope {
     maxActiveWaveRunsPerWorkspace: number;
     releaseReadinessPacketId: string | null;
     productionActivationApprovalId: string | null;
+    policyEpoch: number;
   };
   fencingPolicy: typeof WAVE_FENCING_POLICY;
   fence: string;
@@ -156,6 +159,7 @@ export function defaultWaveRolloutPolicy(): WaveRolloutPolicy {
     productionActivationApprovalId: null,
     releaseReadinessCurrent: false,
     operatorActivationCurrent: false,
+    policyEpoch: 0,
   };
 }
 
@@ -279,6 +283,7 @@ export function evaluateWaveProductionPolicy(input: WavePolicyEvaluationInput): 
       maxActiveWaveRunsPerWorkspace: input.rollout.maxActiveWaveRunsPerWorkspace,
       releaseReadinessPacketId: input.rollout.releaseReadinessPacketId,
       productionActivationApprovalId: input.rollout.productionActivationApprovalId,
+      policyEpoch: input.rollout.policyEpoch,
     },
     fencingPolicy: WAVE_FENCING_POLICY,
   };

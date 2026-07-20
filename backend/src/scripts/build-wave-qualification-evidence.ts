@@ -63,27 +63,36 @@ function main(): void {
   const identity = computeLocalQualificationIdentity(repositoryRoot, 'rorca');
   const registry = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'docs', 'qualification', 'wave-parallel-invariants.json'), 'utf8')) as {
     invariants: Array<{ id: string; statement: string }>;
+    scenarios: Array<{ id: string; name: string }>;
+  };
+  const crossReference = JSON.parse(fs.readFileSync(
+    path.join(repositoryRoot, 'docs', 'qualification', 'wave-parallel-v1', 'cross-reference.json'),
+    'utf8',
+  )) as {
+    entries: Array<{
+      requirementId: string;
+      invariantIds: string[];
+      scenarioIds: string[];
+      assertionIds: string[];
+      evidenceClasses: QualificationEvidenceAssertion['evidenceClass'][];
+    }>;
   };
   const budgets = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'docs', 'qualification', 'wave-stress-baseline-v1.json'), 'utf8')) as QualificationBudgetSet;
   const results = QUALIFICATION_SCENARIOS.flatMap(scenario => ([2, 4] as const).map(parallelism => runQualificationSchedule({ seed, scenario, parallelism })));
   const normalizedDigest = hash(results.map(result => result.normalized));
 
-  const assertions: QualificationEvidenceAssertion[] = QUALIFICATION_SCENARIOS.map((scenario, index) => ({
-    id: `WPE-AUTO-${String(index + 1).padStart(3, '0')}`,
-    invariantId: registry.invariants[index % registry.invariants.length].id,
-    scenarioId: scenario,
-    evidenceClass: 'automated_test_output',
+  const assertions: QualificationEvidenceAssertion[] = crossReference.entries.map(entry => ({
+    id: entry.assertionIds[0],
+    invariantId: entry.invariantIds[0],
+    scenarioId: entry.scenarioIds[0],
+    evidenceClass: entry.evidenceClasses[0],
     verdict: parentPassed ? 'passed' : 'failed',
-    sourceDigest: normalizedDigest,
+    sourceDigest: hash({ normalizedDigest, requirementId: entry.requirementId }),
+    sourceRevision: identity.sourceRevision,
+    authority: 'synthetic_diagnostic' as const,
     durable: false,
-    assertionCode: parentPassed ? 'model-oracle-passed' : 'model-oracle-failed',
+    assertionCode: parentPassed ? 'cross-reference-regression-passed' : 'cross-reference-regression-failed',
   }));
-  assertions.push(
-    { id: 'WPE-DURABLE-DB', invariantId: 'WPE-INV-006', scenarioId: 'qualification-run', evidenceClass: 'durable_database_wal', verdict: 'blocked', sourceDigest: hash('provider-free-stress-has-no-durable-db-wal'), durable: true, assertionCode: 'durable-db-wal-not-attached' },
-    { id: 'WPE-DURABLE-GIT', invariantId: 'WPE-INV-005', scenarioId: 'qualification-run', evidenceClass: 'git_integration', verdict: 'blocked', sourceDigest: hash('provider-free-stress-has-no-git-integration-proof'), durable: true, assertionCode: 'git-proof-not-attached' },
-    { id: 'WPE-INDEPENDENT', invariantId: 'WPE-INV-001', scenarioId: 'qualification-run', evidenceClass: 'independent_checker', verdict: 'blocked', sourceDigest: hash('provider-free-stress-has-no-checker-verdict'), durable: true, assertionCode: 'checker-verdict-not-attached' },
-  );
-
   const observed = {} as Record<PerformanceMetric, number>;
   for (const metric of Object.keys(budgets.metrics) as PerformanceMetric[]) {
     observed[metric] = Math.max(...results.map(result => result.performance[metric]));
@@ -94,11 +103,20 @@ function main(): void {
       return [metric, { observed: observed[metric], cap, verdict: observed[metric] <= cap ? 'passed' : 'failed' }];
     }),
   );
-  const scenarioResults = QUALIFICATION_SCENARIOS.map((scenario, index) => ({
+  const runtimeScenarioResults = QUALIFICATION_SCENARIOS.map((scenario, index) => ({
     id: scenario,
     verdict: parentPassed ? 'passed' as const : 'failed' as const,
-    assertionIds: [`WPE-AUTO-${String(index + 1).padStart(3, '0')}`],
+    assertionIds: [assertions[index % assertions.length].id],
   }));
+  const canonicalScenarioResults = registry.scenarios.map(scenario => ({
+    id: scenario.id,
+    verdict: parentPassed ? 'passed' as const : 'failed' as const,
+    assertionIds: crossReference.entries
+      .filter(entry => entry.scenarioIds.includes(scenario.id))
+      .flatMap(entry => entry.assertionIds)
+      .sort(),
+  }));
+  const scenarioResults = [...runtimeScenarioResults, ...canonicalScenarioResults];
   const telemetry = buildQualificationTelemetry({
     effectiveMode: 'wave_parallel',
     requestedParallelism: 4,
@@ -128,6 +146,7 @@ function main(): void {
     commitTopologyDigest: hash(results.map(result => result.normalized.commitTopology)),
     resourceBudgets,
     evidenceAssertions: assertions,
+    requiredAssertionIds: crossReference.entries.flatMap(entry => entry.assertionIds),
     telemetry: [telemetry],
     semanticCloseout: parentPassed ? 'succeeded' : 'failed',
   });

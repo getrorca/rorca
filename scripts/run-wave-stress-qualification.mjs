@@ -153,17 +153,39 @@ if (!profile) {
   } catch {
     evidenceSummary = undefined;
   }
+  let canonicalTraceabilityPassed = false;
+  try {
+    const artifact = JSON.parse(fs.readFileSync(path.join(root, artifactDirectory, 'qualification.json'), 'utf8'));
+    const crossReference = JSON.parse(fs.readFileSync(
+      path.join(root, 'docs', 'qualification', 'wave-parallel-v1', 'cross-reference.json'),
+      'utf8',
+    ));
+    const requiredAssertionIds = crossReference.entries.flatMap(entry => entry.assertionIds).sort();
+    const observedAssertionIds = artifact.report.evidenceAssertions.map(assertion => assertion.id).sort();
+    const scenarioBindings = new Map(artifact.report.scenarioResults.map(result => [result.id, new Set(result.assertionIds)]));
+    canonicalTraceabilityPassed = JSON.stringify(requiredAssertionIds) === JSON.stringify(observedAssertionIds)
+      && crossReference.entries.every(entry => entry.scenarioIds.some(scenarioId =>
+        entry.assertionIds.every(assertionId => scenarioBindings.get(scenarioId)?.has(assertionId)),
+      ));
+  } catch {
+    canonicalTraceabilityPassed = false;
+  }
   const evidencePassed = evidenceExit === 0
     && !evidenceTimedOut
     && evidenceSummary?.schemaVersion === 1
-    && typeof evidenceSummary?.artifactDigest === 'string';
+    && typeof evidenceSummary?.artifactDigest === 'string'
+    && canonicalTraceabilityPassed;
 
   const firstAttempt = true;
   const summary = {
     schemaVersion: 1,
     profile: profileName,
     firstAttempt: true,
+    // `passed` is only the provider-free diagnostic execution result. It is never
+    // a production qualification result: the portable report decides that gate.
     passed: testPassed && evidencePassed,
+    syntheticDiagnostic: true,
+    qualificationGatePassed: evidencePassed ? evidenceSummary.productionEnableAvailable === true : false,
     exitCode: exit.code,
     timedOut,
     captureOverflow,

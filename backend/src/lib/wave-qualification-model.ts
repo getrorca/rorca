@@ -5,6 +5,10 @@
 
 import { createHash } from 'crypto';
 
+// This deterministic oracle is diagnostic only. It does not execute or attest
+// production-like DB/WAL, Git, independent checker, canary/soak, or rollback evidence.
+export const QUALIFICATION_MODEL_AUTHORITY = 'synthetic_diagnostic' as const;
+
 export const QUALIFICATION_FAULT_POINTS = [
   'WPE-FP-001', 'WPE-FP-002', 'WPE-FP-003', 'WPE-FP-004', 'WPE-FP-005',
   'WPE-FP-006', 'WPE-FP-007', 'WPE-FP-008', 'WPE-FP-009',
@@ -138,6 +142,7 @@ export interface QualificationTerminalState {
 }
 
 export interface NormalizedQualificationEvidence {
+  authority: typeof QUALIFICATION_MODEL_AUTHORITY;
   seed: string;
   scenario: QualificationScenario;
   parallelism: 2 | 4;
@@ -152,6 +157,7 @@ export interface NormalizedQualificationEvidence {
 
 export interface QualificationResult {
   schemaVersion: 1;
+  authority: typeof QUALIFICATION_MODEL_AUTHORITY;
   namespace: string;
   seed: string;
   scenario: QualificationScenario;
@@ -534,6 +540,7 @@ export function runQualificationSchedule(input: {
     .sort();
   const canonicalTopology = [...model.commitTopology].sort();
   const normalized: NormalizedQualificationEvidence = {
+    authority: QUALIFICATION_MODEL_AUTHORITY,
     seed: input.seed,
     scenario: input.scenario,
     parallelism: input.parallelism,
@@ -549,6 +556,7 @@ export function runQualificationSchedule(input: {
     + (input.scenario === 'crash-WPE-FP-001' ? 1 : 0);
   const result: QualificationResult = {
     schemaVersion: 1,
+    authority: QUALIFICATION_MODEL_AUTHORITY,
     namespace,
     ...input,
     transitions: model.transitions,
@@ -623,6 +631,9 @@ export function assertRepeatedRunLeakSentinel(results: readonly QualificationRes
 }
 
 export function assertQualificationResult(result: QualificationResult): void {
+  if (result.authority !== QUALIFICATION_MODEL_AUTHORITY || result.normalized.authority !== QUALIFICATION_MODEL_AUTHORITY) {
+    throw new Error('[wave-qualification-model] synthetic diagnostic authority is required');
+  }
   const current: Record<QualificationEntity, Map<string, QualificationState>> = {
     story: new Map(), attempt: new Map(), integration: new Map(), wave: new Map(), run: new Map(),
   };

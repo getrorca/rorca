@@ -41,11 +41,13 @@ const localIdentity: LocalQualificationIdentity = {
 };
 
 const assertions: QualificationEvidenceAssertion[] = [
-  { id: 'A-TEST', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'automated_test_output', verdict: 'passed', sourceDigest: sha('b'), durable: false, assertionCode: 'test-suite-passed' },
-  { id: 'A-DB', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'durable_database_wal', verdict: 'passed', sourceDigest: sha('c'), durable: true, assertionCode: 'wal-closeout-validated' },
-  { id: 'A-GIT', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'git_integration', verdict: 'passed', sourceDigest: sha('d'), durable: true, assertionCode: 'integration-tree-validated' },
-  { id: 'A-CHECK', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'independent_checker', verdict: 'passed', sourceDigest: sha('e'), durable: true, assertionCode: 'checker-agreed' },
-  { id: 'A-OBS', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'operator_observation', verdict: 'passed', sourceDigest: sha('f'), durable: false, assertionCode: 'operator-noted' },
+  { id: 'A-TEST', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'automated_test_output', verdict: 'passed', sourceDigest: sha('b'), sourceRevision: 'a'.repeat(40), authority: 'synthetic_diagnostic', durable: false, assertionCode: 'test-suite-passed' },
+  { id: 'A-DB', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'durable_database_wal', verdict: 'passed', sourceDigest: sha('c'), sourceRevision: 'a'.repeat(40), authority: 'measured', durable: true, assertionCode: 'wal-closeout-validated' },
+  { id: 'A-GIT', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'git_integration', verdict: 'passed', sourceDigest: sha('d'), sourceRevision: 'a'.repeat(40), authority: 'measured', durable: true, assertionCode: 'integration-tree-validated' },
+  { id: 'A-CHECK', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'independent_checker', verdict: 'passed', sourceDigest: sha('e'), sourceRevision: 'a'.repeat(40), authority: 'measured', durable: true, assertionCode: 'checker-agreed' },
+  { id: 'A-CANARY', invariantId: 'WPE-INV-007', scenarioId: 'WPE-Q-001', evidenceClass: 'canary_soak', verdict: 'passed', sourceDigest: sha('a'), sourceRevision: 'a'.repeat(40), authority: 'measured', durable: true, assertionCode: 'canary-soak-head-validated' },
+  { id: 'A-ROLLBACK', invariantId: 'WPE-INV-007', scenarioId: 'WPE-Q-001', evidenceClass: 'rollback_rehearsal', verdict: 'passed', sourceDigest: sha('9'), sourceRevision: 'a'.repeat(40), authority: 'measured', durable: true, assertionCode: 'rollback-head-validated' },
+  { id: 'A-OBS', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'operator_observation', verdict: 'passed', sourceDigest: sha('f'), sourceRevision: 'a'.repeat(40), authority: 'measured', durable: false, assertionCode: 'operator-noted' },
 ];
 
 function telemetry(closeoutStatus: 'succeeded' | 'failed' = 'succeeded') {
@@ -79,6 +81,7 @@ function report(overrides: Partial<Parameters<typeof buildQualificationReport>[0
     commitTopologyDigest: sha('2'),
     resourceBudgets: { peakMemoryMiB: { observed: 40, cap: 64, verdict: 'passed' } },
     evidenceAssertions: assertions,
+    requiredAssertionIds: assertions.map(item => item.id),
     telemetry: [telemetry()],
     semanticCloseout: 'succeeded',
     ...overrides,
@@ -102,6 +105,7 @@ function verify(value: unknown, valueReport = report(), identity = localIdentity
     report: valueReport,
     localIdentity: identity,
     requiredScenarioIds: required,
+    requiredAssertionIds: assertions.map(item => item.id),
     trustedIssuers: { 'rorca-ci': { 'qualification-v1': key } },
     now: '2026-07-19T13:00:00.000Z',
   });
@@ -125,22 +129,32 @@ test('canonical portable JSON and human report are deterministic across independ
 
 test('production enable requires durable database/WAL, Git, checker, telemetry and successful closeout evidence', () => {
   assert.equal(report().productionEnableAvailable, true);
+  const terminalAssertions = assertions.map(item => ({
+    ...item,
+    evidenceClass: 'automated_test_output' as const,
+    authority: 'synthetic_diagnostic' as const,
+    durable: false,
+  }));
   const terminalOnly = report({
-    evidenceAssertions: assertions.filter(item => item.evidenceClass === 'automated_test_output'),
-    scenarioResults: [{ id: 'WPE-Q-001', verdict: 'passed', assertionIds: ['A-TEST'] }],
+    evidenceAssertions: terminalAssertions,
+    scenarioResults: [{ id: 'WPE-Q-001', verdict: 'passed', assertionIds: terminalAssertions.map(item => item.id) }],
   });
   assert.equal(terminalOnly.productionEnableAvailable, false);
   assert.ok(terminalOnly.unavailableReasons.includes('missing-durable_database_wal'));
   assert.ok(terminalOnly.unavailableReasons.includes('missing-git_integration'));
   assert.ok(terminalOnly.unavailableReasons.includes('missing-independent_checker'));
 
+  const syntheticForgery = report({ evidenceAssertions: assertions.map(item => ({ ...item, authority: 'synthetic_diagnostic' as const, durable: false })) });
+  assert.equal(syntheticForgery.productionEnableAvailable, false);
+  assert.ok(syntheticForgery.unavailableReasons.includes('missing-durable_database_wal'));
+
   const failed = report({ semanticCloseout: 'failed', telemetry: [telemetry('failed')] });
   assert.equal(failed.productionEnableAvailable, false);
   assert.ok(failed.unavailableReasons.includes('semantic-closeout-not-succeeded'));
 
-  const skipped = report({ evidenceAssertions: [...assertions, {
-    id: 'A-SKIP', invariantId: 'WPE-INV-001', scenarioId: 'WPE-Q-001', evidenceClass: 'skipped_check', verdict: 'skipped', sourceDigest: sha('1'), durable: false, assertionCode: 'check-skipped',
-  }] });
+  const skipped = report({ evidenceAssertions: assertions.map((item, index) => index === 0 ? {
+    ...item, evidenceClass: 'skipped_check', verdict: 'skipped', assertionCode: 'check-skipped',
+  } : item) });
   assert.equal(skipped.productionEnableAvailable, false);
   assert.ok(skipped.unavailableReasons.includes('skipped-check-present'));
 });
@@ -170,10 +184,10 @@ test('receipt verification accepts only exact, current, trusted, locally matchin
   assert.throws(() => verify({ ...signed, schemaVersion: 'rorca.wave-qualification.receipt/v2' }, valueReport), /unsupported receipt/);
   assert.throws(() => verify({ ...signed, signature: 'bad' }, valueReport), /signature is malformed/);
   assert.throws(() => verifyQualificationReceipt({
-    receipt: signed, report: valueReport, localIdentity, requiredScenarioIds: ['WPE-Q-001'], trustedIssuers: {}, now: '2026-07-19T13:00:00.000Z',
+    receipt: signed, report: valueReport, localIdentity, requiredScenarioIds: ['WPE-Q-001'], requiredAssertionIds: assertions.map(item => item.id), trustedIssuers: {}, now: '2026-07-19T13:00:00.000Z',
   }), /issuer is not trusted/);
   assert.throws(() => verifyQualificationReceipt({
-    receipt: signed, report: valueReport, localIdentity, requiredScenarioIds: ['WPE-Q-001'], trustedIssuers: { 'rorca-ci': { 'qualification-v1': key } }, now: '2026-07-21T13:00:00.000Z',
+    receipt: signed, report: valueReport, localIdentity, requiredScenarioIds: ['WPE-Q-001'], requiredAssertionIds: assertions.map(item => item.id), trustedIssuers: { 'rorca-ci': { 'qualification-v1': key } }, now: '2026-07-21T13:00:00.000Z',
   }), /expired/);
 
   for (const keyName of ['sourceRevision', 'sourceTree', 'repositoryIdentity', 'workspaceIdentity', 'engineDigest', 'policyDigest', 'compilerDigest', 'invariantDigest', 'testSuiteDigest', 'configurationDigest'] as const) {
@@ -181,6 +195,15 @@ test('receipt verification accepts only exact, current, trusted, locally matchin
     assert.throws(() => verify(signed, valueReport, changed), /does not match local/);
   }
   assert.throws(() => verify(signed, valueReport, localIdentity, ['WPE-Q-001', 'WPE-Q-999']), /missing a required passing scenario/);
+  assert.throws(() => verifyQualificationReceipt({
+    receipt: signed,
+    report: valueReport,
+    localIdentity,
+    requiredScenarioIds: ['WPE-Q-001'],
+    requiredAssertionIds: [...assertions.map(item => item.id), 'WPE-A-MISSING'],
+    trustedIssuers: { 'rorca-ci': { 'qualification-v1': key } },
+    now: '2026-07-19T13:00:00.000Z',
+  }), /exact canonical assertion inventory/);
 });
 
 test('changed reports and malformed signatures cannot be copied into another qualification', () => {
@@ -212,8 +235,10 @@ test('publication storage is append-only and every operator endpoint is explicit
   assert.doesNotMatch(migration, /(?:CREATE|ALTER|DROP|DELETE|UPDATE|INSERT)[^;]*pgboss\./i);
 
   const route = fs.readFileSync(path.join(repositoryRoot, 'backend', 'src', 'routes', 'wave-qualification.ts'), 'utf8');
-  assert.equal((route.match(/router\.(?:get|post|put)\(/g) ?? []).length, 9);
-  assert.equal((route.match(/x-rorca-tier: admin/g) ?? []).length, 9);
-  assert.equal((route.match(/x-rorca-rationale:/g) ?? []).length, 9);
+  assert.equal((route.match(/router\.(?:get|post|put)\(/g) ?? []).length, 10);
+  assert.equal((route.match(/x-rorca-tier: admin/g) ?? []).length, 10);
+  assert.equal((route.match(/x-rorca-rationale:/g) ?? []).length, 10);
+  assert.match(route, /router\.use\(requireWaveQualificationAdmin\)/);
+  assert.match(route, /req\.user\?\.role !== 'admin'/);
   assert.doesNotMatch(route, /res\.json\([^)]*(?:path|human_report|signingKey)/);
 });
