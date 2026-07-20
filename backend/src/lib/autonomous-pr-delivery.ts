@@ -924,8 +924,22 @@ export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Pr
       || pr.head?.sha?.toLowerCase() !== delivery.current_head_sha
       || pr.head?.ref !== releaseIdentity.providerReleaseRef
       || pr.base?.ref !== releaseIdentity.baseBranch
-      || pr.base?.sha?.toLowerCase() !== evidence.pullRequest.baseSha
+      || !isFullGitObjectId(pr.base?.sha)
       || !isFullGitObjectId(pr.merge_commit_sha)) return null;
+    // GitHub may report the advanced current base tip after a successful merge,
+    // not the immutable pre-merge base captured in provider evidence. Prove the
+    // resulting merge commit descends from that authorized base instead of
+    // requiring the mutable base ref to remain frozen after actuation.
+    const comparisonResponse = await fetchGithubWithTimeout(fetch,
+      `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/compare/${evidence.pullRequest.baseSha}...${pr.merge_commit_sha}`,
+      { headers: { Authorization: `Bearer ${credential.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
+    );
+    const comparison = await comparisonResponse.json().catch(() => ({})) as {
+      status?: string; ahead_by?: number; merge_base_commit?: { sha?: string };
+    };
+    if (!comparisonResponse.ok || comparison.status !== 'ahead'
+      || !Number.isInteger(comparison.ahead_by) || Number(comparison.ahead_by) < 1
+      || comparison.merge_base_commit?.sha?.toLowerCase() !== evidence.pullRequest.baseSha) return null;
     return pr;
   });
   if (!observed || !isFullGitObjectId(observed.merge_commit_sha)) return false;

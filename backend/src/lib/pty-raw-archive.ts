@@ -308,6 +308,127 @@ async function listSegmentRows(manifestId: string): Promise<ArchiveSegmentRow[]>
   );
 }
 
+function isContainedPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function readRetainedRegularFile(filePath: string, containmentRoot: string, identityError: string): Buffer {
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const descriptorStat = fs.fstatSync(fd);
+    const pathStat = fs.lstatSync(filePath);
+    const realPath = fs.realpathSync(filePath);
+    if (!descriptorStat.isFile() || pathStat.isSymbolicLink() || !pathStat.isFile()
+      || descriptorStat.dev !== pathStat.dev || descriptorStat.ino !== pathStat.ino
+      || !isContainedPath(fs.realpathSync(containmentRoot), realPath)) {
+      throw new RawArchiveIntegrityError(identityError);
+    }
+    const bytes = Buffer.alloc(descriptorStat.size);
+    if (descriptorStat.size > 0 && fs.readSync(fd, bytes, 0, descriptorStat.size, 0) !== descriptorStat.size) {
+      throw new RawArchiveIntegrityError(`${identityError}: incomplete descriptor read`);
+    }
+    return bytes;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Lazily copy a parent-format `.rorca/pty-archives` generation into retained
+ * service storage, verify every copied descriptor, and only then CAS the
+ * manifest root. Legacy bytes remain in place for rollback; they are never
+ * served directly after this boundary.
+ */
+async function relocateLegacyRawPtyArchive(manifest: ArchiveManifestRow): Promise<ArchiveManifestRow> {
+  if (!manifest.workspace_path) throw new RawArchiveIntegrityError('Archive workspace path is unavailable');
+  const serviceRoot = serviceArchiveRoot();
+  const currentRoot = path.resolve(manifest.archive_root_relative);
+  if (isContainedPath(serviceRoot, currentRoot)) return manifest;
+
+  const workspaceRoot = fs.realpathSync(manifest.workspace_path);
+  const legacyRoot = path.resolve(workspaceRoot, '.rorca', 'pty-archives');
+  const storedLegacyRoot = path.resolve(workspaceRoot, manifest.archive_root_relative);
+  if (storedLegacyRoot !== legacyRoot) {
+    throw new ForbiddenError('Legacy raw archive root is not the bounded parent-format location');
+  }
+  const rootStat = fs.lstatSync(legacyRoot);
+  const realLegacyRoot = fs.realpathSync(legacyRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || !isContainedPath(workspaceRoot, realLegacyRoot)) {
+    throw new ForbiddenError('Legacy raw archive root is not a contained real workspace directory');
+  }
+  const sourceGeneration = path.join(realLegacyRoot, manifest.generation_id);
+  const sourceGenerationStat = fs.lstatSync(sourceGeneration);
+  if (sourceGenerationStat.isSymbolicLink() || !sourceGenerationStat.isDirectory()
+    || !isContainedPath(realLegacyRoot, fs.realpathSync(sourceGeneration))) {
+    throw new ForbiddenError('Legacy raw archive generation is not a contained real directory');
+  }
+
+  const destinationRoot = workspaceArchiveRoot(manifest.workspace_id);
+  const destinationGeneration = ensureSecureArchiveGenerationDirectory(destinationRoot, manifest.generation_id);
+  const knownSegments = new Map((await listSegmentRows(manifest.id)).map(segment => [path.basename(segment.relative_path), segment]));
+  const names = fs.readdirSync(sourceGeneration).filter(name => /^segment-\d{6}\.gz$/.test(name)).sort();
+  for (const name of names) {
+    const source = path.join(sourceGeneration, name);
+    const bytes = readRetainedRegularFile(
+      source, realLegacyRoot, 'Legacy raw archive segment identity changed during relocation',
+    );
+    const known = knownSegments.get(name);
+    if (known && (Number(known.compressed_size) !== bytes.length || known.sha256 !== hashContent(bytes))) {
+      throw new RawArchiveIntegrityError('Legacy raw archive segment failed retained hash verification', {
+        segmentIndex: known.segment_index,
+      });
+    }
+    const destination = path.join(destinationGeneration, name);
+    if (fs.existsSync(destination)) {
+      const retainedDestination = readRetainedRegularFile(
+        destination, destinationRoot, 'Service-owned relocation destination identity changed',
+      );
+      if (hashContent(retainedDestination) !== hashContent(bytes)) {
+        throw new RawArchiveIntegrityError('Service-owned relocation destination conflicts with legacy bytes');
+      }
+      continue;
+    }
+    const temporary = path.join(destinationGeneration, `.${name}.${crypto.randomUUID()}.tmp`);
+    const destinationFd = fs.openSync(temporary,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+    try {
+      fs.writeFileSync(destinationFd, bytes);
+      fs.fsyncSync(destinationFd);
+    } finally {
+      fs.closeSync(destinationFd);
+    }
+    fs.renameSync(temporary, destination);
+    const directoryFd = fs.openSync(destinationGeneration, fs.constants.O_RDONLY);
+    try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
+  }
+
+  const migrated = await queryOne<ArchiveManifestRow>(
+    `UPDATE pty_raw_archive_manifests
+     SET archive_root_relative = $2, reconciled_at = NOW(), updated_at = NOW()
+     WHERE id = $1 AND archive_root_relative = $3 RETURNING *`,
+    [manifest.id, destinationRoot, manifest.archive_root_relative],
+  );
+  if (migrated) {
+    await execute(
+      `UPDATE pty_generations SET raw_archive_storage_scope = 'service-owned'
+       WHERE id = $1 AND workspace_id = $2`,
+      [manifest.generation_id, manifest.workspace_id],
+    );
+    return { ...migrated, workspace_path: manifest.workspace_path, generation_active: manifest.generation_active,
+      generation_status: manifest.generation_status };
+  }
+  const concurrent = await queryOne<ArchiveManifestRow>(
+    `SELECT m.*, w.path AS workspace_path, g.is_active AS generation_active, g.status AS generation_status
+     FROM pty_raw_archive_manifests m JOIN workspaces w ON w.id = m.workspace_id
+     JOIN pty_generations g ON g.id = m.generation_id WHERE m.id = $1`, [manifest.id],
+  );
+  if (!concurrent || !isContainedPath(serviceRoot, path.resolve(concurrent.archive_root_relative))) {
+    throw new ConflictError('Legacy raw archive relocation lost its manifest compare-and-swap');
+  }
+  return concurrent;
+}
+
 async function persistCompleteSegment(manifest: ArchiveManifestRow, segment: PendingSegment): Promise<void> {
   try {
     const stat = fs.fstatSync(segment.fd);
@@ -594,6 +715,7 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
   manifest = { ...manifest, workspace_path: identity.workspace_path, generation_active: true };
 
   try {
+    manifest = await relocateLegacyRawPtyArchive(manifest);
     await reconcileRawPtyArchive(manifest);
   } catch (error) {
     await markGenerationArchiveFailure(generation.generationId, 'RAW_ARCHIVE_RECONCILIATION_FAILED');
@@ -761,7 +883,8 @@ export async function reconcileInterruptedRawPtyArchives(limit = 100): Promise<n
   let reconciled = 0;
   for (const manifest of manifests) {
     try {
-      await reconcileRawPtyArchive(manifest);
+      const serviceManifest = await relocateLegacyRawPtyArchive(manifest);
+      await reconcileRawPtyArchive(serviceManifest);
       reconciled += 1;
     } catch (error) {
       logger.error({ error, manifestId: manifest.id }, '[pty-archive] restart reconciliation failed');
@@ -779,8 +902,9 @@ export async function reconcileInterruptedRawPtyArchives(limit = 100): Promise<n
 export async function getRawPtyArchiveManifest(runId: number, generationId: string): Promise<RawArchiveManifest> {
   const row = await getManifestRow(runId, generationId);
   if (!row) throw new NotFoundError('Raw PTY archive');
-  const segments = await listSegmentRows(row.id);
-  return mapManifest(row, segments);
+  const serviceRow = await relocateLegacyRawPtyArchive(row);
+  const segments = await listSegmentRows(serviceRow.id);
+  return mapManifest(serviceRow, segments);
 }
 
 async function markIntegrityFailure(
@@ -813,8 +937,10 @@ async function markIntegrityFailure(
 
 /** Verify all paths, contiguous ranges, sizes, and hashes before any response bytes are sent. */
 export async function verifyRawPtyArchive(runId: number, generationId: string): Promise<VerifiedRawArchive> {
-  const manifest = await getManifestRow(runId, generationId);
-  if (!manifest || !manifest.workspace_path) throw new NotFoundError('Raw PTY archive');
+  const storedManifest = await getManifestRow(runId, generationId);
+  if (!storedManifest || !storedManifest.workspace_path) throw new NotFoundError('Raw PTY archive');
+  const manifest = await relocateLegacyRawPtyArchive(storedManifest);
+  if (!manifest.workspace_path) throw new RawArchiveIntegrityError('Archive workspace path is unavailable after relocation');
   if (manifest.completion_state === 'writing') {
     throw new ConflictError('Raw PTY archive is still being written');
   }
@@ -888,7 +1014,7 @@ export async function verifyRawPtyArchive(runId: number, generationId: string): 
     ...mapManifest(manifest, refreshedSegments),
     workspacePath: manifest.workspace_path,
     archiveRootRelative: manifest.archive_root_relative,
-    archiveRoot: path.resolve(manifest.workspace_path, manifest.archive_root_relative),
+    archiveRoot: path.resolve(manifest.archive_root_relative),
     verifiedPaths,
   };
 }
@@ -910,8 +1036,9 @@ export async function pruneExpiredRawPtyArchives(limit = 100): Promise<{ pruned:
   let failed = 0;
   for (const manifest of manifests) {
     try {
-      const archiveRoot = path.resolve(manifest.workspace_path!, manifest.archive_root_relative);
-      const generationDir = path.resolve(archiveRoot, manifest.generation_id);
+      const serviceManifest = await relocateLegacyRawPtyArchive(manifest);
+      const archiveRoot = path.resolve(serviceManifest.archive_root_relative);
+      const generationDir = path.resolve(archiveRoot, serviceManifest.generation_id);
       if (!generationDir.startsWith(`${archiveRoot}${path.sep}`)) {
         throw new ForbiddenError('Archive prune path escapes archive root');
       }

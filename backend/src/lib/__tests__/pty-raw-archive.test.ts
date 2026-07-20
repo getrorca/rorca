@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -26,6 +27,7 @@ import { hashContent } from '../context-safety';
 import { ForbiddenError, RawArchiveIntegrityError } from '../errors';
 import {
   RawPtyArchiveWriter,
+  openRawPtyArchive,
   pruneExpiredRawPtyArchives,
   reconcileInterruptedRawPtyArchives,
   resolveRawArchiveSegmentPath,
@@ -257,6 +259,62 @@ describe('raw PTY archive', () => {
       expect(await pruneExpiredRawPtyArchives()).toEqual({ pruned: 1, failed: 0 });
       expect(fs.existsSync(generationDir)).toBe(false);
       expect(transactionMock).toHaveBeenCalledTimes(1);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('relocates a parent-format workspace archive before read and safely resumes from retained service bytes', async () => {
+    const workspace = tempWorkspace();
+    const legacyRoot = path.join(workspace, '.rorca', 'pty-archives');
+    const relativePath = `${GENERATION_ID}/segment-000000.gz`;
+    const legacyPath = path.join(legacyRoot, relativePath);
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    const compressed = gzipSync(Buffer.from('legacy retained'));
+    fs.writeFileSync(legacyPath, compressed, { mode: 0o600 });
+    const manifest = {
+      id: '223e4567-e89b-42d3-a456-426614174099', generation_id: GENERATION_ID, run_id: 77,
+      workspace_id: 'ws-legacy', story_id: 'PTY-LEGACY', archive_root_relative: '.rorca/pty-archives',
+      segment_max_raw_bytes: 4096, next_raw_offset: 15, completion_state: 'complete', retention_days: 30,
+      retention_expires_at: new Date(Date.now() + 86_400_000).toISOString(), gaps: [], started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(), failure_code: null, failure_message: null,
+      workspace_path: workspace, generation_active: false, generation_status: 'exited',
+    };
+    const segment = {
+      id: '323e4567-e89b-42d3-a456-426614174099', manifest_id: manifest.id, generation_id: GENERATION_ID,
+      segment_index: 0, relative_path: relativePath, raw_start: 0, raw_end: 15, raw_size: 15,
+      compressed_size: compressed.length, sha256: hashContent(compressed), completion_state: 'complete',
+      first_byte_at: new Date().toISOString(), completed_at: new Date().toISOString(), verified_at: null,
+    };
+    const legacyServiceRoot = path.join(serviceRoot, createHash('sha256').update('ws-legacy').digest('hex'));
+    const serviceManifest = { ...manifest, archive_root_relative: legacyServiceRoot };
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('INSERT INTO pty_raw_archive_manifests')) return [manifest];
+      if (sql.includes('FROM pty_raw_archive_segments')) return [segment];
+      return [];
+    });
+    queryOneMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM pty_raw_archive_manifests m')) return manifest;
+      if (sql.includes('UPDATE pty_raw_archive_manifests') && sql.includes('RETURNING')) return serviceManifest;
+      if (sql.includes('SELECT g.workspace_id')) return { workspace_id: 'ws-legacy', story_id: 'PTY-LEGACY', workspace_path: workspace, is_active: true };
+      if (sql.includes('SELECT completion_state')) return { completion_state: 'writing', gaps: [] };
+      return undefined;
+    });
+
+    try {
+      const verified = await verifyRawPtyArchive(77, GENERATION_ID);
+      expect(verified.archiveRoot).toBe(legacyServiceRoot);
+      expect(verified.verifiedPaths).toHaveLength(1);
+      expect(gunzipSync(fs.readFileSync(verified.verifiedPaths[0]!)).toString()).toBe('legacy retained');
+      expect(fs.readFileSync(legacyPath).equals(compressed)).toBe(true);
+      expect(queryOneMock).toHaveBeenCalledWith(expect.stringContaining('archive_root_relative = $2'),
+        [manifest.id, legacyServiceRoot, '.rorca/pty-archives']);
+
+      const writer = await openRawPtyArchive({ generationId: GENERATION_ID, runId: 77, generationToken: 'legacy-token' });
+      writer.append(Buffer.from(' resumed'));
+      await writer.drain();
+      expect(fs.existsSync(path.join(legacyServiceRoot, GENERATION_ID, 'segment-000001.gz'))).toBe(true);
+      expect(fs.existsSync(legacyPath)).toBe(true);
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
     }

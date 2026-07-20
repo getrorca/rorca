@@ -8,7 +8,14 @@
 import crypto from 'node:crypto';
 
 jest.mock('../github-token-resolver', () => ({
-  resolveWorkspaceGitHubToken: jest.fn(async () => ({ token: 'opaque-test-token', source: 'workspace-pat' })),
+  resolveWorkspaceGitHubToken: jest.fn(async () => ({
+    token: 'opaque-test-token', source: 'workspace-pat',
+    metadata: { fallback: true, repository: { owner: 'getrorca', name: 'rorca' } },
+  })),
+}));
+
+jest.mock('../run-git-authority', () => ({
+  assertCanonicalRunCheckout: jest.fn((input: { expectedHead: string }) => ({ headSha: input.expectedHead })),
 }));
 
 import { execute, queryOne } from '../../db/index';
@@ -58,15 +65,33 @@ async function fixture() {
   const run = await queryOne<{ id: string }>(`
     INSERT INTO pipeline_runs (
       spec_path, workspace_id, status, branch_name, worktree_path, pr_number,
-      merge_strategy, auto_merge, merge_status, agent_type, agent_model
+      merge_strategy, auto_merge, merge_status, agent_type, agent_model,
+      execution_workspace_path, execution_worktree_path, terminal_checkout_sha, terminal_checkout_attested_at
     ) VALUES (
       'forge/specs/approved/reviewed-delivery.json', $1, 'done',
       'run/reviewed-delivery', '/tmp/reviewed-worktree', 42,
-      'pr', FALSE, 'pending', 'pi', 'openai-codex/gpt-5.6-sol'
+      'pr', FALSE, 'pending', 'pi', 'openai-codex/gpt-5.6-sol',
+      '/tmp/actuation', '/tmp/reviewed-worktree', $2, NOW()
     ) RETURNING id::text
-  `, [workspaceId]);
+  `, [workspaceId, headSha]);
   if (!run) throw new Error('run insert failed');
   const runId = Number(run.id);
+  await execute(`
+    INSERT INTO pipeline_run_release_intents (
+      run_id, workspace_id, spec_id, authorized_sha, branch_name,
+      execution_workspace_path, execution_worktree_path,
+      repository_owner, repository_name, repository_authority_source,
+      merge_strategy, auto_merge, external_send, deployment_allowed,
+      identity_hash, status, base_branch, base_sha, provider_release_ref,
+      integration_checkout_path
+    ) VALUES (
+      $1, $2, 'reviewed-delivery', $3, 'run/reviewed-delivery',
+      '/tmp/actuation', '/tmp/reviewed-worktree',
+      'getrorca', 'rorca', 'pat-oauth-fallback',
+      'pr', FALSE, TRUE, FALSE, $4, 'completed', 'main', $5,
+      'run/reviewed-delivery', '/tmp/actuation'
+    )
+  `, [runId, workspaceId, headSha, '2'.repeat(64), 'b'.repeat(40)]);
   const providerId = crypto.randomUUID();
   const providerHash = `sha256:${'d'.repeat(64)}` as const;
   await execute(`
@@ -75,7 +100,8 @@ async function fixture() {
       pr_number, pr_url, pr_state, draft, merged, head_ref, base_ref, head_sha,
       base_sha, mergeable, mergeable_state, comparison_status, ahead_by, behind_by,
       branch_fresh, checks, reviews, check_summary, review_summary,
-      provider_observed_at, observed_by_principal_id, observed_by_display_label, payload_hash
+      provider_observed_at, observed_by_principal_id, observed_by_display_label, payload_hash,
+      repository_authority_source
     ) VALUES (
       $1, $2, $3, $4, $5, 'getrorca', 'rorca', 42,
       'https://github.com/getrorca/rorca/pull/42', 'open', FALSE, FALSE,
@@ -83,7 +109,7 @@ async function fixture() {
       TRUE, '[]', '[]',
       '{"allRequiredPassed":true,"policyAvailable":true,"policyScopeMatches":true}',
       '{"reviewSatisfied":true,"policyAvailable":true,"policyScopeMatches":true}',
-      NOW(), 'steward', 'Autonomous Delivery Steward', $8
+      NOW(), 'steward', 'Autonomous Delivery Steward', $8, 'pat-oauth-fallback'
     )
   `, [providerId, workspaceId, runId, created.policy.id, created.policy.policyDigest, headSha, 'b'.repeat(40), providerHash]);
   const lifecycle = await persistCanonicalEvidence(createCanonicalEvidence({
@@ -222,20 +248,30 @@ test('reconciles a crash after provider merge without issuing a second merge', a
   await execute(`UPDATE autonomous_pr_deliveries SET status = 'merging', updated_at = NOW() WHERE id = $1`, [seeded.deliveryId]);
 
   const originalFetch = global.fetch;
-  const fetchMock = jest.fn(async () => new Response(JSON.stringify({
-    merged: true,
-    merged_at: '2026-07-17T00:04:00.000Z',
-    merge_commit_sha: mergedSha,
-    head: { sha: headSha },
-  }), { status: 200, headers: { 'content-type': 'application/json' } }));
+  const fetchMock = jest.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/compare/')) return new Response(JSON.stringify({
+      status: 'ahead', ahead_by: 1, merge_base_commit: { sha: 'b'.repeat(40) },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({
+      number: 42,
+      html_url: 'https://github.com/getrorca/rorca/pull/42',
+      state: 'closed', draft: false, merged: true,
+      merged_at: '2026-07-17T00:04:00.000Z', merge_commit_sha: mergedSha,
+      head: { sha: headSha, ref: 'run/reviewed-delivery', repo: { full_name: 'getrorca/rorca' } },
+      // The mutable base tip advanced after merge and deliberately differs from
+      // the immutable pre-merge evidence base (`b...`).
+      base: { sha: mergedSha, ref: 'main', repo: { full_name: 'getrorca/rorca' } },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
   global.fetch = fetchMock as typeof fetch;
   try {
-    await expect(reconcileAutonomousPrDeliveryMerge(seeded.deliveryId)).resolves.toBe(true);
-    await expect(reconcileAutonomousPrDeliveryMerge(seeded.deliveryId)).resolves.toBe(false);
+    expect(await reconcileAutonomousPrDeliveryMerge(seeded.deliveryId)).toBe(true);
+    expect(await reconcileAutonomousPrDeliveryMerge(seeded.deliveryId)).toBe(false);
   } finally {
     global.fetch = originalFetch;
   }
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
   const delivery = await queryOne<{ status: string; merged_sha: string }>(
     'SELECT status, merged_sha FROM autonomous_pr_deliveries WHERE id = $1', [seeded.deliveryId],
   );
