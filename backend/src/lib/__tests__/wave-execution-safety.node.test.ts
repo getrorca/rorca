@@ -28,7 +28,7 @@ import {
 
 const RUN_ID = 'qrun_0123456789abcdef01234567';
 const TOKEN = RUN_ID.slice('qrun_'.length);
-const DB_URL = `postgres://rorca_qrole_${TOKEN}:secret@localhost/rorca_qtest_${TOKEN}?application_name=${encodeURIComponent(`rorca-qualification:${RUN_ID}`)}`;
+const DB_URL = `postgres://rorca_qrole_${TOKEN}:secret@localhost/rorca_qtest_${TOKEN}_test?application_name=${encodeURIComponent(`rorca-qualification:${RUN_ID}`)}`;
 const IDENTITY = buildQualificationIdentity(RUN_ID, DB_URL);
 
 const SMALL_LIMITS: WaveSafetyLimits = {

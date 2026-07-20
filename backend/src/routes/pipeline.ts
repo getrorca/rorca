@@ -7,6 +7,7 @@
 
 import { Router, Request, Response } from 'express';
 import { isUtf8 } from 'buffer';
+import { randomUUID } from 'node:crypto';
 import { execFileSync, execSync, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -139,6 +140,15 @@ import {
   type RetryIntegrationEvidence,
   type RetryRunCloseoutEvidence,
 } from '../lib/governed-story-retry';
+import {
+  advanceGovernedRetryPreparation,
+  cancelGovernedRetryPreview,
+  GovernedRetryStateConflictError,
+  publishGovernedRetryDispatch,
+  refuseAbandonedGovernedRetryPreparation,
+  refuseGovernedRetryPreparation,
+  type RetryPreparationState,
+} from '../lib/governed-retry-publication';
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
@@ -730,7 +740,7 @@ async function resolveAndPersistDispatchManifests(input: {
         profileId: 'autonomous-command-guard-v1',
         guardVersion: '1',
         guardedWorkingDirectory: storyWorktreePath,
-        allowedWorkingDirectories: [storyWorktreePath],
+        allowedWorkingDirectories: [...new Set([storyWorktreePath, input.cwd])],
         blockedCommandPatterns: ['backend/Jest-style tests without an isolated *_test database'],
         redactedEnvironmentKeys: ['ANTHROPIC_API_KEY', 'DATABASE_URL', 'DATABASE_URL_TEST', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'],
         allowBackendJest: false,
@@ -5846,6 +5856,8 @@ const PipelineRetrySchema = z.object({
 router.post('/runs/:runId/retry', validateBody(PipelineRetrySchema), retryPipelineRunHandler);
 
 export async function retryPipelineRunHandler(req: Request, res: Response): Promise<void> {
+  let ownedRetryPreparation: { previewHash: string; owner: string; retryRunId: number; workspaceId: string } | null = null;
+  let preparationRefusalReason = 'retry_preparation_failed';
   try {
     const originalRunId = parseInt(String(req.params.runId), 10);
     if (isNaN(originalRunId)) {
@@ -5889,6 +5901,39 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new NotFoundError('Workspace not found');
       return;
     }
+
+    // Cancellation is authorized by the exact signed packet, not by a fresh
+    // scope calculation. It must remain available when the source spec or Git
+    // head drifts after approval, and it linearizes before any new side effect.
+    if (cancelPreview) {
+      if (!previewHash || !approvedPreviewRaw || !previewIdentity || !verifyRetryPreview(approvedPreviewRaw)) {
+        throw new ConflictError('Cancellation requires the exact self-verifying retry preview packet');
+      }
+      if (approvedPreviewRaw.previewHash !== previewHash || approvedPreviewRaw.originalRunId !== originalRunId) {
+        throw new ConflictError('Retry preview identity does not match the requested run/hash');
+      }
+      const cancellationIdentity = verifyRetryPreviewIdentity(previewIdentity, approvedPreviewRaw);
+      if (!cancellationIdentity.valid && cancellationIdentity.reason !== 'expired') {
+        throw new ConflictError('Retry preview identity is invalid or mismatched', { reason: cancellationIdentity.reason });
+      }
+      try {
+        const cancellation = await cancelGovernedRetryPreview({
+          previewHash,
+          originalRunId,
+          workspaceId: originalRun.workspace_id,
+          packet: approvedPreviewRaw,
+          previewIdentityHash: retryHash(previewIdentity),
+          expiresAt: previewIdentity.expiresAt,
+          requireExisting: cancellationIdentity.reason === 'expired',
+        });
+        res.status(200).json({ ok: true, previewHash, ...cancellation });
+        return;
+      } catch (error) {
+        if (error instanceof GovernedRetryStateConflictError) throw new ConflictError(error.message);
+        throw error;
+      }
+    }
+
     const passReconciliation = await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)({
       workspaceId: originalRun.workspace_id,
       workspacePath: workspace.path,
@@ -6128,25 +6173,6 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       }
     }
 
-    if (previewHash && worktreePreflight?.classification === 'stale_base' && originalRun.worktree_path) {
-      const refresh = safelyRefreshReusableWorktree({
-        workspacePath: workspace.path,
-        worktreePath: originalRun.worktree_path,
-        expectedBranchName: originalRun.branch_name ?? null,
-        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
-      });
-      await execute(
-        `UPDATE pipeline_retry_previews SET override_record = COALESCE(override_record, '{}'::jsonb) || $2::jsonb WHERE preview_hash = $1`,
-        [previewHash, JSON.stringify({ worktreeRefresh: refresh })],
-      );
-      worktreePreflight = validateReusableWorktree({
-        workspacePath: workspace.path,
-        worktreePath: originalRun.worktree_path,
-        expectedBranchName: originalRun.branch_name ?? null,
-        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
-      });
-    }
-
     // Initial trigger and retry dispatch resolve the same host-enforced policy.
     // Structured policy wins; spec prose (including `_notes`) is never authority.
     const retrySafety = resolvePiRunSafetyOptions(originalRun.spec_path, sourceSpecJson, {
@@ -6187,7 +6213,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       source: 'pipeline-retry',
       requestedMode: retryParallelRequested ? 'wave-parallel' : 'sequential',
       requestedParallelism: retryParallelRequested ? (originalRun.parallelism ?? 1) : 1,
-      forceSequential: forceSequential !== false || highRisk || isPtyTerminalMode(originalRun.terminal_mode),
+      forceSequential: forceSequential !== false || highRisk || approvedPreviewRaw?.forceSequential === true || isPtyTerminalMode(originalRun.terminal_mode),
     }, currentWaveParallelPolicyEnvironment());
     const retryOrchestration = {
       mode: retryWavePolicy.mode,
@@ -6228,6 +6254,16 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     }
     const identityCheck = verifyRetryPreviewIdentity(previewIdentity, approvedPreviewRaw);
     if (!identityCheck.valid) {
+      if (identityCheck.reason === 'expired') {
+        await refuseAbandonedGovernedRetryPreparation({
+          previewHash,
+          originalRunId,
+          workspaceId: originalRun.workspace_id,
+          packetHash: retryHash(approvedPreviewRaw),
+          previewIdentityHash: retryHash(previewIdentity),
+          reason: 'expired_preview_identity_after_preparation_interruption',
+        });
+      }
       await postRetryWalEvent('ssdlc_retry_preview_denied', originalRun.workspace_id, {
         original_run_id: originalRunId,
         reason: identityCheck.reason,
@@ -6237,71 +6273,15 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         { reason: identityCheck.reason },
       );
     }
-    if (cancelPreview) {
-      res.json({ ok: true, cancelled: true, previewHash });
-      return;
-    }
-
-    const storedPreviewRow = await queryOne<{ packet: RetryPreviewPacket; status: string; retry_run_id: number | null; approval_token: string | null }>(
-      `SELECT packet, status, retry_run_id, approval_token
-       FROM pipeline_retry_previews WHERE preview_hash = $1 AND original_run_id = $2`,
-      [previewHash, originalRunId],
-    );
-    const preparedDispatch = await queryOne<{
-      identity_hash: string; retry_run_id: number; state: string; job_payload: Record<string, unknown>;
-    }>(
-      `SELECT identity_hash, retry_run_id, state, job_payload
-       FROM governed_retry_dispatches WHERE preview_hash = $1`,
-      [previewHash],
-    ).catch(() => undefined);
-    if (preparedDispatch?.state === 'prepared') {
-      // Durable outbox replay: find a send that won before an API crash, or send
-      // the exact persisted packet now. Correlation is payload-owned; pg-boss
-      // still generates every UUID.
-      let recoveredJob = await queryOne<{ id: string }>(
-        `SELECT id::text FROM pgboss.job
-         WHERE name = 'pipeline:retry'
-           AND data->'dispatchIdentity'->>'identityHash' = $1
-           AND state IN ('created', 'active', 'retry') LIMIT 1`,
-        [preparedDispatch.identity_hash],
-      ).catch(() => undefined);
-      if (!recoveredJob) {
-        const replayBoss = getBoss();
-        await replayBoss.createQueue('pipeline:retry');
-        const replayJobId = await replayBoss.send('pipeline:retry', preparedDispatch.job_payload, {
-          retryLimit: 5, retryDelay: 30, expireInSeconds: 300,
-        });
-        if (!replayJobId) throw new ServiceUnavailableError('Retry queue rejected durable outbox replay');
-        recoveredJob = { id: replayJobId };
-      }
-      const recovered = await execute(
-        `UPDATE governed_retry_dispatches SET state = 'dispatched', boss_job_id = $2::uuid
-         WHERE identity_hash = $1 AND state = 'prepared' AND state_version = 1`,
-        [preparedDispatch.identity_hash, recoveredJob.id],
-      );
-      if (recovered.rowCount !== 1) throw new ConflictError('Retry outbox replay lost its optimistic concurrency fence');
-      await execute(
-        `UPDATE pipeline_retry_previews SET status = 'dispatched', boss_job_id = $2::uuid, dispatched_at = NOW()
-         WHERE preview_hash = $1 AND status = 'approved'`,
-        [previewHash, recoveredJob.id],
-      );
-      res.status(200).json({ ok: true, queued: true, duplicate: true, recovered: true, runId: preparedDispatch.retry_run_id, originalRunId, previewHash });
-      return;
-    }
-    if (storedPreviewRow?.status === 'dispatched' && storedPreviewRow.retry_run_id) {
-      await emitLifecycleInvalidation({
-        workspaceId: originalRun.workspace_id,
-        specId: path.basename(originalRun.spec_path, '.json'),
-        runId: storedPreviewRow.retry_run_id,
-        changeKind: 'retry_dispatched',
-      });
-      res.status(200).json({ ok: true, queued: true, duplicate: true, runId: storedPreviewRow.retry_run_id, originalRunId, previewHash });
-      return;
-    }
-    if (storedPreviewRow && (storedPreviewRow.status === 'cancelled' || storedPreviewRow.status === 'refused')) {
-      throw new ConflictError('Retry preview is no longer dispatchable');
-    }
     if (retryPreview.previewHash !== previewHash) {
+      await refuseAbandonedGovernedRetryPreparation({
+        previewHash,
+        originalRunId,
+        workspaceId: originalRun.workspace_id,
+        packetHash: retryHash(approvedPreviewRaw),
+        previewIdentityHash: retryHash(previewIdentity),
+        reason: 'retry_authority_changed_after_preparation_interruption',
+      });
       await postRetryWalEvent('retry_scope_mismatch', originalRun.workspace_id, {
         original_run_id: originalRunId,
         approved_preview_hash: previewHash,
@@ -6315,76 +6295,28 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     if (approvedPreview.requiresApproval && !approvalToken) {
       throw new ForbiddenError('Retry preview requires the existing explicit operator approval path before destructive options may be replayed');
     }
-    if (unsafeWorktree) throw new ConflictError(`Worktree preflight requires operator action (${worktreePreflight?.classification})`);
-
-    const dispatchIdempotencyKey = req.get('Idempotency-Key')?.trim() || `retry:${previewHash}`;
-    const approvalClaim = await queryOne<{ preview_hash: string }>(
-      `INSERT INTO pipeline_retry_previews (
-         preview_hash, original_run_id, workspace_id, scope_hash, status, packet,
-         approval_token, preview_identity_hash, expires_at, idempotency_key, approved_at
-       ) VALUES ($1, $2, $3, $4, 'approved', $5::jsonb, $6, $7, $8, $9, NOW())
-       ON CONFLICT DO NOTHING
-       RETURNING preview_hash`,
-      [
+    if (unsafeWorktree) {
+      await refuseAbandonedGovernedRetryPreparation({
         previewHash,
         originalRunId,
-        originalRun.workspace_id,
-        scopeHash,
-        JSON.stringify(approvedPreview),
-        approvalToken ? retryHash({ approvalToken }) : null,
-        retryHash(previewIdentity),
-        previewIdentity.expiresAt,
-        dispatchIdempotencyKey,
-      ],
-    );
-    if (!approvalClaim) {
-      const replay = await queryOne<{ preview_hash: string; retry_run_id: number | null; status: string }>(
-        `SELECT preview_hash, retry_run_id, status FROM pipeline_retry_previews
-         WHERE workspace_id = $1 AND idempotency_key = $2`,
-        [originalRun.workspace_id, dispatchIdempotencyKey],
-      );
-      if (replay?.status === 'dispatched' && replay.retry_run_id) {
-        await emitLifecycleInvalidation({
-          workspaceId: originalRun.workspace_id,
-          specId: path.basename(originalRun.spec_path, '.json'),
-          runId: replay.retry_run_id,
-          changeKind: 'retry_dispatched',
-        });
-        res.status(200).json({ ok: true, queued: true, duplicate: true, runId: replay.retry_run_id, originalRunId, previewHash });
-        return;
-      }
-      if (!replay || replay.preview_hash !== previewHash) {
-        throw new ConflictError('Retry dispatch Idempotency-Key was reused with a different preview');
-      }
-      // The unique preview/idempotency claim is the single dispatch owner. A
-      // concurrent/restart replay must never create a second run while that
-      // owner is still approved but not durably marked dispatched.
-      throw new ConflictError('Retry preview dispatch is already in progress; replay after its durable queue outcome');
+        workspaceId: originalRun.workspace_id,
+        packetHash: retryHash(approvedPreviewRaw),
+        previewIdentityHash: retryHash(previewIdentity),
+        reason: `unsafe_worktree_after_preparation_interruption:${worktreePreflight?.classification}`,
+      });
+      throw new ConflictError(`Worktree preflight requires operator action (${worktreePreflight?.classification})`);
     }
 
-    // 5. Duplicate-job guard — check for an active pipeline:retry job for this run and scope.
-    //    Correlation stays in job data; pg-boss owns and generates the UUID id.
-    const existingJob = await queryOne<{ id: string; run_id: string | null }>(
-      `SELECT id::text, data->>'runId' AS run_id FROM pgboss.job
-       WHERE name = 'pipeline:retry'
-         AND data->>'originalRunId' = $1
-         AND data->>'scopeHash' = $2
-         AND state IN ('created', 'active', 'retry')
-       LIMIT 1`,
-      [String(originalRunId), scopeHash],
-    ).catch(() => undefined);
-    if (existingJob) throw new ConflictError('An active retry job already owns this approved scope');
+    const dispatchIdempotencyKey = req.get('Idempotency-Key')?.trim() || `retry:${previewHash}`;
 
-    // 6. Capture sequenceOffset BEFORE creating the new run row to avoid race conditions
-    //    between two simultaneous retry requests. The worker starts chunks at sequenceOffset + 1.
+    // Capture immutable run inputs before claiming preparation. The claim and
+    // queued retry run are then committed together before files, hooks,
+    // manifests, or queue sends can occur.
     const seqRow = await queryOne<{ max_seq: number | null }>(
       `SELECT MAX(sequence) AS max_seq FROM run_output_chunks WHERE run_id = $1`,
       [originalRunId],
     );
     const sequenceOffset = seqRow?.max_seq ?? 0;
-
-    // 7. Create a NEW pipeline_run linked to the original while preserving the
-    // host-enforced model, effort, worktree, merge, graph, terminal, and safety options.
     const retryTerminalMode = normalizeTerminalMode(approvedPreview.options.terminalMode);
     const retryParallelism = retryWavePolicy.parallelism;
     const retryTriggerOptions = {
@@ -6404,37 +6336,252 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       terminal: retryTerminalMode,
       safety: { ...originalEffectiveOptions.safety, ...approvedPreview.options.safety },
     };
-    const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
-      (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
-       retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
-       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options, trigger_options,
-       orchestration_mode)
-      VALUES ($1, $2, 'queued', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17)
-      RETURNING id`, [
-      originalRun.spec_path,
-      originalRun.workspace_id,
-      originalRun.branch_name,
-      originalRun.worktree_path,
-      originalRunId,
-      retryParallelism,
-      retryTerminalMode,
-      approvedPreview.options.agent,
-      approvedPreview.options.agent,
-      approvedPreview.options.model,
-      approvedPreview.options.worktree.enabled,
-      approvedPreview.options.merge.autoMerge,
-      approvedPreview.options.includeGraph,
-      approvedPreview.options.merge.strategy,
-      JSON.stringify(retryEffectiveOptions),
-      JSON.stringify(retryTriggerOptions),
-      retryWavePolicy.mode,
-    ]);
-    const newRunId = normalizeWorkerRunId(newRunResult!.id);
-    await execute(
-      `UPDATE pipeline_retry_previews SET retry_run_id = $2 WHERE preview_hash = $1 AND status = 'approved'`,
-      [previewHash, newRunId],
-    );
+    const preparationOwner = `retry-api:${process.pid}:${randomUUID()}`;
+    type PreparationReservation =
+      | { action: 'prepare'; runId: number; state: RetryPreparationState }
+      | { action: 'publish'; runId: number; identityHash: string; queuePayloadHash: string; jobPayload: Record<string, unknown> }
+      | { action: 'duplicate'; runId: number }
+      | { action: 'pending'; runId: number }
+      | { action: 'ambiguous_hook'; runId: number }
+      | { action: 'terminal'; terminal: 'cancelled' | 'refused'; runId: number | null };
+
+    const reservation = await transaction<PreparationReservation>(async (client) => {
+      for (const lockIdentity of [
+        `retry-idempotency:${originalRun.workspace_id}:${dispatchIdempotencyKey}`,
+        `retry-preview:${previewHash}`,
+      ].sort()) {
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockIdentity]);
+      }
+      const existingResult = await client.query<{
+        preview_hash: string; status: string; preparation_state: RetryPreparationState;
+        preparation_owner: string | null; preparation_lease_expires_at: Date | string | null;
+        preparation_lease_live: boolean;
+        retry_run_id: number | string | null; workspace_id: string; original_run_id: number | string;
+        idempotency_key: string | null; packet: RetryPreviewPacket;
+      }>(
+        `SELECT preview_hash, status, preparation_state, preparation_owner,
+                preparation_lease_expires_at,
+                (preparation_owner IS NOT NULL AND preparation_lease_expires_at > NOW()) AS preparation_lease_live,
+                retry_run_id, workspace_id,
+                original_run_id, idempotency_key, packet
+         FROM pipeline_retry_previews
+         WHERE preview_hash = $1 OR (workspace_id = $2 AND idempotency_key = $3)
+         ORDER BY (preview_hash = $1) DESC
+         FOR UPDATE`,
+        [previewHash, originalRun.workspace_id, dispatchIdempotencyKey],
+      );
+      const existing = existingResult.rows[0];
+      if (!existing) {
+        await client.query(
+          `INSERT INTO pipeline_retry_previews (
+             preview_hash, original_run_id, workspace_id, scope_hash, status, packet,
+             approval_token, preview_identity_hash, expires_at, idempotency_key, approved_at,
+             preparation_state, preparation_owner, preparation_lease_expires_at,
+             preparation_generation
+           ) VALUES ($1,$2,$3,$4,'approved',$5::jsonb,$6,$7,$8,$9,NOW(),
+                     'preparing',$10,NOW() + INTERVAL '5 minutes',1)`,
+          [
+            previewHash, originalRunId, originalRun.workspace_id, scopeHash,
+            JSON.stringify(approvedPreview), approvalToken ? retryHash({ approvalToken }) : null,
+            retryHash(previewIdentity), previewIdentity.expiresAt, dispatchIdempotencyKey,
+            preparationOwner,
+          ],
+        );
+        const runResult = await client.query<{ id: number }>(
+          `INSERT INTO pipeline_runs
+            (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
+             retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
+             auto_worktree, auto_merge, include_graph, merge_strategy, effective_options,
+             trigger_options, orchestration_mode)
+           VALUES ($1,$2,'queued','retry',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                   $15::jsonb,$16::jsonb,$17)
+           RETURNING id`,
+          [
+            originalRun.spec_path, originalRun.workspace_id, originalRun.branch_name,
+            originalRun.worktree_path, originalRunId, retryParallelism, retryTerminalMode,
+            approvedPreview.options.agent, approvedPreview.options.agent, approvedPreview.options.model,
+            approvedPreview.options.worktree.enabled, approvedPreview.options.merge.autoMerge,
+            approvedPreview.options.includeGraph, approvedPreview.options.merge.strategy,
+            JSON.stringify(retryEffectiveOptions), JSON.stringify(retryTriggerOptions), retryWavePolicy.mode,
+          ],
+        );
+        const runId = normalizeWorkerRunId(runResult.rows[0].id);
+        await client.query(
+          `UPDATE pipeline_retry_previews SET retry_run_id = $2
+           WHERE preview_hash = $1 AND status = 'approved' AND preparation_owner = $3`,
+          [previewHash, runId, preparationOwner],
+        );
+        return { action: 'prepare', runId, state: 'preparing' };
+      }
+      if (
+        existing.preview_hash !== previewHash
+        || existing.workspace_id !== originalRun.workspace_id
+        || Number(existing.original_run_id) !== originalRunId
+        || existing.idempotency_key !== dispatchIdempotencyKey
+        || retryHash(existing.packet) !== retryHash(approvedPreview)
+      ) throw new ConflictError('Retry dispatch Idempotency-Key was reused with a different preview');
+
+      const runId = existing.retry_run_id == null ? null : normalizeWorkerRunId(existing.retry_run_id);
+      if (existing.status === 'dispatched' && runId !== null) return { action: 'duplicate', runId };
+      if (existing.status === 'cancelled' || existing.status === 'refused') {
+        return { action: 'terminal', terminal: existing.status, runId };
+      }
+      if (existing.status !== 'approved' || runId === null) {
+        await client.query(
+          `UPDATE pipeline_retry_previews
+           SET status = 'refused', preparation_state = 'refused',
+               refusal_reason = 'approved_preparation_missing_retry_run',
+               preparation_owner = NULL, preparation_lease_expires_at = NULL
+           WHERE preview_hash = $1 AND status = 'approved'`,
+          [previewHash],
+        );
+        return { action: 'terminal', terminal: 'refused', runId };
+      }
+
+      const dispatchResult = await client.query<{
+        identity_hash: string; state: string; queue_payload_hash: string;
+        job_payload: Record<string, unknown>; boss_job_id: string | null;
+      }>(
+        `SELECT identity_hash, state, queue_payload_hash, job_payload, boss_job_id::text
+         FROM governed_retry_dispatches WHERE preview_hash = $1 FOR UPDATE`,
+        [previewHash],
+      );
+      const dispatch = dispatchResult.rows[0];
+      const runResult = await client.query<{ status: string }>(
+        'SELECT status FROM pipeline_runs WHERE id = $1 FOR UPDATE',
+        [runId],
+      );
+      if (runResult.rows[0]?.status !== 'queued') {
+        if (runResult.rows[0]?.status === 'cancelled') return { action: 'terminal', terminal: 'cancelled', runId };
+        throw new ConflictError(`Retry preparation run is already ${runResult.rows[0]?.status ?? 'missing'}`);
+      }
+      if (dispatch?.state === 'dispatched' && dispatch.boss_job_id && existing.preparation_state === 'outbox_ready') {
+        await client.query(
+          `UPDATE pipeline_retry_previews
+           SET status = 'dispatched', preparation_state = 'published', boss_job_id = $2::uuid,
+               dispatched_at = COALESCE(dispatched_at, NOW()), preparation_owner = NULL,
+               preparation_lease_expires_at = NULL
+           WHERE preview_hash = $1 AND status = 'approved' AND preparation_state = 'outbox_ready'`,
+          [previewHash, dispatch.boss_job_id],
+        );
+        return { action: 'duplicate', runId };
+      }
+
+      if (existing.preparation_lease_live) return { action: 'pending', runId };
+      await client.query(
+        `UPDATE pipeline_retry_previews
+         SET preparation_owner = $2, preparation_lease_expires_at = NOW() + INTERVAL '5 minutes',
+             preparation_generation = preparation_generation + 1
+         WHERE preview_hash = $1 AND status = 'approved'`,
+        [previewHash, preparationOwner],
+      );
+      if (existing.preparation_state === 'outbox_ready' && dispatch?.state === 'prepared') {
+        return {
+          action: 'publish', runId, identityHash: dispatch.identity_hash,
+          queuePayloadHash: dispatch.queue_payload_hash, jobPayload: dispatch.job_payload,
+        };
+      }
+      if (existing.preparation_state === 'hooks_running') return { action: 'ambiguous_hook', runId };
+      if (!['preparing', 'artifacts_ready', 'hooks_passed', 'manifests_ready'].includes(existing.preparation_state)) {
+        throw new ConflictError(`Retry preparation cannot resume from ${existing.preparation_state}`);
+      }
+      return { action: 'prepare', runId, state: existing.preparation_state };
+    });
+
+    if (reservation.action === 'duplicate') {
+      await emitLifecycleInvalidation({
+        workspaceId: originalRun.workspace_id,
+        specId: path.basename(originalRun.spec_path, '.json'),
+        runId: reservation.runId,
+        changeKind: 'retry_dispatched',
+      });
+      res.status(200).json({ ok: true, queued: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+      return;
+    }
+    if (reservation.action === 'terminal') {
+      throw new ConflictError(`Retry preview is ${reservation.terminal} and no longer dispatchable`);
+    }
+    if (reservation.action === 'pending') {
+      res.status(200).json({ ok: true, queued: false, pending: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+      return;
+    }
+
+    ownedRetryPreparation = {
+      previewHash,
+      owner: preparationOwner,
+      retryRunId: reservation.runId,
+      workspaceId: originalRun.workspace_id,
+    };
+    if (reservation.action === 'ambiguous_hook') {
+      preparationRefusalReason = 'ambiguous_pre_run_hook_after_preparation_crash';
+      throw new ConflictError('Retry preparation stopped during the pre-run hook; it was refused instead of replaying an ambiguous side effect');
+    }
+    if (reservation.action === 'publish') {
+      const persistedPayload = PipelineRetryJobPayload.parse(reservation.jobPayload);
+      const replayBoss = getBoss();
+      await replayBoss.createQueue('pipeline:retry');
+      const replayJobId = await replayBoss.send('pipeline:retry', persistedPayload, {
+        retryLimit: 5, retryDelay: 30, expireInSeconds: 300,
+      });
+      if (!replayJobId) {
+        preparationRefusalReason = 'pgboss_send_returned_null';
+        throw new ServiceUnavailableError('Retry queue rejected durable outbox replay');
+      }
+      const publication = await publishGovernedRetryDispatch({
+        previewHash,
+        dispatchIdentityHash: reservation.identityHash,
+        retryRunId: reservation.runId,
+        queuePayloadHash: reservation.queuePayloadHash,
+        bossJobId: replayJobId,
+      });
+      if (publication.outcome === 'cancelled' || publication.outcome === 'refused') {
+        ownedRetryPreparation = null;
+        res.status(200).json({ ok: true, queued: false, terminal: publication.outcome, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+        return;
+      }
+      if (publication.outcome !== 'published') {
+        throw new ConflictError('Retry outbox publication is still pending; replay the exact request');
+      }
+      ownedRetryPreparation = null;
+      await emitLifecycleInvalidation({
+        workspaceId: originalRun.workspace_id,
+        specId: path.basename(originalRun.spec_path, '.json'),
+        runId: reservation.runId,
+        changeKind: 'retry_dispatched',
+      });
+      res.status(200).json({ ok: true, queued: true, duplicate: true, recovered: true, runId: reservation.runId, originalRunId, previewHash });
+      return;
+    }
+    const newRunId = reservation.runId;
+    const resumedPreparationState = reservation.state;
+
+    // Git refresh is a preparation side effect, so it is forbidden before the
+    // transactional preview/run owner above. Replays preserve the approved
+    // forceSequential posture even after the worktree becomes fresh.
+    if (worktreePreflight?.classification === 'stale_base' && originalRun.worktree_path) {
+      const refresh = safelyRefreshReusableWorktree({
+        workspacePath: workspace.path,
+        worktreePath: originalRun.worktree_path,
+        expectedBranchName: originalRun.branch_name ?? null,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+      });
+      await execute(
+        `UPDATE pipeline_retry_previews
+         SET override_record = COALESCE(override_record, '{}'::jsonb) || $2::jsonb
+         WHERE preview_hash = $1 AND status = 'approved' AND preparation_owner = $3`,
+        [previewHash, JSON.stringify({ worktreeRefresh: refresh }), preparationOwner],
+      );
+      worktreePreflight = validateReusableWorktree({
+        workspacePath: workspace.path,
+        worktreePath: originalRun.worktree_path,
+        expectedBranchName: originalRun.branch_name ?? null,
+        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+      });
+      if (!worktreePreflight.ok) {
+        preparationRefusalReason = `worktree_refresh_failed:${worktreePreflight.reason}`;
+        throw new ConflictError(`Worktree refresh did not produce a reusable retry base (${worktreePreflight.reason})`);
+      }
+    }
 
     // 8. Accepted siblings are represented only by immutable carry-forward
     // evidence. Projecting copied pass rows into the retry run would make old
@@ -6446,18 +6593,25 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     for (const story of storiesToRetry) {
       const previousAttempt = story.retries + 1;
       const attempt = previousAttempt + 1;
+      const attemptIngestKey = `governed-retry-attempt:${previewHash}:${story.story_id}:${attempt}`;
       await execute(
-        `INSERT INTO story_results (run_id, story_id, status, retries) VALUES ($1, $2, 'retry', $3)`,
-        [newRunId, story.story_id, attempt - 1]
+        `INSERT INTO story_results (run_id, story_id, status, retries, ingest_key)
+         VALUES ($1, $2, 'retry', $3, $4)
+         ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING`,
+        [newRunId, story.story_id, attempt - 1, attemptIngestKey],
       );
 
       const walEvent = await queryOne<WalEvent>(
-        `INSERT INTO wal_events (event_type, workspace_id, story_id, payload) VALUES ('story_retried', $1, $2, $3) RETURNING *`,
+        `INSERT INTO wal_events (event_type, workspace_id, story_id, payload, ingest_key)
+         VALUES ('story_retried', $1, $2, $3, $4)
+         ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+         RETURNING *`,
         [
           originalRun.workspace_id,
           story.story_id,
           JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt, previous_attempt: previousAttempt }),
-        ]
+          `governed-retry-story-event:${previewHash}:${story.story_id}:${attempt}`,
+        ],
       );
       if (walEvent) broadcastAll(walEvent!);
 
@@ -6468,11 +6622,19 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     //     Include all stories so dependency resolution works correctly — passed stories
     //     (passes:true) are skipped naturally by the engine.
     const specJson = buildGovernedRetrySpec(sourceSpecJson, approvedPreview.scope);
-    const retrySpecName = `retry-${newRunId}-${Date.now()}.json`;
+    const retrySpecName = `retry-${newRunId}.json`;
     const retrySpecDir = path.join(workspace.path, 'forge', 'specs', 'approved');
     const retrySpecPath = path.join(retrySpecDir, retrySpecName);
     fs.mkdirSync(retrySpecDir, { recursive: true });
     fs.writeFileSync(retrySpecPath, JSON.stringify(specJson, null, 2));
+
+    let preparationState = resumedPreparationState;
+    if (preparationState === 'preparing') {
+      await advanceGovernedRetryPreparation({
+        previewHash, owner: preparationOwner, from: 'preparing', to: 'artifacts_ready',
+      });
+      preparationState = 'artifacts_ready';
+    }
 
     // 11. A retry follows the same opaque-secret contract as a fresh run.
     // Never serialize process.env or decrypted workspace values into pg-boss.
@@ -6483,21 +6645,30 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       providers: ['anthropic', 'openai-compat', 'openrouter'],
     });
 
-    // Reuse the existing pre-run approval path. Explicit approval tokens are
-    // audit claims, not a bypass for a failing workspace hook. Resolve secrets
-    // only for the hook process; decrypted values never enter the queue payload.
-    const retryHookSecrets = await resolveExecutionSecrets(secretReferences);
-    const retryHookResults = await runHooks(
-      originalRun.workspace_id,
-      'pre_run',
-      approvedPreview.options.worktree.path ?? workspace.path,
-      { ...retryHookSecrets, ...envOverrides },
-    );
-    const failedRetryHook = retryHookResults.find((result) => result.exitCode !== 0);
-    if (failedRetryHook) {
-      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'pre_run_hook_failed' WHERE preview_hash = $1`, [previewHash]);
-      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'pre_run_hook_failed' WHERE id = $1`, [newRunId]);
-      throw new ForbiddenError(`Retry pre-run approval hook failed: ${failedRetryHook.command}`);
+    // Reuse the existing pre-run approval path. The durable hooks_running
+    // marker is written first. A crash in that interval is refused on replay
+    // instead of ambiguously re-running an external approval side effect.
+    if (preparationState === 'artifacts_ready') {
+      await advanceGovernedRetryPreparation({
+        previewHash, owner: preparationOwner, from: 'artifacts_ready', to: 'hooks_running',
+      });
+      preparationState = 'hooks_running';
+      const retryHookSecrets = await resolveExecutionSecrets(secretReferences);
+      const retryHookResults = await runHooks(
+        originalRun.workspace_id,
+        'pre_run',
+        approvedPreview.options.worktree.path ?? workspace.path,
+        { ...retryHookSecrets, ...envOverrides },
+      );
+      const failedRetryHook = retryHookResults.find((result) => result.exitCode !== 0);
+      if (failedRetryHook) {
+        preparationRefusalReason = 'pre_run_hook_failed';
+        throw new ForbiddenError(`Retry pre-run approval hook failed: ${failedRetryHook.command}`);
+      }
+      await advanceGovernedRetryPreparation({
+        previewHash, owner: preparationOwner, from: 'hooks_running', to: 'hooks_passed',
+      });
+      preparationState = 'hooks_passed';
     }
 
     // 12. Resolve retry manifests from the same immutable policy/profile inputs
@@ -6534,13 +6705,21 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       frozenRevisionsByStory,
       attemptByStory,
     });
+    if (preparationState === 'hooks_passed') {
+      await advanceGovernedRetryPreparation({
+        previewHash, owner: preparationOwner, from: 'hooks_passed', to: 'manifests_ready',
+      });
+      preparationState = 'manifests_ready';
+    }
+    if (preparationState !== 'manifests_ready') {
+      throw new ConflictError(`Retry preparation cannot persist an outbox from ${preparationState}`);
+    }
 
     // 13. Recompute the actual generated execution plan immediately before
     // dispatch. Neither manifests nor prompt prose can widen this frozen scope.
     const planComparison = compareRetryPlanToPreview(specJson, approvedPreview);
     if (!planComparison.matches) {
-      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'generated_plan_mismatch' WHERE preview_hash = $1`, [previewHash]);
-      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'retry_scope_mismatch' WHERE id = $1`, [newRunId]);
+      preparationRefusalReason = 'generated_plan_mismatch';
       await postRetryWalEvent('retry_scope_mismatch', originalRun.workspace_id, {
         original_run_id: originalRunId,
         retry_run_id: newRunId,
@@ -6588,6 +6767,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const queuePayloadHash = governedRetryQueuePayloadHash(queuePayloadAuthority);
     const effectiveAuthority = authoritativeScope;
     if (effectiveAuthority.targetRevision !== integratedRevision) {
+      preparationRefusalReason = 'retry_target_revision_changed';
       throw new ConflictError('Latest accepted run-branch head changed after preview; generate a new retry preview');
     }
     const leaseIdentity = retryHash({ previewHash, dispatchIdempotencyKey, retryRunId: newRunId });
@@ -6625,6 +6805,16 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     // pg-boss send. An API restart can replay this exact payload; no process map
     // or deterministic pg-boss job UUID is used as authority.
     await transaction(async (client) => {
+      const preparation = await client.query<{ status: string; preparation_state: RetryPreparationState; preparation_owner: string | null }>(
+        `SELECT status, preparation_state, preparation_owner
+         FROM pipeline_retry_previews WHERE preview_hash = $1 FOR UPDATE`,
+        [previewHash],
+      );
+      if (
+        preparation.rows[0]?.status !== 'approved'
+        || preparation.rows[0]?.preparation_state !== 'manifests_ready'
+        || preparation.rows[0]?.preparation_owner !== preparationOwner
+      ) throw new ConflictError('Retry preparation was cancelled or lost before outbox persistence');
       await client.query(
         `INSERT INTO governed_retry_dispatches (
            identity_hash, workspace_id, spec_id, spec_revision, original_run_id, retry_run_id,
@@ -6668,6 +6858,14 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
             carried.resultIdentity, carried.sourceCommit, carried.resultingHead, carried.integrationOrder, carried.reasonCode],
         );
       }
+      await client.query(
+        `UPDATE pipeline_retry_previews
+         SET preparation_state = 'outbox_ready',
+             preparation_lease_expires_at = NOW() + INTERVAL '5 minutes'
+         WHERE preview_hash = $1 AND status = 'approved'
+           AND preparation_state = 'manifests_ready' AND preparation_owner = $2`,
+        [previewHash, preparationOwner],
+      );
     });
 
     // 14. Enqueue through the existing queue. Explicit queue creation is
@@ -6680,22 +6878,28 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       expireInSeconds: 300,
     });
     if (!bossJobId) {
-      await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'pgboss_send_returned_null' WHERE preview_hash = $1`, [previewHash]);
-      await execute(`UPDATE governed_retry_dispatches SET state = 'failed', failure_evidence = $2::jsonb WHERE identity_hash = $1 AND state = 'prepared'`, [dispatchIdentity.identityHash, JSON.stringify({ reason: 'pgboss_send_returned_null' })]);
-      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'retry_dispatch_failed' WHERE id = $1`, [newRunId]);
+      preparationRefusalReason = 'pgboss_send_returned_null';
       throw new ServiceUnavailableError('Retry queue rejected dispatch');
     }
-    const dispatchTransition = await execute(
-      `UPDATE governed_retry_dispatches
-       SET state = 'dispatched', boss_job_id = $2::uuid
-       WHERE identity_hash = $1 AND state = 'prepared' AND state_version = 1`,
-      [dispatchIdentity.identityHash, bossJobId],
-    );
-    if (dispatchTransition.rowCount !== 1) throw new ConflictError('Retry dispatch lost its optimistic concurrency fence');
-    await execute(
-      `UPDATE pipeline_retry_previews SET status = 'dispatched', retry_run_id = $2, boss_job_id = $3::uuid, dispatched_at = NOW() WHERE preview_hash = $1 AND status = 'approved'`,
-      [previewHash, newRunId, bossJobId],
-    );
+    const publication = await publishGovernedRetryDispatch({
+      previewHash,
+      dispatchIdentityHash: dispatchIdentity.identityHash,
+      retryRunId: newRunId,
+      queuePayloadHash,
+      bossJobId,
+    });
+    if (publication.outcome === 'cancelled' || publication.outcome === 'refused') {
+      ownedRetryPreparation = null;
+      res.status(200).json({
+        ok: true, queued: false, terminal: publication.outcome, runId: newRunId,
+        originalRunId, previewHash,
+      });
+      return;
+    }
+    if (publication.outcome !== 'published') {
+      throw new ConflictError('Retry outbox publication is still pending; replay the exact request');
+    }
+    ownedRetryPreparation = null;
 
     logger.info(`[Pipeline] Enqueued pipeline:retry job for newRunId=${newRunId} (originalRunId=${originalRunId})`);
     await emitLifecycleInvalidation({
@@ -6720,6 +6924,13 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       passReconciliation,
     });
   } catch (error: any) {
+    if (ownedRetryPreparation) {
+      try {
+        await refuseGovernedRetryPreparation({ ...ownedRetryPreparation, reason: preparationRefusalReason });
+      } catch (refusalError) {
+        logger.error({ refusalError, previewHash: ownedRetryPreparation.previewHash }, '[retry] failed to terminalize owned preparation');
+      }
+    }
     handleRouteError(res, error, '[Pipeline] Retry');
   }
 }
@@ -8377,6 +8588,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
       logPath, blockedBy, activeSkills, completionPacket, idempotencyKey, rejectionEvidence,
+      integrationFinalization,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
@@ -8385,6 +8597,15 @@ router.post('/story-result', async (req: Request, res: Response) => {
       completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
       rejectionEvidence?: unknown;
+      integrationFinalization?: {
+        attempt: number;
+        resultingHead: string;
+        finalizationIdentity: {
+          idempotencyKey: string;
+          revision: string;
+          receiptHash: string;
+        };
+      };
     };
 
     if (!runId || !storyId || !status) {
@@ -8399,6 +8620,20 @@ router.post('/story-result', async (req: Request, res: Response) => {
 
     if (commitSha && !/^[0-9a-f]{40}$/i.test(commitSha)) {
       throw new ValidationError('commitSha must be a full git SHA');
+    }
+    if (integrationFinalization) {
+      const finalization = integrationFinalization.finalizationIdentity;
+      if (status !== 'pass'
+        || !Number.isSafeInteger(integrationFinalization.attempt)
+        || integrationFinalization.attempt < 1
+        || !/^[0-9a-f]{40}$/i.test(integrationFinalization.resultingHead)
+        || !finalization
+        || finalization.idempotencyKey !== idempotencyKey
+        || !/^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/.test(finalization.idempotencyKey)
+        || finalization.revision !== integrationFinalization.resultingHead
+        || !/^[0-9a-f]{64}$/i.test(finalization.receiptHash)) {
+        throw new ValidationError('integrationFinalization is invalid or does not match the pass idempotency identity');
+      }
     }
     if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
       throw new ValidationError('completionPacket must be an object');
@@ -8446,7 +8681,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
     if (!projection) throw new NotFoundError('Pipeline run not found');
     const specId = path.basename(projection.spec_path, '.json');
 
-    const inserted = await queryOne<{ id: number }>(`INSERT INTO story_results (
+    const storyResultSql = `INSERT INTO story_results (
          run_id, story_id, status, finished_at, worktree_path, worktree_branch,
          input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by,
          active_skills, completion_packet, spec_id, spec_revision, story_revision,
@@ -8456,7 +8691,8 @@ router.post('/story-result', async (req: Request, res: Response) => {
          $14, $15, $16, $17, $18, $19
        )
        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
-       RETURNING id`, [runId, storyId, status,
+       RETURNING id`;
+    const storyResultParams = [runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
       inputTokens ?? null, outputTokens ?? null,
       modelUsed ?? null, costUsd ?? null,
@@ -8470,7 +8706,53 @@ router.post('/story-result', async (req: Request, res: Response) => {
       projection.manifest_hash,
       projection.closeout_decision_id,
       idempotencyKey ?? null,
-    ]);
+    ];
+
+    const inserted = integrationFinalization
+      ? await transaction(async client => {
+        const ledgerResult = await client.query<{
+          state: string;
+          resulting_head: string | null;
+          finalization_identity: Record<string, unknown> | null;
+        }>(
+          `SELECT state, resulting_head, finalization_identity
+             FROM story_integration_ledger
+            WHERE run_id = $1 AND story_id = $2 AND attempt = $3
+            FOR UPDATE`,
+          [runId, storyId, integrationFinalization.attempt],
+        );
+        const ledger = ledgerResult.rows[0];
+        if (!ledger
+          || !['integrated_validated', 'finalized'].includes(ledger.state)
+          || ledger.resulting_head?.trim() !== integrationFinalization.resultingHead) {
+          throw new ConflictError('Wave integration ledger is not validated for this exact pass projection');
+        }
+        if (ledger.state === 'finalized') {
+          const prior = ledger.finalization_identity;
+          if (!prior
+            || prior.idempotencyKey !== integrationFinalization.finalizationIdentity.idempotencyKey
+            || prior.revision !== integrationFinalization.finalizationIdentity.revision
+            || prior.receiptHash !== integrationFinalization.finalizationIdentity.receiptHash) {
+            throw new ConflictError('Wave integration finalization identity changed during replay');
+          }
+        }
+        const result = await client.query<{ id: number }>(storyResultSql, storyResultParams);
+        if (ledger.state === 'integrated_validated') {
+          const finalized = await client.query(
+            `UPDATE story_integration_ledger
+                SET state = 'finalized', finalization_identity = $4::jsonb, finalized_at = NOW()
+              WHERE run_id = $1 AND story_id = $2 AND attempt = $3
+                AND state = 'integrated_validated'`,
+            [
+              runId, storyId, integrationFinalization.attempt,
+              JSON.stringify(integrationFinalization.finalizationIdentity),
+            ],
+          );
+          if (finalized.rowCount !== 1) throw new ConflictError('Wave integration finalization lost its state fence');
+        }
+        return result.rows[0];
+      })
+      : await queryOne<{ id: number }>(storyResultSql, storyResultParams);
 
     if (inserted && status === 'pass' && commitSha) {
       await execute(`

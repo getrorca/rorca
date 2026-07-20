@@ -117,8 +117,12 @@ export class WaveDeadline {
     this.deadlineMs = startedAtMs + limits.maxWaveDurationMs;
   }
 
+  remainingMs(nowMs = Date.now()): number {
+    return Math.max(0, this.deadlineMs - nowMs);
+  }
+
   assertActive(nowMs = Date.now()): void {
-    if (nowMs >= this.deadlineMs) {
+    if (this.remainingMs(nowMs) === 0) {
       throw new Error(`[wave-safety] wave duration limit ${this.limits.maxWaveDurationMs}ms reached; scheduling and mutation are disabled`);
     }
   }

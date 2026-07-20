@@ -7,7 +7,7 @@ import { buildQualificationChildEnv } from '../run-wave-qualification.mjs';
 
 const runId = 'qrun_89abcdef0123456789abcdef';
 const token = runId.slice('qrun_'.length);
-const url = `postgres://rorca_qrole_${token}:test-secret@localhost/rorca_qtest_${token}?application_name=${encodeURIComponent(`rorca-qualification:${runId}`)}`;
+const url = `postgres://rorca_qrole_${token}:test-secret@localhost/rorca_qtest_${token}_test?application_name=${encodeURIComponent(`rorca-qualification:${runId}`)}`;
 const base = {
   NODE_ENV: 'production',
   RORCA_QUALIFICATION_RUN_ID: runId,

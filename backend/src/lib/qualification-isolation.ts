@@ -144,7 +144,9 @@ export function buildQualificationIdentity(runId: string, databaseUrl: string): 
     fail('qualification database URL must use postgres:// or postgresql://');
   }
 
-  const expectedDatabase = `rorca_qtest_${token}`;
+  // Keep the unpredictable namespace while satisfying Jest's dedicated
+  // database guard, which deliberately requires a terminal _test suffix.
+  const expectedDatabase = `rorca_qtest_${token}_test`;
   const expectedRole = `rorca_qrole_${token}`;
   const expectedApplicationName = `rorca-qualification:${runId}`;
   const database = decodeURIComponent(parsed.pathname.replace(/^\//, ''));

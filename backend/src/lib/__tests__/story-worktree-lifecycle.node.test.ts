@@ -19,8 +19,13 @@ import {
   type StoryWorktreeOwnership,
 } from '../story-worktree-lifecycle';
 
+// Worktree fixture Git subprocesses must not inherit CI credentials or DB config.
 const gitEnvironment = {
-  ...process.env,
+  PATH: process.env.PATH ?? '',
+  HOME: os.tmpdir(),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_TERMINAL_PROMPT: '0',
   GIT_AUTHOR_NAME: 'Rorca Lifecycle Test',
   GIT_AUTHOR_EMAIL: 'lifecycle@rorca.invalid',
   GIT_COMMITTER_NAME: 'Rorca Lifecycle Test',

@@ -115,6 +115,36 @@ function git(cwd: string, args: string[]): string {
   }).trim();
 }
 
+export function rollbackRejectedWaveTarget(cwd: string, expectedParentHead: string, integratedHead: string): void {
+  if (git(cwd, ['rev-parse', 'HEAD']) !== integratedHead) {
+    throw new Error('[wave-integration] rejected contribution cannot be rolled back because target HEAD advanced');
+  }
+  execFileSync('git', ['reset', '--hard', expectedParentHead], {
+    cwd,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
+    cwd,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    encoding: 'buffer',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).toString('utf8').split('\0').filter(Boolean);
+  const root = path.resolve(cwd);
+  for (const relativePath of untracked) {
+    const candidate = path.resolve(root, relativePath);
+    const relative = path.relative(root, candidate);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error('[wave-integration] rejected contribution produced an unsafe untracked path');
+    }
+    fs.rmSync(candidate, { recursive: true, force: true });
+  }
+  if (git(cwd, ['rev-parse', 'HEAD']) !== expectedParentHead
+    || git(cwd, ['status', '--porcelain', '--untracked-files=all']) !== '') {
+    throw new Error('[wave-integration] rejected contribution rollback did not restore the clean parent target');
+  }
+}
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -359,6 +389,22 @@ export class WaveIntegrationLedger {
       this.assertSameIdentity(concurrentlyPrepared, input);
       return concurrentlyPrepared;
     }
+  }
+
+  markFailed(identity: WaveContributionIdentity, reason: string): WaveIntegrationRecord {
+    return this.withMutationLock(identity, () => {
+      const record = this.requireRecord(identity);
+      if (record.state === 'failed' || ['conflicted', 'resolution_pending', 'aborted'].includes(record.state)) return record;
+      if (record.state === 'finalized') throw new Error('[wave-integration] finalized contribution cannot be rejected');
+      if (!['prepared', 'integrating', 'integrated', 'integrated_validated'].includes(record.state)) {
+        throw new Error(`[wave-integration] contribution cannot fail from ${record.state}`);
+      }
+      if (git(this.repositoryPath, ['rev-parse', 'HEAD']) !== record.expectedParentHead
+        || git(this.repositoryPath, ['status', '--porcelain', '--untracked-files=all']) !== '') {
+        throw new Error('[wave-integration] failed contribution did not leave its clean parent target');
+      }
+      return this.transition({ ...record, failureReason: boundedUtf8(reason, 512) }, 'failed', record.expectedParentHead);
+    });
   }
 
   /** Persist the apply intent before the Git linearization point. */

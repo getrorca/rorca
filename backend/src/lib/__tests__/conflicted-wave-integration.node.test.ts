@@ -26,8 +26,13 @@ import {
 
 const conflictMigrationPath = path.resolve(process.cwd(), 'backend', 'src', 'db', 'pg-migrations', '20260719091000_wave_conflict_recovery.sql');
 
+// Git fixtures receive only deterministic Git settings, never the test process env.
 const gitEnvironment = {
-  ...process.env,
+  PATH: process.env.PATH ?? '',
+  HOME: os.tmpdir(),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_TERMINAL_PROMPT: '0',
   GIT_AUTHOR_NAME: 'Rorca Conflict Qualification',
   GIT_AUTHOR_EMAIL: 'wave-conflict@rorca.invalid',
   GIT_COMMITTER_NAME: 'Rorca Conflict Qualification',

@@ -29,11 +29,19 @@ import {
 
 const RUN_ID = 'qrun_0123456789abcdef01234567';
 const TOKEN = RUN_ID.slice('qrun_'.length);
-const DATABASE = `rorca_qtest_${TOKEN}`;
+// Jest's dedicated-DB guard requires the final _test suffix.
+const DATABASE = `rorca_qtest_${TOKEN}_test`;
 const ROLE = `rorca_qrole_${TOKEN}`;
 const APPLICATION_NAME = `rorca-qualification:${RUN_ID}`;
 const DATABASE_URL = `postgres://${ROLE}:qualification-secret@localhost:5432/${DATABASE}?application_name=${encodeURIComponent(APPLICATION_NAME)}`;
 const MARKER = qualificationIsolationMarker(RUN_ID);
+const gitEnvironment = {
+  PATH: process.env.PATH ?? '',
+  HOME: os.tmpdir(),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_TERMINAL_PROMPT: '0',
+};
 
 function runtimeEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -203,7 +211,7 @@ test('database and pg-boss operations accept only the current namespace and crea
 test('production-like mixed identities fail before filesystem, Git, DB, WAL, queue, or run-state mutation', async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'wpe-negative-'));
   const beforeFilesystem = directorySentinel(parent);
-  const beforeGit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const beforeGit = execFileSync('git', ['rev-parse', 'HEAD'], { env: gitEnvironment, encoding: 'utf8' }).trim();
   const mutations = { filesystem: 0, git: 0, database: 0, wal: 0, queue: 0, runState: 0 };
   const client: QualificationQueryable = {
     async query<T>() {
@@ -222,7 +230,7 @@ test('production-like mixed identities fail before filesystem, Git, DB, WAL, que
   try {
     await assert.rejects(activateQualificationBoundary(client, mixedProductionEnv, parent), /mixed or inherited identity/);
     assert.equal(directorySentinel(parent), beforeFilesystem);
-    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), beforeGit);
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { env: gitEnvironment, encoding: 'utf8' }).trim(), beforeGit);
     assert.deepEqual(mutations, { filesystem: 0, git: 0, database: 0, wal: 0, queue: 0, runState: 0 });
   } finally {
     fs.rmdirSync(parent);

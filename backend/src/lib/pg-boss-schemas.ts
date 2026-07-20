@@ -80,6 +80,7 @@ export const WavePolicyEnvelopeSchema = z.object({
     maxActiveWaveRunsPerWorkspace: z.number().int().min(1).max(4),
     releaseReadinessPacketId: z.string().uuid().nullable(),
     productionActivationApprovalId: z.string().uuid().nullable(),
+    policyEpoch: z.number().int().min(0),
   }).strict(),
   fencingPolicy: z.literal('dispatch-boundary-v1'),
   fence: z.string().regex(/^sha256:[0-9a-f]{64}$/),

@@ -25,8 +25,13 @@ const fixturesDirectory = path.join(backendSourceDirectory, '__tests__', 'fixtur
 const scenarioManifestPath = path.join(fixturesDirectory, 'wave-agent-scenarios.json');
 const faultCatalogPath = path.join(fixturesDirectory, 'wave-fault-points.json');
 const agentPath = path.join(fixturesDirectory, 'wave-fixture-agent.mjs');
+// Fixture Git subprocesses must not receive credentials from the parent test process.
 const deterministicGitEnv = {
-  ...process.env,
+  PATH: process.env.PATH ?? '',
+  HOME: os.tmpdir(),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_TERMINAL_PROMPT: '0',
   GIT_AUTHOR_NAME: 'Rorca Fixture Base',
   GIT_AUTHOR_EMAIL: 'fixture-base@rorca.invalid',
   GIT_COMMITTER_NAME: 'Rorca Fixture Base',
@@ -36,16 +41,16 @@ const deterministicGitEnv = {
 };
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return execFileSync('git', args, { cwd, env: deterministicGitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 function createBaseRepository(root: string): { repository: string; revision: string } {
   const repository = path.join(root, 'base');
   fs.mkdirSync(repository);
-  execFileSync('git', ['init', '--initial-branch=main'], { cwd: repository, stdio: 'ignore' });
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: repository, env: deterministicGitEnv, stdio: 'ignore' });
   fs.writeFileSync(path.join(repository, 'README.md'), 'deterministic fixture repository\n');
   fs.writeFileSync(path.join(repository, 'shared-conflict.txt'), 'base\n');
-  execFileSync('git', ['add', '.'], { cwd: repository, stdio: 'ignore' });
+  execFileSync('git', ['add', '.'], { cwd: repository, env: deterministicGitEnv, stdio: 'ignore' });
   execFileSync('git', ['commit', '-m', 'test(fixture): deterministic base'], {
     cwd: repository,
     env: deterministicGitEnv,
@@ -56,7 +61,7 @@ function createBaseRepository(root: string): { repository: string; revision: str
 
 function cloneRepository(base: string, root: string, name: string): string {
   const target = path.join(root, name);
-  execFileSync('git', ['clone', '--quiet', '--no-hardlinks', base, target], { stdio: 'ignore' });
+  execFileSync('git', ['clone', '--quiet', '--no-hardlinks', base, target], { env: deterministicGitEnv, stdio: 'ignore' });
   return target;
 }
 
@@ -297,14 +302,14 @@ test('merge-conflict scenarios deterministically conflict at integration apply',
     const right = await harness.run(input(rightRepo, revision, 'merge-conflict-right'));
     assert.equal(left.faultPoint, 'WPE-FP-006');
     assert.equal(right.faultPoint, 'WPE-FP-006');
-    execFileSync('git', ['fetch', '--quiet', leftRepo, 'HEAD'], { cwd: integrationRepo, stdio: 'ignore' });
-    execFileSync('git', ['cherry-pick', 'FETCH_HEAD'], { cwd: integrationRepo, stdio: 'ignore' });
-    execFileSync('git', ['fetch', '--quiet', rightRepo, 'HEAD'], { cwd: integrationRepo, stdio: 'ignore' });
+    execFileSync('git', ['fetch', '--quiet', leftRepo, 'HEAD'], { cwd: integrationRepo, env: deterministicGitEnv, stdio: 'ignore' });
+    execFileSync('git', ['cherry-pick', 'FETCH_HEAD'], { cwd: integrationRepo, env: deterministicGitEnv, stdio: 'ignore' });
+    execFileSync('git', ['fetch', '--quiet', rightRepo, 'HEAD'], { cwd: integrationRepo, env: deterministicGitEnv, stdio: 'ignore' });
     assert.throws(
-      () => execFileSync('git', ['cherry-pick', 'FETCH_HEAD'], { cwd: integrationRepo, stdio: 'pipe' }),
+      () => execFileSync('git', ['cherry-pick', 'FETCH_HEAD'], { cwd: integrationRepo, env: deterministicGitEnv, stdio: 'pipe' }),
     );
     assert.match(git(integrationRepo, ['status', '--porcelain']), /^UU shared-conflict\.txt$/m);
-    execFileSync('git', ['cherry-pick', '--abort'], { cwd: integrationRepo, stdio: 'ignore' });
+    execFileSync('git', ['cherry-pick', '--abort'], { cwd: integrationRepo, env: deterministicGitEnv, stdio: 'ignore' });
   });
 });
 

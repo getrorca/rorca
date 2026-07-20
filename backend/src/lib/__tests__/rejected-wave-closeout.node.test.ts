@@ -36,9 +36,15 @@ import {
   type RejectionEvidenceChannel,
 } from '../rejected-wave-closeout';
 import { WaveIntegrationLedger, type WaveContributionIdentity } from '../wave-integration-protocol';
+import { runWaveTasksWithRejectionFence } from '../parallel-wave-core';
 
+// Git fixtures receive only deterministic Git settings, never the test process env.
 const gitEnvironment = {
-  ...process.env,
+  PATH: process.env.PATH ?? '',
+  HOME: os.tmpdir(),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_TERMINAL_PROMPT: '0',
   GIT_AUTHOR_NAME: 'Rorca Rejected Wave',
   GIT_AUTHOR_EMAIL: 'wave-rejection@rorca.invalid',
   GIT_COMMITTER_NAME: 'Rorca Rejected Wave',
@@ -324,6 +330,65 @@ test('post-commit rejection fails closed while an already-running independent si
     await harness.dispose();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('production engine routes wave passes through the guarded ledger and argv-safe Git calls', () => {
+  const source = fs.readFileSync(path.resolve(process.cwd(), 'backend', 'src', 'lib', 'execution-engine.ts'), 'utf8');
+  const seam = source.slice(source.indexOf('async function integrateAndFinalizeWaveContribution'), source.indexOf('async function recordIntegratedCheckpointAttestation'));
+  assert.match(seam, /new WaveIntegrationLedger\(config\.cwd\)/);
+  assert.match(seam, /prepareDurableWaveIntegration\(durableIdentity\)/);
+  assert.match(seam, /advanceDurableWaveIntegration/);
+  assert.match(seam, /runGate\(config\.cwd, manifest, config\.cwd, \(\) => deadline\.remainingMs\(\)\)/);
+  assert.match(seam, /finalizationIdentity/);
+  assert.match(seam, /ledger\.prepare\(identity\)/);
+  assert.match(seam, /ledger\.integrate\(identity\)/);
+  assert.match(seam, /ledger\.markIntegratedValidated\(identity/);
+  assert.match(seam, /await finalizeIntegratedStoryPass/);
+  assert.match(seam, /ledger\.finalize\(identity/);
+  assert.ok(seam.indexOf('error instanceof WaveFinalizationQueuedError') < seam.indexOf('failDurableWaveIntegration'));
+  assert.doesNotMatch(seam, /execSync\(/);
+  assert.doesNotMatch(source, /commit runtime files before (?:wave )?merge/);
+  assert.match(source, /Wave dispatch fenced after earlier executor rejection/);
+  assert.match(source, /persistDispatchFencedStory/);
+  assert.match(source, /wave-dispatch-fenced:/);
+  assert.match(source, /new WaveDeadline/);
+  assert.match(source, /new WaveResourceBudget/);
+  assert.match(source, /waveDeadline\.remainingMs\(\)/);
+  for (const resource of ['queueDepth', 'openFiles', 'diskBytes', 'childProcesses', 'memoryBytes', 'pendingOutputBytes', 'structuredTranscriptBytes', 'ptyCaptureBytes', 'rawCaptureBytes']) {
+    assert.match(source, new RegExp(`['\"]${resource}['\"]`));
+  }
+  assert.ok((source.match(/refuseOverBudgetOutput\(/g) ?? []).length >= 7);
+  assert.match(source, /outputAdmission\(buf\.length, 'pty'\)/);
+  assert.match(source, /concurrentCount = Math\.min\(config\.parallelism, executionCount\)/);
+  assert.match(source, /outputState\.exceeded = true/);
+  assert.match(source, /exitCode: 1/);
+  assert.match(source, /child\.kill\('SIGKILL'\)/);
+  const route = fs.readFileSync(path.resolve(process.cwd(), 'backend', 'src', 'routes', 'pipeline.ts'), 'utf8');
+  assert.match(route, /Wave integration ledger is not validated for this exact pass projection/);
+  assert.match(route, /SET state = 'finalized', finalization_identity/);
+  assert.match(route, /transaction\(async client/);
+  const worker = fs.readFileSync(path.resolve(process.cwd(), 'backend', 'src', 'worker.ts'), 'utf8');
+  assert.doesNotMatch(worker, /gh pr (?:list|create)/);
+  assert.match(worker, /execFileSync\('gh', \[/);
+  const commit = source.slice(source.indexOf('function gitCommitStory'), source.indexOf('// ─── Validation Gate'));
+  assert.match(commit, /execFileSync\('git', \[/);
+  assert.doesNotMatch(commit, /execSync\(`git (?:reset|commit)/);
+});
+
+test('shared production scheduler fences queued siblings while draining already-running work', async () => {
+  const started: string[] = [];
+  let releaseSibling!: () => void;
+  const sibling = new Promise<void>(resolve => { releaseSibling = resolve; });
+  const resultsPromise = runWaveTasksWithRejectionFence([
+    async () => { started.push('rejected'); throw new Error('reject first'); },
+    async () => { started.push('running'); await sibling; return 'drained'; },
+    async () => { started.push('queued'); return 'must not start'; },
+  ], 2);
+  await new Promise(resolve => setImmediate(resolve));
+  releaseSibling();
+  const results = await resultsPromise;
+  assert.deepEqual(started.sort(), ['rejected', 'running']);
+  assert.deepEqual(results.map(result => result.status), ['rejected', 'fulfilled', 'fenced']);
 });
 
 test('portable rejection evidence covers arbitrary values, redacts secrets and paths, and remains bounded valid UTF-8', () => {

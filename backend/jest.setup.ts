@@ -89,9 +89,9 @@ export default async function globalSetup(): Promise<void> {
     try {
       await testPool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto');
     } catch { /* extension may not be available, non-fatal */ }
-    try {
-      await testPool.query('CREATE EXTENSION IF NOT EXISTS vector');
-    } catch { /* pgvector may not be installed, non-fatal */ }
+    // Wave qualification requires pgvector; fail immediately rather than
+    // silently reducing coverage when the platform image is incomplete.
+    await testPool.query('CREATE EXTENSION IF NOT EXISTS vector');
     // Tests run in lite-mode semantics. Pre-mark the AGE graph migration as
     // skipped so globalSetup never executes LOAD 'age', which poisons later DDL
     // in this local harness even when the migration is rolled back.

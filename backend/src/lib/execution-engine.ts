@@ -220,10 +220,29 @@ import {
   normalizeWaveRejection,
   parallelRunExitCode,
   requiresPerStoryWorktree,
+  runWaveTasksWithRejectionFence,
   selectWaveWorktreeCleanup,
   type WaveAccountingState,
 } from './parallel-wave-core';
 import { runHostValidationRequirement } from './story-host-validation';
+import {
+  rollbackRejectedWaveTarget,
+  WaveIntegrationLedger,
+  waveIntegrationLedgerKey,
+  type WaveContributionIdentity,
+} from './wave-integration-protocol';
+import {
+  WaveDeadline,
+  WaveResourceBudget,
+  resolveWaveSafetyLimits,
+} from './wave-execution-safety';
+import {
+  advanceDurableWaveIntegration,
+  failDurableWaveIntegration,
+  prepareDurableWaveIntegration,
+  readDurableWaveIntegration,
+  type DurableWaveIntegrationIdentity,
+} from './wave-integration-store';
 import { executeStoryWithAdapter, type StoryExecutionAdapter } from './story-execution-adapter';
 import {
   adaptStoryCloseoutEvidence,
@@ -359,6 +378,9 @@ interface EngineConfig {
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
   /** Immutable host-resolved manifests keyed by story ID; absent only for audited legacy invocations. */
   executionManifests: ReadonlyMap<string, StoryExecutionManifest>;
+  /** Immutable bundle supplied by the dispatcher; required for guarded wave integration. */
+  executionManifestBundlePath: string | null;
+  executionManifestBundleHash: string | null;
 }
 
 // ─── Browser MCP Auto-Detection ─────────────────────────────────────────────
@@ -1150,9 +1172,10 @@ async function emitWalEvent(
   payload: Record<string, unknown>,
   storyId?: string,
   specId?: string,
+  idempotencyKeyOverride?: string,
 ): Promise<void> {
   const occurredAt = new Date().toISOString();
-  const idempotencyKey = `wal:${_fallbackRunId}:${randomUUID()}`;
+  const idempotencyKey = idempotencyKeyOverride ?? `wal:${_fallbackRunId}:${randomUUID()}`;
   const body = {
     event_type: eventType,
     workspace_id: workspaceId,
@@ -1233,12 +1256,23 @@ async function emitContextTrace(
   );
 }
 
+class WaveFinalizationQueuedError extends Error {
+  constructor(storyId: unknown) {
+    super(`Wave integration finalization is durably queued for recovery but not yet committed for ${String(storyId ?? 'unknown')}`);
+    this.name = 'WaveFinalizationQueuedError';
+  }
+}
+
 /** POST a story result to the backend with retry + fallback. */
 async function postStoryResult(
   port: number,
   body: Record<string, unknown>,
 ): Promise<void> {
-  const idempotencyKey = `story-result:${_fallbackRunId}:${randomUUID()}`;
+  const requestedIdempotencyKey = typeof body.idempotencyKey === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/.test(body.idempotencyKey)
+    ? body.idempotencyKey
+    : null;
+  const idempotencyKey = requestedIdempotencyKey ?? `story-result:${_fallbackRunId}:${randomUUID()}`;
   const deliveryBody = { ...body, idempotencyKey };
   const ok = await retryPost(
     engineApiEndpoint(port, '/api/pipeline/story-result'),
@@ -1259,6 +1293,12 @@ async function postStoryResult(
     };
     if (!await writeFallbackResult(_fallbackCwd, entry)) {
       throw new Error(`Story-result fallback persistence failed for ${String(body.storyId ?? 'unknown')}`);
+    }
+    // Wave integration finalization is an atomic backend DB boundary. A local
+    // fallback preserves the packet for recovery but cannot authorize the spec,
+    // WAL, or filesystem ledger projections in this process.
+    if (body.integrationFinalization) {
+      throw new WaveFinalizationQueuedError(body.storyId);
     }
   }
 }
@@ -2305,6 +2345,7 @@ async function spawnAgentViaPty(
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
   piServerSkillFiles: string[] = [],
+  outputAdmission?: WaveOutputAdmission,
 ): Promise<AgentResult> {
   return new Promise(async (resolve) => {
     const startTime = Date.now();
@@ -2679,6 +2720,10 @@ async function spawnAgentViaPty(
       pty.onData((chunk) => {
         const buf = toBuffer(chunk);
         if (buf.length === 0) return;
+        if (outputAdmission && !outputAdmission(buf.length, 'pty')) {
+          void requestPtyShutdown('SIGTERM');
+          return;
+        }
         resetInactivity();
         logStream.write(buf);
         recordStderr(buf);
@@ -2917,6 +2962,33 @@ function createIdleWatchdog(
   return { reset, clear };
 }
 
+type WaveOutputAdmission = (bytes: number, transport: 'pipe' | 'pty') => boolean;
+interface WaveOutputState { exceeded: boolean; diagnostic: string | null }
+const overBudgetProcesses = new WeakSet<object>();
+
+function refuseOverBudgetOutput(
+  child: { pid?: number; kill(signal?: NodeJS.Signals): boolean },
+  chunkBytes: number,
+  transport: 'pipe' | 'pty',
+  admission?: WaveOutputAdmission,
+): boolean {
+  if (!admission || admission(chunkBytes, transport)) return false;
+  if (overBudgetProcesses.has(child)) return true;
+  overBudgetProcesses.add(child);
+  try {
+    if (child.pid) killProcessGroup(child.pid, 'SIGTERM');
+    child.kill('SIGTERM');
+  } catch { /* process already exited */ }
+  const forceKill = setTimeout(() => {
+    try {
+      if (child.pid) killProcessGroup(child.pid, 'SIGKILL');
+      child.kill('SIGKILL');
+    } catch { /* process already exited */ }
+  }, 2_000);
+  forceKill.unref?.();
+  return true;
+}
+
 /**
  * Spawn a story subprocess using the configured agent type.
  * All three paths use AbortController-style timeout (setTimeout + SIGTERM/SIGKILL).
@@ -2940,6 +3012,7 @@ function runAgent(
   piServerSkillFiles?: string[],
   piSessionOptions?: PiSessionOptions,
   ptyOptions?: PtyRunOptions,
+  outputAdmission?: WaveOutputAdmission,
 ): Promise<AgentResult> {
   const startTime = Date.now();
   if (isEmptyPrompt(prompt)) {
@@ -2964,19 +3037,20 @@ function runAgent(
       effortLevel,
       mcpServers,
       piServerSkillFiles,
+      outputAdmission,
     );
   }
 
   switch (agentType) {
     case 'claude':
-      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
+      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers, outputAdmission);
     case 'opencode':
-      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
+      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers, outputAdmission);
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
-      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, mcpServers);
+      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, mcpServers, outputAdmission);
     case 'pi':
-      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers, effortLevel);
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers, effortLevel, outputAdmission);
   }
 }
 
@@ -2992,6 +3066,7 @@ function spawnClaude(
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
+  outputAdmission?: WaveOutputAdmission,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildGuardedAgentEnv(cwd);
@@ -3072,6 +3147,7 @@ function spawnClaude(
     let turnCount = 0;
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      if (refuseOverBudgetOutput(child, chunk.length, 'pipe', outputAdmission)) return;
       watchdog.reset();
       // Always write raw stream-json to the log file for debugging
       logStream.write(chunk);
@@ -3139,6 +3215,7 @@ function spawnClaude(
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
+      if (refuseOverBudgetOutput(child, chunk.length, 'pipe', outputAdmission)) return;
       watchdog.reset();
       logStream.write(chunk);
       // Don't pipe raw stderr to terminal — Claude CLI with --verbose writes
@@ -3259,6 +3336,7 @@ function spawnOpenCode(
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
+  outputAdmission?: WaveOutputAdmission,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildGuardedAgentEnv(cwd, {
@@ -3359,6 +3437,7 @@ function spawnOpenCode(
       }
     };
     child.stdout?.on('data', (chunk: Buffer) => {
+      if (refuseOverBudgetOutput(child, chunk.length, 'pipe', outputAdmission)) return;
       watchdog.reset();
       logStream.write(chunk); // full raw log always
       ocLineBuf += chunk.toString('utf8');
@@ -3379,6 +3458,7 @@ function spawnOpenCode(
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
+      if (refuseOverBudgetOutput(child, chunk.length, 'pipe', outputAdmission)) return;
       watchdog.reset();
       logStream.write(chunk);
       // Skip valid JSON lines (OpenCode diagnostic metrics) — only forward genuine errors
@@ -3464,6 +3544,7 @@ function spawnCodex(
   model?: string | null,
   _onTokenUpdate?: TokenUpdateCallback,
   mcpServers?: Record<string, string>,
+  outputAdmission?: WaveOutputAdmission,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildGuardedAgentEnv(cwd);
@@ -3473,7 +3554,7 @@ function spawnCodex(
     if (mcpServers && Object.keys(mcpServers).length > 0) {
       for (const [name, url] of Object.entries(mcpServers)) {
         try {
-          execSync(`${CODEX_BIN} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
+          execFileSync(CODEX_BIN, ['mcp', 'add', name, '--url', url], { stdio: 'pipe' });
           codexMcpRegisteredNames.push(name);
           process.stdout.write(`[BrowserMCP] Registered ${name} MCP in codex config\n`);
         } catch (e: unknown) {
@@ -3510,6 +3591,7 @@ function spawnCodex(
     }
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      if (refuseOverBudgetOutput(child, chunk.length, 'pipe', outputAdmission)) return;
       watchdog.reset();
       logStream.write(chunk);
       process.stdout.write(chunk);
@@ -3520,6 +3602,7 @@ function spawnCodex(
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
+      if (refuseOverBudgetOutput(child, chunk.length, 'pipe', outputAdmission)) return;
       watchdog.reset();
       logStream.write(chunk);
       process.stdout.write(chunk);
@@ -3557,7 +3640,7 @@ function spawnCodex(
       const elapsedMs = Date.now() - startTime;
       for (const name of codexMcpRegisteredNames) {
         try {
-          execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' });
+          execFileSync(CODEX_BIN, ['mcp', 'remove', name], { stdio: 'pipe' });
         } catch { /* ignore if already gone */ }
       }
       if (code === null || watchdogFired) {
@@ -3587,6 +3670,7 @@ async function spawnPiRpc(
   piSessionOptions?: PiSessionOptions,
   mcpServers?: Record<string, string>,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+  outputAdmission?: WaveOutputAdmission,
 ): Promise<AgentResult> {
   const startTime = Date.now();
   let serverForCleanup: PiRpcServer | null = null;
@@ -3721,6 +3805,8 @@ async function spawnPiRpc(
 
     const writeOutput = (text: string): void => {
       if (!text) return;
+      const bytes = Buffer.byteLength(text);
+      if (refuseOverBudgetOutput(server.process, bytes, 'pipe', outputAdmission)) return;
       process.stdout.write(text);
       logStream.write(text);
     };
@@ -4493,15 +4579,16 @@ function getCommittedStoryChangesSince(cwd: string, baseHead: string | null): St
   }
 
   try {
-    const files = readGitLines(cwd, `git diff --name-only ${baseHead}..HEAD --`);
-    return classifyStoryWorkingTreeChanges(files);
+    const output = execFileSync('git', ['diff', '--name-only', `${baseHead}..HEAD`, '--'], {
+      cwd,
+      env: buildCleanEnv(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return classifyStoryWorkingTreeChanges(output ? output.split('\n').map(line => line.trim()).filter(Boolean) : []);
   } catch {
     return { meaningfulFiles: [], metadataFiles: [] };
   }
-}
-
-function gitPathArgs(files: string[]): string {
-  return files.map(file => JSON.stringify(file)).join(' ');
 }
 
 function gitCommitStory(
@@ -4540,7 +4627,7 @@ function gitCommitStory(
     execSync('git add -A', { cwd, env, stdio: 'pipe' });
 
     if (changes.metadataFiles.length > 0) {
-      execSync(`git reset -q HEAD -- ${gitPathArgs(changes.metadataFiles)}`, {
+      execFileSync('git', ['reset', '-q', 'HEAD', '--', ...changes.metadataFiles], {
         cwd,
         env,
         stdio: 'pipe',
@@ -4578,10 +4665,9 @@ function gitCommitStory(
       };
     }
 
-    execSync(
-      `git commit -m "${prefix}(${storyId}): ${storyTitle.replace(/"/g, '\\"')}\n\nAutomated by Rorca engine.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"`,
-      { cwd, env, stdio: 'pipe' },
-    );
+    execFileSync('git', [
+      'commit', '-m', `${prefix}(${storyId}): ${storyTitle}\n\nAutomated by Rorca engine.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`,
+    ], { cwd, env, stdio: 'pipe' });
 
     try {
       execSync('git push origin HEAD', { cwd, env, stdio: 'pipe', timeout: 60_000 });
@@ -4620,11 +4706,16 @@ interface GateResult {
 function runGate(
   cwd: string,
   manifest?: StoryExecutionManifest,
+  workingDirectoryOverride?: string,
+  timeoutCapMs?: () => number,
 ): GateResult {
   if (manifest) {
     const observations = manifest.validationPlan
       .filter((requirement) => requirement.required)
-      .map((requirement) => runHostValidationRequirement(manifest, requirement));
+      .map((requirement) => runHostValidationRequirement(manifest, requirement, {
+        ...(workingDirectoryOverride ? { workingDirectoryOverride } : {}),
+        ...(timeoutCapMs ? { timeoutCapMs: timeoutCapMs() } : {}),
+      }));
     const failed = observations.find((observation) => observation.classification !== 'passed');
     return {
       passed: !failed,
@@ -4707,7 +4798,7 @@ function observeCurrentStoryCommit(
   let author = 'rorca-execution-engine';
   let committedAt = new Date(0).toISOString();
   try {
-    const raw = execSync(`git show -s --format=%s%x00%an%x00%aI ${sha}`, {
+    const raw = execFileSync('git', ['show', '-s', '--format=%s%x00%an%x00%aI', sha], {
       cwd,
       env: buildCleanEnv(),
       encoding: 'utf8',
@@ -5023,6 +5114,171 @@ function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegration
   return { ok: true, files: [] };
 }
 
+/**
+ * Production-only canonical wave integration seam. It deliberately uses the
+ * same durable ledger state machine as the qualification harness: prepare →
+ * integrate → validate → final pass projection → finalize. No legacy merge
+ * helper may manufacture a target commit or accept a dirty target here.
+ */
+async function integrateAndFinalizeWaveContribution(
+  config: EngineConfig,
+  workspaceId: string | null,
+  waveIndex: number,
+  integrationOrder: number,
+  wt: StoryWorktree,
+  pending: PendingIntegratedPass,
+  deadline: WaveDeadline,
+): Promise<void> {
+  deadline.assertActive();
+  const manifest = config.executionManifests.get(wt.storyId);
+  if (!manifest || !config.executionManifestBundlePath || !config.executionManifestBundleHash) {
+    throw new Error('[wave-integration] guarded production integration requires a frozen execution manifest bundle');
+  }
+  const sourceCommit = pending.commitSha;
+  if (!sourceCommit || !/^[0-9a-f]{40}$/i.test(sourceCommit)) {
+    throw new Error('[wave-integration] accepted story has no immutable source commit');
+  }
+  const existing = await readDurableWaveIntegration({
+    runId: config.runId,
+    storyId: wt.storyId,
+    attempt: manifest.identity.attempt,
+  });
+  const expectedParentHead = existing?.expectedParentHead ?? getGitHead(config.cwd);
+  if (!expectedParentHead) throw new Error('[wave-integration] target HEAD is unavailable');
+
+  const identity: WaveContributionIdentity = {
+    runId: config.runId,
+    waveIndex,
+    storyId: wt.storyId,
+    attempt: manifest.identity.attempt,
+    sourceRef: `refs/heads/${wt.branchName}`,
+    sourceCommit,
+    sourceBaseCommit: wt.ownership.baseRevision,
+    expectedParentHead,
+    frozenManifestPath: config.executionManifestBundlePath,
+    frozenManifestHash: config.executionManifestBundleHash,
+  };
+  const durableIdentity: DurableWaveIntegrationIdentity = {
+    runId: identity.runId,
+    storyId: identity.storyId,
+    attempt: identity.attempt,
+    waveIndex: identity.waveIndex,
+    integrationOrder,
+    sourceCommit: identity.sourceCommit,
+    sourceBaseCommit: identity.sourceBaseCommit,
+    expectedParentHead: identity.expectedParentHead,
+    frozenManifestHash: identity.frozenManifestHash,
+  };
+  await prepareDurableWaveIntegration(durableIdentity);
+  const ledger = new WaveIntegrationLedger(config.cwd);
+  ledger.prepare(identity);
+  let integratedHead: string | null = null;
+  try {
+    deadline.assertActive();
+    await advanceDurableWaveIntegration({
+      identity: durableIdentity,
+      from: 'prepared',
+      to: 'integrating',
+    });
+
+  deadline.assertActive();
+  const integrated = ledger.integrate(identity);
+  if (!integrated.resultingHead) throw new Error('[wave-integration] integration produced no target revision');
+  integratedHead = integrated.resultingHead;
+  await advanceDurableWaveIntegration({
+    identity: durableIdentity,
+    from: 'integrating',
+    to: 'integrated',
+    resultingHead: integrated.resultingHead,
+  });
+
+  // Commands remain immutable, but the post-integration observer executes them
+  // against the assembled target worktree rather than the isolated source.
+  deadline.assertActive();
+  const gate = runGate(config.cwd, manifest, config.cwd, () => deadline.remainingMs());
+  const repository = validateIntegratedWorktree(config.cwd);
+  if (!gate.passed || !repository.ok) {
+    throw new Error(`[wave-integration] durable validation refused pass projection: ${gate.reason ?? repository.reason ?? 'unknown'}`);
+  }
+  const revision = getGitHead(config.cwd);
+  const treeHash = revision ? execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {
+    cwd: config.cwd, env: buildCleanEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim() : '';
+  const validationIdentity = {
+    validator: 'execution-engine-wave-host-validation-v1',
+    revision: integrated.resultingHead,
+    treeHash,
+    contractHash: createHash('sha256').update(JSON.stringify({
+      manifestHash: manifest.manifestHash,
+      validation: manifest.validationPlan.map(item => item.commandHash),
+      observations: gate.observations?.map(item => ({
+        requirementId: item.requirementId,
+        classification: item.classification,
+        subject: item.subject,
+      })),
+      revision,
+      treeHash,
+    })).digest('hex'),
+  };
+  ledger.markIntegratedValidated(identity, validationIdentity);
+  await advanceDurableWaveIntegration({
+    identity: durableIdentity,
+    from: 'integrated',
+    to: 'integrated_validated',
+    resultingHead: integrated.resultingHead,
+    validationIdentity,
+  });
+
+  const idempotencyKey = `${waveIntegrationLedgerKey(identity)}:finalize`;
+  const finalizationIdentity = {
+    idempotencyKey,
+    revision: integrated.resultingHead,
+    receiptHash: createHash('sha256')
+      .update(`${idempotencyKey}:${integrated.resultingHead}:${manifest.manifestHash}`)
+      .digest('hex'),
+  };
+  // The backend commits the story result and PostgreSQL ledger finalization in
+  // one transaction. Only then may spec, WAL, memory, and filesystem-ledger
+  // projections advance; all are replayable under the same stable identity.
+  deadline.assertActive();
+  await finalizeIntegratedStoryPass(config, workspaceId, pending, {
+    attempt: manifest.identity.attempt,
+    resultingHead: integrated.resultingHead,
+    finalizationIdentity,
+  });
+  ledger.finalize(identity, () => finalizationIdentity);
+  } catch (error) {
+    // The atomic backend finalization packet was persisted locally for replay.
+    // Keep the database state at integrated_validated so the replay endpoint can
+    // commit it; terminalizing it here would destroy the only safe recovery path.
+    if (error instanceof WaveFinalizationQueuedError) throw error;
+    const durableBeforeRollback = await readDurableWaveIntegration({
+      runId: durableIdentity.runId,
+      storyId: durableIdentity.storyId,
+      attempt: durableIdentity.attempt,
+    });
+    if (durableBeforeRollback?.state === 'finalized') {
+      logger.warn({ error, runId: config.runId, storyId: wt.storyId }, '[wave-integration] durable finalization won; a replayable projection remains incomplete');
+      return;
+    }
+    const failureReason = error instanceof Error ? error.message.slice(0, 512) : 'unknown wave integration failure';
+    if (integratedHead) rollbackRejectedWaveTarget(config.cwd, expectedParentHead, integratedHead);
+    ledger.markFailed(identity, failureReason);
+    const durable = await failDurableWaveIntegration({
+      identity: durableIdentity,
+      reason: failureReason,
+    }).catch(failureError => {
+      logger.error({ failureError, runId: config.runId, storyId: wt.storyId }, '[wave-integration] failed to persist terminal integration evidence');
+      return null;
+    });
+    if (durable?.state === 'finalized') {
+      logger.warn({ error, runId: config.runId, storyId: wt.storyId }, '[wave-integration] durable finalization won; a replayable projection remains incomplete');
+      return;
+    }
+    throw error;
+  }
+}
+
 async function recordIntegratedCheckpointAttestation(
   config: EngineConfig,
   workspaceId: string,
@@ -5076,19 +5332,49 @@ async function finalizeIntegratedStoryPass(
   config: EngineConfig,
   workspaceId: string | null,
   pending: PendingIntegratedPass,
+  integrationFinalization?: {
+    attempt: number;
+    resultingHead: string;
+    finalizationIdentity: {
+      idempotencyKey: string;
+      revision: string;
+      receiptHash: string;
+    };
+  },
 ): Promise<void> {
   // Persist trusted crash-recovery evidence after run-branch integration but
   // before canonical pass mutation. If the process dies between these steps,
   // reconciliation can later prove the exact integrated branch head.
   if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending);
-  const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
-  if (!lifecycle.changed) {
-    logger.info(`Ignored duplicate pass finalization for ${pending.story.id}`);
-    return;
+
+  if (workspaceId) {
+    await postStoryResult(config.port, {
+      runId: config.runId,
+      storyId: pending.story.id,
+      status: 'pass',
+      logPath: pending.logPath,
+      commitSha: pending.commitSha,
+      commitMessage: `story(${pending.story.id}): ${pending.story.title}`,
+      worktreeBranch: pending.commitBranch,
+      ...pending.storyResultExtra,
+      ...pending.activeSkillsExtra,
+      ...pending.tokenPayload,
+      ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
+      ...(integrationFinalization ? {
+        idempotencyKey: integrationFinalization.finalizationIdentity.idempotencyKey,
+        integrationFinalization,
+      } : {}),
+    });
   }
 
+  // Filesystem/spec state is a replayable projection of the committed backend
+  // finalization. Never let it become the authority that suppresses missing DB,
+  // WAL, or story-result evidence.
+  const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
+  if (!lifecycle.changed) logger.info(`Repaired duplicate pass projections for ${pending.story.id}`);
   if (!workspaceId) return;
 
+  const stableFinalizationKey = integrationFinalization?.finalizationIdentity.idempotencyKey;
   await emitWalEvent(config.port, 'story_passed', workspaceId, {
     run_id: config.runId,
     story_id: pending.story.id,
@@ -5100,20 +5386,7 @@ async function finalizeIntegratedStoryPass(
     integrated: true,
     ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
     ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
-  }, pending.story.id);
-  await postStoryResult(config.port, {
-    runId: config.runId,
-    storyId: pending.story.id,
-    status: 'pass',
-    logPath: pending.logPath,
-    commitSha: pending.commitSha,
-    commitMessage: `story(${pending.story.id}): ${pending.story.title}`,
-    worktreeBranch: pending.commitBranch,
-    ...pending.storyResultExtra,
-    ...pending.activeSkillsExtra,
-    ...pending.tokenPayload,
-    ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
-  });
+  }, pending.story.id, undefined, stableFinalizationKey ? `${stableFinalizationKey}:wal` : undefined);
 
   await autoSynthesizeMemory(
     pending.story.id,
@@ -5220,20 +5493,8 @@ function createStoryWorktree(
 
 function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
   const env = buildCleanEnv();
-  // Commit dirty working tree before merge. Runtime files (run-state.json, spec JSON, etc.)
-  // accumulate during execution and block git merge. We commit rather than stash because
-  // stash requires index write access which may be locked by parallel worktree subprocesses.
-  try {
-    const status = execSync('git status --porcelain', { cwd: workspaceCwd, env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    if (status.length > 0) {
-      execSync('git add -A', { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 10_000 });
-      execSync('git commit -m "chore: commit runtime files before merge" --allow-empty', { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 15_000 });
-      logger.info(`  [worktree] Committed dirty working tree before merge`);
-    }
-  } catch (err: unknown) {
-    logger.warn(`  [worktree] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
-  }
-
+  // Integration is fail-closed: an operator's dirty target is never folded into
+  // an engine-generated commit. The guarded protocol verifies this again.
   const expectedParentHead = getGitHead(workspaceCwd);
   if (!expectedParentHead) {
     logger.error(`  [worktree] Cannot guard integration without an expected parent head`);
@@ -5414,22 +5675,8 @@ async function mergeWave(
   let totalConflictsResolved = 0;
   const mergeFailures: Array<{ storyId: string; conflictingFiles: string[] }> = [];
 
-  // ── Commit dirty working tree before merge loop ──
-  // Runtime files (run-state.json, health-log.json, spec JSONs) accumulate in the
-  // working tree during execution. Git refuses to merge when these would be overwritten.
-  // Commit rather than stash — stash requires index write access which may be locked
-  // by parallel worktree subprocesses still running.
-  try {
-    const status = execSync('git status --porcelain', { cwd, env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    if (status.length > 0) {
-      execSync('git add -A', { cwd, env, stdio: 'pipe', timeout: 10_000 });
-      execSync('git commit -m "chore: commit runtime files before wave merge" --allow-empty', { cwd, env, stdio: 'pipe', timeout: 15_000 });
-      logger.info(`  [merge] Committed dirty working tree before wave ${waveIndex} merge`);
-    }
-  } catch (err: unknown) {
-    logger.warn(`  [merge] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
-  }
-
+  // Never auto-commit a dirty target to make a merge succeed. The guarded
+  // integration protocol rejects it and preserves it for the operator.
   for (const wt of sorted) {
     logger.info(`  [merge] Merging ${wt.branchName} (${wt.storyId})...`);
 
@@ -5988,7 +6235,7 @@ async function runAdversarialReview(
 
 // ─── Story Execution ────────────────────────────────────────────────────────
 
-type StoryExecutionOutcome = 'passed' | 'failed' | 'skipped' | 'closeout_blocked';
+type StoryExecutionOutcome = 'passed' | 'failed' | 'skipped' | 'closeout_blocked' | 'dispatch_fenced';
 
 async function executeStory(
   story: UserStory,
@@ -6008,6 +6255,8 @@ async function executeStory(
   waveIndex?: number,
   spec?: SpecJson,
   pendingIntegratedPasses?: Map<string, PendingIntegratedPass>,
+  waveOutputAdmission?: WaveOutputAdmission,
+  waveOutputState?: WaveOutputState,
 ): Promise<StoryExecutionOutcome> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const executionManifest = config.executionManifests.get(story.id);
@@ -6626,6 +6875,7 @@ async function executeStory(
             piServerSkillFiles,
             piSessionOptions,
             ptyOptions,
+            waveOutputAdmission,
           );
           return {
             executionId: request.executionId,
@@ -6645,7 +6895,13 @@ async function executeStory(
         timeoutMs: timeoutMin * 60 * 1000,
         payload: { prompt: attemptPrompt },
       });
-      const result = execution.output;
+      const result = waveOutputState?.exceeded
+        ? {
+            ...execution.output,
+            exitCode: 1,
+            stderrTail: `${execution.output.stderrTail}\n${waveOutputState.diagnostic ?? '[wave-safety] output budget exceeded'}`.trim(),
+          }
+        : execution.output;
       logger.info({
         component: 'execution-engine',
         event: 'story_agent_stage_completed',
@@ -7926,9 +8182,17 @@ export type { UserStory as EngineUserStory, RerouteInfo, IdleWatchdog };
 
 // ─── Bounded Concurrency ────────────────────────────────────────────────────
 
-async function runWithBoundedConcurrency<T>(
+export async function runWithBoundedConcurrency<T>(
   tasks: Array<() => Promise<T>>,
   limit: number,
+  options: {
+    /** Checked immediately before starting each queued task. */
+    canStart?: () => boolean;
+    /** Runs synchronously when a task rejects, before a worker claims another task. */
+    onRejected?: (index: number, reason: unknown) => void;
+    /** Value recorded for a task fenced before it starts. */
+    fencedValue?: T;
+  } = {},
 ): Promise<PromiseSettledResult<T>[]> {
   const results: PromiseSettledResult<T>[] = new Array(tasks.length);
   let nextIdx = 0;
@@ -7936,10 +8200,17 @@ async function runWithBoundedConcurrency<T>(
   async function worker(): Promise<void> {
     while (nextIdx < tasks.length) {
       const idx = nextIdx++;
+      if (options.canStart && !options.canStart()) {
+        // This task has not started: do not execute user code after a sibling
+        // rejection. Running siblings drain in their existing worker only.
+        results[idx] = { status: 'fulfilled', value: options.fencedValue as T };
+        continue;
+      }
       try {
         const value = await tasks[idx]();
         results[idx] = { status: 'fulfilled', value };
       } catch (reason) {
+        options.onRejected?.(idx, reason);
         results[idx] = { status: 'rejected', reason };
       }
     }
@@ -7951,6 +8222,35 @@ async function runWithBoundedConcurrency<T>(
 }
 
 // ─── Main Loop ───────────────────────────────────────────────────────────────
+
+async function awaitWorkerLaunchGate(): Promise<void> {
+  const token = process.env.RORCA_ENGINE_START_GATE_TOKEN;
+  if (!token) return;
+  if (!/^[0-9a-f-]{36}$/.test(token) || !process.send) {
+    throw new Error('[wave-production-policy] invalid or unavailable engine launch gate');
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('[wave-production-policy] engine launch gate timed out before agent work'));
+    }, 60_000);
+    timeout.unref();
+    const onMessage = (message: unknown): void => {
+      if (!message || typeof message !== 'object') return;
+      const value = message as Record<string, unknown>;
+      if (value.type !== 'launch_start' || value.token !== token) return;
+      cleanup();
+      resolve();
+    };
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      process.off('message', onMessage);
+    };
+    process.on('message', onMessage);
+  });
+  process.send?.({ type: 'pid', pid: process.pid });
+  delete process.env.RORCA_ENGINE_START_GATE_TOKEN;
+}
 
 async function main(): Promise<void> {
   const config = parseArgs();
@@ -8003,6 +8303,7 @@ async function main(): Promise<void> {
   // process.send is only available when spawned with an IPC channel — the ?. guard
   // makes this a no-op when running standalone (e.g. npx tsx execution-engine.ts ...).
   process.send?.({ type: 'pid', pid: process.pid });
+  await awaitWorkerLaunchGate();
 
   // ── IPC heartbeat — tells the worker "I'm still alive" every 60s ──────────
   // The worker updates pipeline_runs.last_heartbeat on each beat.
@@ -8331,6 +8632,15 @@ async function runParallel(
   stories: UserStory[],
   personaRegistry?: PersonaRegistry,
 ): Promise<number> {
+  const safetyLimits = resolveWaveSafetyLimits();
+  if (config.parallelism > safetyLimits.maxParallelism) {
+    throw new Error(`[wave-safety] requested parallelism ${config.parallelism} exceeds ${safetyLimits.maxParallelism}`);
+  }
+  const waveDeadline = new WaveDeadline(Date.now(), safetyLimits);
+  const waveBudget = new WaveResourceBudget(safetyLimits);
+  const parallelAdmission = waveBudget.admit('parallelism', config.parallelism);
+  if (!parallelAdmission.accepted) throw new Error(parallelAdmission.diagnostic);
+
   const waveStories: WaveUserStory[] = stories.map(s => ({
     id: s.id,
     title: s.title,
@@ -8374,9 +8684,38 @@ async function runParallel(
   const rejectedIds = new Set<string>();
   const evidenceFailureIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
+  const queuedFinalizationIds = new Set<string>();
   const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
+
+  const persistDispatchFencedStory = async (story: UserStory, waveIndex: number): Promise<void> => {
+    failedIds.add(story.id);
+    processedIds.add(story.id);
+    await markStorySkipped(config.jsonPath, story.id);
+    rsMarkStorySkipped(config.cwd, {
+      storyId: story.id, title: story.title, status: 'skipped',
+      startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      agentType: config.agentType, failReason: 'dispatch_fenced_after_rejection',
+    });
+    if (workspaceId) {
+      const idempotencyKey = `wave-dispatch-fenced:${config.runId}:${story.id}`;
+      await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        run_id: config.runId,
+        story_id: story.id,
+        reason: 'dispatch_fenced_after_rejection',
+        wave: waveIndex,
+        never_started: true,
+      }, story.id, undefined, `${idempotencyKey}:wal`);
+      await postStoryResult(config.port, {
+        runId: config.runId,
+        storyId: story.id,
+        status: 'skip',
+        blockedBy: [...rejectedIds].sort(),
+        idempotencyKey,
+      });
+    }
+  };
 
   const persistNewlyBlockedStories = async (waveIndex: number): Promise<void> => {
     const currentStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
@@ -8416,9 +8755,23 @@ async function runParallel(
   };
 
   for (const wave of waves) {
+    waveDeadline.assertActive();
     logger.info('==========================================');
     logger.info(`  Wave ${wave.index} — ${wave.stories.length} stories (parallelism=${config.parallelism})`);
     logger.info('==========================================');
+
+    // A rejected executor promise is a run-wide dispatch fence. Earlier
+    // siblings were allowed to drain; no later wave (including independent
+    // stories) may start after that durable failure boundary.
+    if (rejectedIds.size > 0) {
+      for (const waveStory of wave.stories) {
+        const story = stories.find(item => item.id === waveStory.id);
+        if (!story || processedIds.has(story.id) || story.excluded || story.skipped) continue;
+        await persistDispatchFencedStory(story, wave.index);
+      }
+      logger.info('  Wave dispatch fenced after earlier executor rejection');
+      continue;
+    }
 
     const executableStories: UserStory[] = [];
     for (const waveStory of wave.stories) {
@@ -8463,6 +8816,16 @@ async function runParallel(
       continue;
     }
 
+    const persistentReservations: Array<[Parameters<WaveResourceBudget['release']>[0], number]> = [
+      ['queueDepth', executableStories.length],
+      ['openFiles', executableStories.length * 4],
+      ['diskBytes', executableStories.length * 8 * 1024 * 1024],
+    ];
+    for (const [resource, amount] of persistentReservations) {
+      const admission = waveBudget.admit(resource, amount);
+      if (!admission.accepted) throw new Error(admission.diagnostic);
+    }
+
     const worktreeMap = new Map<string, StoryWorktree>();
     const currentWaveAllowlist = new Set<string>();
     const preserveWorktreeIds = new Set<string>();
@@ -8471,6 +8834,7 @@ async function runParallel(
 
     if (!directSingleStoryWave) {
       for (const story of executableStories) {
+        waveDeadline.assertActive();
         const manifest = config.executionManifests.get(story.id);
         const wt = createStoryWorktree(
           config,
@@ -8528,8 +8892,37 @@ async function runParallel(
               });
             }
           }
+          waveDeadline.assertActive();
+          const remainingMinutes = Math.max(1, waveDeadline.remainingMs()) / 60_000;
+          const boundedStory = {
+            ...story,
+            timeoutMinutes: Math.min(story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES, remainingMinutes),
+          };
+          const outputState: WaveOutputState = { exceeded: false, diagnostic: null };
+          const rejectOutput = (diagnostic: string): false => {
+            outputState.exceeded = true;
+            outputState.diagnostic ??= diagnostic;
+            logger.error(diagnostic);
+            return false;
+          };
+          const admitOutput: WaveOutputAdmission = (bytes, transport) => {
+            if (outputState.exceeded) return false;
+            const pending = waveBudget.admit('pendingOutputBytes', bytes, story.id);
+            if (!pending.accepted) return rejectOutput(pending.diagnostic);
+            waveBudget.release('pendingOutputBytes', bytes, story.id);
+            const resources: Array<'structuredTranscriptBytes' | 'rawCaptureBytes' | 'ptyCaptureBytes'> = [
+              'structuredTranscriptBytes',
+              'rawCaptureBytes',
+              ...(transport === 'pty' ? ['ptyCaptureBytes' as const] : []),
+            ];
+            for (const resource of resources) {
+              const admission = waveBudget.admit(resource, bytes);
+              if (!admission.accepted) return rejectOutput(admission.diagnostic);
+            }
+            return true;
+          };
           return executeStory(
-            story,
+            boundedStory,
             config,
             mode,
             playbook,
@@ -8546,12 +8939,33 @@ async function runParallel(
             wave.index,
             specForBrowserMcp,
             pendingIntegratedPasses,
+            admitOutput,
+            outputState,
           );
         },
       };
     });
 
-    const results = await runWithBoundedConcurrency(waveExecutions.map(item => item.task), config.parallelism);
+    // Shared qualification/production scheduler: the first rejection closes
+    // dispatch before any worker can claim the next queued sibling. Production
+    // uses the same bounded deadline/resource admission as qualification.
+    const executionCount = Math.max(1, waveExecutions.length);
+    const concurrentCount = Math.min(config.parallelism, executionCount);
+    const releasableReservations: Array<[Parameters<WaveResourceBudget['release']>[0], number]> = [
+      ['childProcesses', concurrentCount],
+      ['memoryBytes', concurrentCount * 32 * 1024 * 1024],
+    ];
+    for (const [resource, amount] of releasableReservations) {
+      const admission = waveBudget.admit(resource, amount);
+      if (!admission.accepted) throw new Error(admission.diagnostic);
+    }
+    let results: Awaited<ReturnType<typeof runWaveTasksWithRejectionFence<StoryExecutionOutcome>>>;
+    try {
+      waveDeadline.assertActive();
+      results = await runWaveTasksWithRejectionFence(waveExecutions.map(item => item.task), config.parallelism);
+    } finally {
+      for (const [resource, amount] of releasableReservations) waveBudget.release(resource, amount);
+    }
     const accountingState: WaveAccountingState = {
       failedIds,
       processedIds,
@@ -8565,7 +8979,19 @@ async function runParallel(
       const settled = results[resultIndex];
       const execution = waveExecutions[resultIndex];
       const storyId = execution.story.id;
+      if (settled.status === 'fenced') {
+          // No process was started for this entry. Persist the dispatch fence so
+          // recovery can distinguish it from missing execution evidence.
+          if (execution.wt) preserveWorktreeIds.add(storyId);
+          await persistDispatchFencedStory(execution.story, wave.index);
+          continue;
+      }
       if (settled.status === 'fulfilled') {
+        if (settled.value === 'dispatch_fenced') {
+          if (execution.wt) preserveWorktreeIds.add(storyId);
+          await persistDispatchFencedStory(execution.story, wave.index);
+          continue;
+        }
         accountWaveSettlement({
           storyId,
           settlement: 'fulfilled',
@@ -8663,19 +9089,56 @@ async function runParallel(
       if (passedInWave.length === 1) {
         logger.info(`  [worktree] Single-story wave — direct merge`);
         const wt = passedInWave[0];
-        const merged = mergeStoryWorktree(config.cwd, wt);
         const pendingPass = pendingIntegratedPasses.get(wt.storyId);
-        if (!merged) {
+        let merged = false;
+        try {
+          if (!pendingPass) throw new Error('Missing accepted closeout handoff');
+          await integrateAndFinalizeWaveContribution(
+            config, workspaceId, wave.index, wave.index * 100_000, wt, pendingPass, waveDeadline,
+          );
+          pendingIntegratedPasses.delete(wt.storyId);
+          cleanupWorktreeIds.add(wt.storyId);
+          merged = true;
+        } catch (error: unknown) {
+          logger.error(`  [wave-integration] ${wt.storyId} failed closed: ${(error as Error).message}`);
+          if (error instanceof WaveFinalizationQueuedError) queuedFinalizationIds.add(wt.storyId);
+        }
+        if (!merged && queuedFinalizationIds.has(wt.storyId)) {
+          logger.warn(`  [wave-integration] ${wt.storyId} finalization is queued for canonical replay; preserving recovery state without contradictory merge-conflict evidence`);
+          preserveWorktreeIds.add(wt.storyId);
+        } else if (!merged) {
           logger.error(`  [worktree] ${wt.storyId} passed implementation but merge failed — marking as merge_conflict`);
           failedIds.add(wt.storyId);
           preserveWorktreeIds.add(wt.storyId);
           await recordStoryMergeConflict(config, workspaceId, wt, [], pendingPass, wave.index);
         } else {
-          await finalizeMergedWorktree(wt);
+          // Canonical protocol finalized the pass only after durable validation.
         }
       } else {
         logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
-        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir, config, workspaceId ?? '', integratedPostures);
+        const mergeResult = await (async (): Promise<WaveMergeResult> => {
+          const failures: Array<{ storyId: string; conflictingFiles: string[] }> = [];
+          const orderedContributions = [...passedInWave]
+            .sort((left, right) => left.storyId.localeCompare(right.storyId));
+          for (const [waveOrder, wt] of orderedContributions.entries()) {
+            const pendingPass = pendingIntegratedPasses.get(wt.storyId);
+            try {
+              if (!pendingPass) throw new Error('Missing accepted closeout handoff');
+              await integrateAndFinalizeWaveContribution(
+                config, workspaceId, wave.index, wave.index * 100_000 + waveOrder, wt, pendingPass, waveDeadline,
+              );
+              pendingIntegratedPasses.delete(wt.storyId);
+              cleanupWorktreeIds.add(wt.storyId);
+            } catch (error: unknown) {
+              logger.error(`  [wave-integration] ${wt.storyId} failed closed: ${(error as Error).message}`);
+              if (error instanceof WaveFinalizationQueuedError) queuedFinalizationIds.add(wt.storyId);
+              failures.push({ storyId: wt.storyId, conflictingFiles: [] });
+            }
+          }
+          return failures.length > 0
+            ? { success: false, conflictsResolved: 0, blocked: failures[0], mergeFailures: failures }
+            : { success: true, conflictsResolved: 0 };
+        })();
 
         if (mergeResult.success) {
           if (workspaceId) {
@@ -8685,17 +9148,19 @@ async function runParallel(
             });
           }
           logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
-          // Advance each story only after its contribution reached the run branch.
-          for (const wt of passedInWave) await finalizeMergedWorktree(wt);
+          // Each contribution was finalized by the canonical ledger protocol.
         } else {
           // Some merges failed — add only the specific failed stories to failedIds
           const failures = mergeResult.mergeFailures || (mergeResult.blocked ? [mergeResult.blocked] : []);
-          const failedStoryIds = new Set(failures.map(f => f.storyId));
 
           for (const failure of failures) {
+            preserveWorktreeIds.add(failure.storyId);
+            if (queuedFinalizationIds.has(failure.storyId)) {
+              logger.warn(`  [wave-integration] ${failure.storyId} finalization is queued for canonical replay; merge-conflict evidence is intentionally suppressed`);
+              continue;
+            }
             logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
             failedIds.add(failure.storyId);
-            preserveWorktreeIds.add(failure.storyId);
             const wt = worktreeMap.get(failure.storyId);
             if (wt) {
               await recordStoryMergeConflict(
@@ -8709,11 +9174,6 @@ async function runParallel(
             } else {
               await markStoryMergeFailed(config.jsonPath, failure.storyId);
             }
-          }
-
-          // Finalize successfully integrated worktrees (those NOT in the failure set).
-          for (const wt of passedInWave) {
-            if (!failedStoryIds.has(wt.storyId)) await finalizeMergedWorktree(wt);
           }
 
           logger.info(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}; immutable recovery artifacts retained where needed.`);
@@ -8742,8 +9202,11 @@ async function runParallel(
       if (wt) removeStoryWorktree(config.cwd, wt, currentWaveAllowlist, 'rejected', true);
     }
 
+    for (const [resource, amount] of persistentReservations) waveBudget.release(resource, amount);
+
     // Merge failures can introduce additional blockers after the immediate
     // rejected-settlement pass above.
+    waveDeadline.assertActive();
     await persistNewlyBlockedStories(wave.index);
 
     logger.info('');
@@ -8754,6 +9217,10 @@ async function runParallel(
   // never semantic success. Merge-failed stories already have canonical failure
   // evidence; any otherwise-unaccounted handoff gets explicit failure evidence.
   for (const [storyId, pending] of pendingIntegratedPasses) {
+    if (queuedFinalizationIds.has(storyId)) {
+      logger.warn(`  [closeout] ${storyId} remains pending only until its durable atomic fallback packet is replayed by the worker`);
+      continue;
+    }
     if (failedIds.has(storyId)) {
       logger.error(`  [closeout] ${storyId} remains pending after an already-recorded story failure`);
       continue;
@@ -8965,7 +9432,11 @@ function parseArgs(): EngineConfig {
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
   const executionManifests = loadExecutionManifestMap(executionManifestPath, runId);
-  return { jsonPath, cwd, runId, workspaceId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, executionManifests };
+  const executionManifestBundlePath = executionManifestPath ? path.resolve(executionManifestPath) : null;
+  const executionManifestBundleHash = executionManifestBundlePath
+    ? createHash('sha256').update(fs.readFileSync(executionManifestBundlePath)).digest('hex')
+    : null;
+  return { jsonPath, cwd, runId, workspaceId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, executionManifests, executionManifestBundlePath, executionManifestBundleHash };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
