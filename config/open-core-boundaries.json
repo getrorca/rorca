@@ -125,6 +125,14 @@
       "reason": "PostgreSQL certification evidence documents shared database support."
     },
     {
+      "path": "docs/qualification/",
+      "reason": "Wave qualification and release-safety contracts apply to the shared execution engine."
+    },
+    {
+      "path": ".github/workflows/wave-qualification.yml",
+      "reason": "Blocking cross-platform wave qualification is shared release-safety automation."
+    },
+    {
       "path": "docs/run-transport-hardening-review.md",
       "reason": "Run transport review evidence applies to the shared execution surface."
     },

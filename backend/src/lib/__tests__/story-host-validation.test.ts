@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { MAX_CLOSEOUT_OUTPUT_EXCERPT_BYTES } from '../story-closeout';
 import { createStoryExecutionManifest } from '../story-execution-packet';
 import { runHostValidationRequirement } from '../story-host-validation';
 
@@ -91,6 +92,19 @@ describe('story-host-validation', () => {
     expect(observation.subject).toMatchObject({ commitSha: head, worktreePath: cwd });
     expect(observation.repositoryRevisionBefore).toBe(head);
     expect(observation.repositoryRevisionAfter).toBe(head);
+  });
+
+  test('bounds a truncated UTF-8 excerpt including its suffix', () => {
+    const contract = manifest(process.execPath, ['-e', 'process.stdout.write("🙂".repeat(3_000))']);
+    const observation = runHostValidationRequirement(contract, contract.validationPlan[0]);
+
+    expect(observation.classification).toBe('passed');
+    expect(observation.output.byteLength).toBe(12_000);
+    expect(observation.output.truncated).toBe(true);
+    expect(observation.output.redactedExcerpt?.endsWith('…')).toBe(true);
+    expect(Buffer.byteLength(observation.output.redactedExcerpt!, 'utf8'))
+      .toBeLessThanOrEqual(MAX_CLOSEOUT_OUTPUT_EXCERPT_BYTES);
+    expect(observation.output.redactedExcerpt).not.toContain('�');
   });
 
   test('records an unavailable command as a typed blocker with remediation', () => {

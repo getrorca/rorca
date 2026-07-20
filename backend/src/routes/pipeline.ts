@@ -7,7 +7,7 @@
 
 import { Router, Request, Response } from 'express';
 import { isUtf8 } from 'buffer';
-import { execSync, spawn } from 'child_process';
+import { execFileSync, execSync, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -77,6 +77,7 @@ import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentTyp
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
+import { normalizeRejectedStoryEvidence, sanitizeStoredRejectedStoryEvidence, type PortableRejectionEvidence } from '../lib/rejected-wave-closeout';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
   getRunPtySessionHealth,
@@ -105,6 +106,15 @@ import {
   type RetryPreviewIdentity,
   type RetryPreviewPacket,
 } from '../lib/retry-governance';
+import {
+  createGovernedRetryDispatchIdentity,
+  deriveAuthoritativeRetryScope,
+  governedRetryQueuePayloadHash,
+  type AuthoritativeRetryScope,
+  type RetryCompletionEvidence,
+  type RetryIntegrationEvidence,
+  type RetryRunCloseoutEvidence,
+} from '../lib/governed-story-retry';
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
@@ -140,6 +150,7 @@ import {
   type EffectiveWaveParallelPolicy,
   type WaveExecutionMode,
 } from '../lib/wave-parallel-policy';
+import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -1211,6 +1222,8 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated." }
  *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Requested effective story parallelism. Values above 1 require the non-production experimental gate." }
  *               forceSequential: { type: boolean, default: false, description: "Force effective sequential execution." }
+ *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity for governed wave qualification metadata" }
+ *               rolloutCohort: { type: string, description: "Explicit governed rollout cohort metadata; it cannot override the non-production wave policy" }
  *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi], description: "Override the execution agent for this run" }
  *               modelOverride: { type: string, description: "Override the execution model for this run" }
@@ -1264,6 +1277,8 @@ const PipelineTriggerSchema = z.object({
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional(),
   parallelism: z.number().int().min(1).max(10).optional(),
   forceSequential: z.boolean().optional(),
+  qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]).optional(),
+  rolloutCohort: z.string().min(1).max(128).optional(),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
@@ -1333,7 +1348,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
 
     // 1. Look up workspace path
@@ -1502,7 +1517,40 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       terminalMode: resolvedTerminalMode,
       specificStory: storyId,
     });
-    const parallelism = waveExecutionPolicy.parallelism;
+    let parallelism = waveExecutionPolicy.parallelism;
+    const explicitWaveRequested = waveExecutionPolicy.mode === 'wave-parallel';
+    const wavePolicyRequest = {
+      orchestrationMode: waveExecutionPolicy.mode,
+      parallelism: waveExecutionPolicy.parallelism,
+      qualificationReceiptId: qualificationReceiptId === undefined ? undefined : String(qualificationReceiptId),
+      rolloutCohort,
+    };
+    let wavePolicy = await resolveWaveProductionPolicy({
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      request: wavePolicyRequest,
+    });
+    if (explicitWaveRequested && !wavePolicy.allowed) {
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: `API dispatch denied by governed qualification/release policy: ${wavePolicy.reason}`,
+      });
+      throw new ForbiddenError(`wave_parallel_denied:${wavePolicy.status}:${wavePolicy.reason}`);
+    }
+    if (explicitWaveRequested && (
+      wavePolicy.effective.orchestrationMode !== waveExecutionPolicy.mode
+      || wavePolicy.effective.parallelism !== waveExecutionPolicy.parallelism
+    )) {
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: 'API dispatch denied: governed wave policy does not match canonical fail-closed policy',
+        eventType: 'deny',
+        outcome: 'denied',
+      });
+      throw new ForbiddenError('wave_parallel_denied:policy_mismatch');
+    }
 
     // Lock initial SSDLC safety before the first mutation. Prose/_notes cannot
     // weaken these values; retries consume the persisted structured options.
@@ -1771,6 +1819,26 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     if (!queuedRunId && !reservedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
       if (queue && !useExternalPiOrchestration) {
+        if (orchestrationMode === 'wave-parallel' && Number(requestedParallelism) > 1) {
+          const queuePolicy = await resolveWaveProductionPolicy({
+            workspaceId: workspace.id,
+            workspacePath: workspace.path,
+            request: {
+              orchestrationMode,
+              parallelism: requestedParallelism,
+              qualificationReceiptId: qualificationReceiptId === undefined ? undefined : String(qualificationReceiptId),
+              rolloutCohort,
+            },
+          });
+          await auditWaveProductionDecision({
+            envelope: queuePolicy,
+            actor: String(pipelineUser?.id ?? 'local-operator'),
+            rationale: 'Queue reservation denied: wave authority must be evaluated at promotion dispatch',
+            eventType: 'deny',
+            outcome: 'denied',
+          });
+          throw new ValidationError('wave_parallel_denied:queue_reservations_are_sequential; dispatch explicitly when promoted');
+        }
         const MAX_QUEUE_DEPTH = 10;
         const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
@@ -1820,6 +1888,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
             orchestrationMode: waveExecutionPolicy.mode,
             parallelism: waveExecutionPolicy.parallelism,
             orchestration,
+            qualificationReceiptId: wavePolicy.requested.qualificationReceiptId,
+            rolloutCohort: wavePolicy.requested.rolloutCohort,
+            wavePolicyFence: wavePolicy.fence,
             agentOverride,
             modelOverride,
             storyId,
@@ -1843,9 +1914,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           (spec_path, workspace_id, status, trigger_type, parallelism, queued_at, queue_position, triggered_via,
            auto_worktree, auto_merge, merge_strategy, include_graph, agent, agent_type, agent_model,
            terminal_mode, execution_environment, branch_name, worktree_path, effective_options,
-           idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options)
+           idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+           orchestration_mode, wave_policy, wave_policy_fence, wave_qualification_receipt_id,
+           wave_source_revision, wave_rollout_cohort)
           VALUES ($1, $2, 'queued', $3, $4, NOW(), $5, 'queue', $6, $7, $8, $9, $10, $11, $12,
-                  $13, $14, $15, $16, $17::jsonb, $18, $19, $20::jsonb, $21::jsonb)
+                  $13, $14, $15, $16, $17::jsonb, $18, $19, $20::jsonb, $21::jsonb,
+                  $22, $23::jsonb, $24, $25, $26, $27)
           RETURNING id`, [
           specPath,
           workspaceId,
@@ -1868,6 +1942,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           manifestId ?? null,
           queuedTaskManifestArtifacts,
           queuedTriggerOptions,
+          waveExecutionPolicy.mode,
+          JSON.stringify(wavePolicy),
+          wavePolicy.fence,
+          wavePolicy.receipt?.id ?? null,
+          wavePolicy.receipt?.sourceRevision ?? null,
+          wavePolicy.requested.rolloutCohort,
         ]);
         const queuedId = normalizeWorkerRunId(queueResult?.id);
 
@@ -1882,6 +1962,16 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           executionEnvironment: resolvedExecutionEnvironment.effective,
           effectiveOptions: queuedEffectiveOptions,
           orchestration,
+          wavePolicy: {
+            status: wavePolicy.status,
+            requested: wavePolicy.requested,
+            effective: wavePolicy.effective,
+            receiptHash: wavePolicy.receipt?.reportHash ?? null,
+            sourceRevision: wavePolicy.receipt?.sourceRevision ?? null,
+            rolloutCohort: wavePolicy.rollout.cohort,
+            fencingPolicy: wavePolicy.fencingPolicy,
+            fence: wavePolicy.fence,
+          },
           ...(idempotencyKey ? { idempotencyKey } : {}),
           ...(manifestId ? { manifestId } : {}),
           ...(taskManifestArtifacts ? { artifacts: taskManifestArtifacts } : {}),
@@ -2048,7 +2138,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     logger.info(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
 
-    // 5. Determine CWD — main workspace or new worktree
+    // 5. Determine CWD — main workspace or new worktree. The canonical
+    // fail-closed policy remains authoritative over qualification metadata.
     const needsWorktree = effectiveAutoWorktreeRequest || waveExecutionPolicy.mode === 'wave-parallel';
     let cwd = workspace.path;
     let branchName: string | null = null;
@@ -2096,7 +2187,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // A base-branch merge is opt-in. Worktree isolation alone must never imply
     // permission to merge its branch back into the workspace, and policy-locked
     // autonomous runs cannot acquire merge authority from request defaults.
-    const computedAutoMerge = autonomousSafety.policyLocked
+    const computedAutoMerge = autonomousSafety.policyLocked || parallelism > 1
       ? false
       : needsWorktree && autonomousSafety.autoMerge === true;
 
@@ -2127,7 +2218,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       }
     }
 
-    if (autonomousSafety.policyLocked) {
+    if (autonomousSafety.policyLocked || parallelism > 1) {
+      // Wave authority is execution authority only; it never implies merge,
+      // deployment, retry, or lifecycle approval.
       resolvedMergeStrategy = 'branch-only';
     }
 
@@ -2159,6 +2252,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         forceSequential: waveExecutionPolicy.mode === 'sequential',
         orchestrationMode: waveExecutionPolicy.mode,
         parallelism: waveExecutionPolicy.parallelism,
+        qualificationReceiptId: wavePolicy.requested.qualificationReceiptId,
+        rolloutCohort: wavePolicy.requested.rolloutCohort,
+        wavePolicyFence: wavePolicy.fence,
         agentOverride,
         modelOverride,
         storyId,
@@ -2216,11 +2312,70 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       runId = normalizeWorkerRunId(runResult?.id);
     }
 
-    const effectiveRunOptions = persistedDispatchOptions;
-    await execute('UPDATE pipeline_runs SET effective_options = $1::jsonb WHERE id = $2', [
-      JSON.stringify(effectiveRunOptions),
+    // Re-evaluate after the durable run identity exists. This is the API/run-row
+    // fence and closes cap/cohort races before manifests or queue payloads exist.
+    wavePolicy = await resolveWaveProductionPolicy({
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      request: wavePolicyRequest,
       runId,
-    ]);
+    });
+    if (explicitWaveRequested && !wavePolicy.allowed) {
+      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = $2 WHERE id = $1`, [runId, `wave_parallel_denied:${wavePolicy.reason}`]);
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: `Run-row dispatch fence denied: ${wavePolicy.reason}`,
+      });
+      throw new ForbiddenError(`wave_parallel_denied:${wavePolicy.status}:${wavePolicy.reason}`);
+    }
+    if (explicitWaveRequested && (
+      wavePolicy.effective.orchestrationMode !== waveExecutionPolicy.mode
+      || wavePolicy.effective.parallelism !== waveExecutionPolicy.parallelism
+    )) {
+      await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = $2 WHERE id = $1`, [runId, 'wave_parallel_denied:policy_mismatch']);
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: 'Run-row dispatch fence denied: governed policy no longer matches canonical fail-closed policy',
+        eventType: 'deny',
+        outcome: 'denied',
+      });
+      throw new ForbiddenError('wave_parallel_denied:policy_mismatch');
+    }
+    parallelism = waveExecutionPolicy.parallelism;
+    effectiveTriggerOptions.orchestrationMode = waveExecutionPolicy.mode;
+    effectiveTriggerOptions.parallelism = waveExecutionPolicy.parallelism;
+    effectiveTriggerOptions.qualificationReceiptId = wavePolicy.requested.qualificationReceiptId;
+    effectiveTriggerOptions.rolloutCohort = wavePolicy.requested.rolloutCohort;
+    effectiveTriggerOptions.wavePolicyFence = wavePolicy.fence;
+    await execute(
+      `UPDATE pipeline_runs
+          SET effective_options = $1::jsonb,
+              parallelism = $3,
+              orchestration_mode = $4,
+              wave_policy = $5::jsonb,
+              wave_policy_fence = $6,
+              wave_qualification_receipt_id = $7,
+              wave_source_revision = $8,
+              wave_rollout_cohort = $9,
+              trigger_options = $10::jsonb
+        WHERE id = $2`,
+      [
+        JSON.stringify(persistedDispatchOptions), runId, parallelism,
+        waveExecutionPolicy.mode, JSON.stringify(wavePolicy), wavePolicy.fence,
+        wavePolicy.receipt?.id ?? null, wavePolicy.receipt?.sourceRevision ?? null,
+        wavePolicy.requested.rolloutCohort, JSON.stringify(effectiveTriggerOptions),
+      ],
+    );
+    if (explicitWaveRequested) {
+      await auditWaveProductionDecision({
+        envelope: wavePolicy,
+        actor: String(pipelineUser?.id ?? 'local-operator'),
+        rationale: 'Explicit wave-parallel API/run-row dispatch fence enabled',
+      });
+    }
+    const effectiveRunOptions = persistedDispatchOptions;
 
     // 7. Queue only non-secret options. pg-boss persists its payload, so all
     // workspace values and provider credentials travel as opaque references and
@@ -2376,6 +2531,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
+      wavePolicy,
       safetyOptions: {
         deploy: autonomousSafety.deploy,
         externalSend: autonomousSafety.externalSend,
@@ -2455,6 +2611,16 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       terminalMode: effectiveTerminalMode,
       terminal_mode: effectiveTerminalMode,
       effectiveOptions: effectiveRunOptions,
+      wavePolicy: {
+        status: wavePolicy.status,
+        requested: wavePolicy.requested,
+        effective: wavePolicy.effective,
+        receiptHash: wavePolicy.receipt?.reportHash ?? null,
+        sourceRevision: wavePolicy.receipt?.sourceRevision ?? null,
+        rolloutCohort: wavePolicy.rollout.cohort,
+        fencingPolicy: wavePolicy.fencingPolicy,
+        fence: wavePolicy.fence,
+      },
       lifecycleStatus: 'queued',
       lifecycle_status: 'queued',
       lifecyclePhase: 'queued',
@@ -3462,7 +3628,9 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       triggerType: 'manual',
       queue: false,
       reservedRunId: reservation.runId,
-      forceSequential: requestBody.forceSequential === true,
+      forceSequential: true,
+      orchestrationMode: 'sequential',
+      parallelism: 1,
       includeGraph: requestBody.includeGraph === true,
       readinessOverride: true,
       idempotencyKey: requestIdempotencyKey,
@@ -5795,6 +5963,95 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       .map((entry) => latestByStory.get(entry.storyId))
       .filter((entry): entry is StoryResultRow => Boolean(entry));
 
+    // Wave retries have a stricter authority boundary than legacy sequential
+    // retries: accepted work must agree across closeout decisions, finalized
+    // integration ledger rows, and run_closeout WAL evidence. Missing or
+    // contradictory evidence is never converted back into executable work.
+    const lineageRows = await query<{ id: number; depth: number }>(
+      `WITH RECURSIVE lineage AS (
+         SELECT id, retried_from_run_id, 0 AS depth FROM pipeline_runs WHERE id = $1
+         UNION ALL
+         SELECT parent.id, parent.retried_from_run_id, lineage.depth + 1
+         FROM pipeline_runs parent JOIN lineage ON parent.id = lineage.retried_from_run_id
+       ) SELECT id, depth FROM lineage ORDER BY depth DESC`,
+      [originalRunId],
+    );
+    const originalRunLineage = lineageRows.map((row) => Number(row.id));
+    const integrationRows = await query<RetryIntegrationEvidence>(
+      `SELECT run_id AS "runId", story_id AS "storyId", attempt, state,
+              source_commit AS "sourceCommit", resulting_head AS "resultingHead",
+              integration_order AS "integrationOrder"
+       FROM story_integration_ledger WHERE run_id = ANY($1::bigint[])
+       ORDER BY run_id, integration_order`,
+      [originalRunLineage],
+    ).catch(() => []);
+    let authoritativeScope: AuthoritativeRetryScope;
+    {
+      const decisions = await query<{
+        runId: number; storyId: string; attempt: number; status: 'accepted' | 'blocked'; decisionId: string;
+      }>(
+        `SELECT run_id AS "runId", story_id AS "storyId", attempt, status, decision_id AS "decisionId"
+         FROM story_closeout_decisions WHERE run_id = ANY($1::bigint[])
+         ORDER BY run_id, story_id, attempt`,
+        [originalRunLineage],
+      );
+      const ledgerByAttempt = new Map(integrationRows.map((row) => [`${row.runId}:${row.storyId}:${row.attempt}`, row]));
+      const completionEvidence: RetryCompletionEvidence[] = decisions.map((decision) => ({
+        runId: Number(decision.runId),
+        storyId: decision.storyId,
+        attempt: decision.attempt,
+        resultIdentity: decision.decisionId,
+        outcome: decision.status === 'accepted' ? 'accepted' : 'rejected',
+        sourceCommit: ledgerByAttempt.get(`${decision.runId}:${decision.storyId}:${decision.attempt}`)?.sourceCommit ?? null,
+      }));
+      for (const failed of failedStories) {
+        if (completionEvidence.some((row) => row.storyId === failed.story_id)) continue;
+        completionEvidence.push({
+          runId: originalRunId,
+          storyId: failed.story_id,
+          attempt: failed.retries + 1,
+          resultIdentity: `story_result:${failed.id}`,
+          outcome: failed.status === 'skip' ? 'unresolved' : 'failed',
+          sourceCommit: null,
+        });
+      }
+      const closeoutRows = await query<{ id: number; runId: string; status: string }>(
+        `SELECT id, payload->>'run_id' AS "runId", payload->>'status' AS status
+         FROM wal_events
+         WHERE event_type = 'run_closeout' AND (payload->>'run_id')::bigint = ANY($1::bigint[])
+         ORDER BY id`,
+        [originalRunLineage],
+      );
+      const retryTargetCwd = originalRun.worktree_path ?? workspace.path;
+      const integratedRevision = execSync('git rev-parse HEAD', { cwd: retryTargetCwd, encoding: 'utf8' }).trim();
+      const integrationAncestry = integrationRows.map((row) => row.resultingHead).filter((head): head is string => Boolean(head));
+      const acceptedByRun = new Map<number, string[]>();
+      for (const decision of decisions.filter((row) => row.status === 'accepted')) {
+        acceptedByRun.set(Number(decision.runId), [...(acceptedByRun.get(Number(decision.runId)) ?? []), decision.storyId]);
+      }
+      const closeoutEvidence: RetryRunCloseoutEvidence[] = closeoutRows.map((row) => ({
+        runId: Number(row.runId),
+        status: ['done', 'completed', 'failed', 'partial_failure'].includes(row.status)
+          ? row.status as RetryRunCloseoutEvidence['status']
+          : 'failed',
+        integratedRevision,
+        integrationAncestry: [...integrationAncestry, integratedRevision],
+        acceptedStoryIds: acceptedByRun.get(Number(row.runId)) ?? [],
+        evidenceIdentity: `wal:run_closeout:${row.id}`,
+      }));
+      try {
+        authoritativeScope = deriveAuthoritativeRetryScope({
+          originalRunLineage,
+          completions: completionEvidence,
+          integrations: integrationRows,
+          closeouts: closeoutEvidence,
+          requestedStoryIds: retryScope.executable.map((entry) => entry.storyId),
+        });
+      } catch (error) {
+        throw new ConflictError(error instanceof Error ? error.message : 'Authoritative retry evidence is inconsistent');
+      }
+    }
+
     if (previewHash && worktreePreflight?.classification === 'stale_base' && originalRun.worktree_path) {
       const refresh = safelyRefreshReusableWorktree({
         workspacePath: workspace.path,
@@ -5864,6 +6121,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const retryPreview = createRetryPreview({
       originalRunId,
       scope: retryScope,
+      authority: authoritativeScope,
       options: replayedOptions,
       forceSequential: retryWavePolicy.mode === 'sequential',
       requiresApproval: destructiveReplay || unsafeWorktree,
@@ -5913,6 +6171,47 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
        FROM pipeline_retry_previews WHERE preview_hash = $1 AND original_run_id = $2`,
       [previewHash, originalRunId],
     );
+    const preparedDispatch = await queryOne<{
+      identity_hash: string; retry_run_id: number; state: string; job_payload: Record<string, unknown>;
+    }>(
+      `SELECT identity_hash, retry_run_id, state, job_payload
+       FROM governed_retry_dispatches WHERE preview_hash = $1`,
+      [previewHash],
+    ).catch(() => undefined);
+    if (preparedDispatch?.state === 'prepared') {
+      // Durable outbox replay: find a send that won before an API crash, or send
+      // the exact persisted packet now. Correlation is payload-owned; pg-boss
+      // still generates every UUID.
+      let recoveredJob = await queryOne<{ id: string }>(
+        `SELECT id::text FROM pgboss.job
+         WHERE name = 'pipeline:retry'
+           AND data->'dispatchIdentity'->>'identityHash' = $1
+           AND state IN ('created', 'active', 'retry') LIMIT 1`,
+        [preparedDispatch.identity_hash],
+      ).catch(() => undefined);
+      if (!recoveredJob) {
+        const replayBoss = getBoss();
+        await replayBoss.createQueue('pipeline:retry');
+        const replayJobId = await replayBoss.send('pipeline:retry', preparedDispatch.job_payload, {
+          retryLimit: 5, retryDelay: 30, expireInSeconds: 300,
+        });
+        if (!replayJobId) throw new ServiceUnavailableError('Retry queue rejected durable outbox replay');
+        recoveredJob = { id: replayJobId };
+      }
+      const recovered = await execute(
+        `UPDATE governed_retry_dispatches SET state = 'dispatched', boss_job_id = $2::uuid
+         WHERE identity_hash = $1 AND state = 'prepared' AND state_version = 1`,
+        [preparedDispatch.identity_hash, recoveredJob.id],
+      );
+      if (recovered.rowCount !== 1) throw new ConflictError('Retry outbox replay lost its optimistic concurrency fence');
+      await execute(
+        `UPDATE pipeline_retry_previews SET status = 'dispatched', boss_job_id = $2::uuid, dispatched_at = NOW()
+         WHERE preview_hash = $1 AND status = 'approved'`,
+        [previewHash, recoveredJob.id],
+      );
+      res.status(200).json({ ok: true, queued: true, duplicate: true, recovered: true, runId: preparedDispatch.retry_run_id, originalRunId, previewHash });
+      return;
+    }
     if (storedPreviewRow?.status === 'dispatched' && storedPreviewRow.retry_run_id) {
       await emitLifecycleInvalidation({
         workspaceId: originalRun.workspace_id,
@@ -6032,9 +6331,10 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs
       (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
        retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
-       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options, trigger_options)
+       auto_worktree, auto_merge, include_graph, merge_strategy, effective_options, trigger_options,
+       orchestration_mode)
       VALUES ($1, $2, 'queued', 'retry', $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15::jsonb, $16::jsonb)
+              $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17)
       RETURNING id`, [
       originalRun.spec_path,
       originalRun.workspace_id,
@@ -6052,6 +6352,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       approvedPreview.options.merge.strategy,
       JSON.stringify(retryEffectiveOptions),
       JSON.stringify(retryTriggerOptions),
+      retryWavePolicy.mode,
     ]);
     const newRunId = normalizeWorkerRunId(newRunResult!.id);
     await execute(
@@ -6059,34 +6360,19 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       [previewHash, newRunId],
     );
 
-    // 8. Copy successful story results from the original run to the new run
-    for (const passed of passedStories) {
-      await execute(
-        `INSERT INTO story_results (run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [
-          newRunId,
-          passed.story_id,
-          'pass',
-          passed.retries,
-          passed.log_path,
-          passed.started_at,
-          passed.finished_at,
-          passed.elapsed_seconds,
-          passed.input_tokens,
-          passed.output_tokens,
-        ]
-      );
-    }
+    // 8. Accepted siblings are represented only by immutable carry-forward
+    // evidence. Projecting copied pass rows into the retry run would make old
+    // validation look like new work and would permit accidental re-finalization.
 
-    // 9. Insert 'retry' placeholder rows for stories being retried + emit WAL events
-    const retriedStoryInfo: Array<{ storyId: string; attempt: number }> = [];
+    // 9. Append a new one-based story attempt; never rewrite the source result.
+    const retriedStoryInfo: Array<{ storyId: string; attempt: number; previousAttempt: number }> = [];
 
     for (const story of storiesToRetry) {
-      const attempt = story.retries + 1;
+      const previousAttempt = story.retries + 1;
+      const attempt = previousAttempt + 1;
       await execute(
         `INSERT INTO story_results (run_id, story_id, status, retries) VALUES ($1, $2, 'retry', $3)`,
-        [newRunId, story.story_id, attempt]
+        [newRunId, story.story_id, attempt - 1]
       );
 
       const walEvent = await queryOne<WalEvent>(
@@ -6094,12 +6380,12 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         [
           originalRun.workspace_id,
           story.story_id,
-          JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt }),
+          JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt, previous_attempt: previousAttempt }),
         ]
       );
       if (walEvent) broadcastAll(walEvent!);
 
-      retriedStoryInfo.push({ storyId: story.story_id, attempt });
+      retriedStoryInfo.push({ storyId: story.story_id, attempt, previousAttempt });
     }
 
     // 10. Read the original spec and write a temporary retry spec.
@@ -6153,7 +6439,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       specRevision: row.spec_revision,
       storyRevision: row.story_revision,
     }]));
-    const attemptByStory = new Map(retriedStoryInfo.map((story) => [story.storyId, story.attempt + 1]));
+    const attemptByStory = new Map(retriedStoryInfo.map((story) => [story.storyId, story.attempt]));
     const retryManifests = await resolveAndPersistDispatchManifests({
       workspaceId: workspace.id,
       specId: path.basename(originalRun.spec_path, '.json'),
@@ -6189,7 +6475,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new ConflictError('Generated retry execution plan differs from the approved preview');
     }
 
-    const jobPayload = PipelineRetryJobPayload.parse({
+    const queuePayloadAuthority = {
       runId: Number(newRunId),
       originalRunId,
       storyIds: planComparison.actual,
@@ -6214,21 +6500,122 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       secretReferences,
       includeGraph: approvedPreview.options.includeGraph,
       ...(approvedPreview.options.effort ? { effortLevel: approvedPreview.options.effort } : {}),
+    };
+    const integratedRevision = execSync('git rev-parse HEAD', { cwd: retryCwd, encoding: 'utf8' }).trim();
+    let recoveryRef = 'HEAD';
+    try {
+      recoveryRef = execSync('git symbolic-ref -q HEAD', { cwd: retryCwd, encoding: 'utf8' }).trim() || 'HEAD';
+    } catch { /* detached recovery refs remain bound by exact revision */ }
+    const recoveryRefRevision = execFileSync('git', ['rev-parse', recoveryRef], { cwd: retryCwd, encoding: 'utf8' }).trim();
+    const manifestByStory = new Map(retryManifests.manifests.map((manifest) => [manifest.identity.storyId, manifest]));
+    const executionManifestHash = retryHash(retryManifests.manifests.map((manifest) => manifest.manifestHash).sort());
+    const queuePayloadHash = governedRetryQueuePayloadHash(queuePayloadAuthority);
+    const effectiveAuthority = authoritativeScope;
+    if (effectiveAuthority.targetRevision !== integratedRevision) {
+      throw new ConflictError('Latest accepted run-branch head changed after preview; generate a new retry preview');
+    }
+    const leaseIdentity = retryHash({ previewHash, dispatchIdempotencyKey, retryRunId: newRunId });
+    const dispatchIdentity = createGovernedRetryDispatchIdentity({
+      workspaceId: workspace.id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      specRevision: retryManifests.manifests[0]?.revisions.specRevision ?? deriveStoryContractRevision(sourceSpecJson),
+      originalRunId,
+      originalRunLineage: effectiveAuthority.originalRunLineage,
+      retryRunId: Number(newRunId),
+      baseRevision: integratedRevision,
+      integratedRevision,
+      priorIntegrationAncestry: effectiveAuthority.priorIntegrationAncestry,
+      recoveryRef,
+      recoveryRefRevision,
+      fencingToken: 1,
+      leaseIdentity,
+      idempotencyKey: dispatchIdempotencyKey,
+      queueName: 'pipeline:retry',
+      queuePayloadHash,
+      executionManifestHash,
+      approvedPreviewHash: previewHash,
+      scopeHash,
+      evidenceHash: effectiveAuthority.evidenceHash,
+      storyAttempts: retriedStoryInfo.map((story) => ({
+        ...story,
+        sourceRunId: originalRunId,
+        idempotencyKey: `${dispatchIdempotencyKey}:${story.storyId}:${story.attempt}`,
+      })),
+      carriedForward: effectiveAuthority.carriedForward,
+    });
+    const jobPayload = PipelineRetryJobPayload.parse({ ...queuePayloadAuthority, dispatchIdentity });
+
+    // Persist the complete outbox and story-attempt uniqueness boundary before
+    // pg-boss send. An API restart can replay this exact payload; no process map
+    // or deterministic pg-boss job UUID is used as authority.
+    await transaction(async (client) => {
+      await client.query(
+        `INSERT INTO governed_retry_dispatches (
+           identity_hash, workspace_id, spec_id, spec_revision, original_run_id, retry_run_id,
+           original_run_lineage, base_revision, integrated_revision, prior_integration_ancestry,
+           recovery_ref, recovery_ref_revision, preview_hash, scope_hash, evidence_hash,
+           execution_manifest_hash, queue_payload_hash, job_payload, queue_name, idempotency_key,
+           lease_identity, fencing_token, state
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,'pipeline:retry',$19,$20,1,'prepared')`,
+        [
+          dispatchIdentity.identityHash, workspace.id, dispatchIdentity.specId, dispatchIdentity.specRevision,
+          originalRunId, newRunId, JSON.stringify(dispatchIdentity.originalRunLineage), integratedRevision,
+          integratedRevision, JSON.stringify(dispatchIdentity.priorIntegrationAncestry), recoveryRef,
+          recoveryRefRevision, previewHash, scopeHash, dispatchIdentity.evidenceHash,
+          executionManifestHash, queuePayloadHash, JSON.stringify(jobPayload), dispatchIdempotencyKey, leaseIdentity,
+        ],
+      );
+      for (const story of dispatchIdentity.storyAttempts) {
+        const manifest = manifestByStory.get(story.storyId);
+        if (!manifest) throw new ConflictError(`Retry execution manifest missing for ${story.storyId}`);
+        await client.query(
+          `INSERT INTO governed_retry_story_attempts (
+             attempt_identity, dispatch_identity_hash, workspace_id, spec_id, original_root_run_id,
+             source_run_id, retry_run_id, story_id, attempt, previous_attempt, idempotency_key,
+             manifest_hash, state, recovery_ref
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13)`,
+          [
+            retryHash({ dispatchIdentity: dispatchIdentity.identityHash, story }), dispatchIdentity.identityHash,
+            workspace.id, dispatchIdentity.specId, dispatchIdentity.originalRunLineage[0], story.sourceRunId,
+            newRunId, story.storyId, story.attempt, story.previousAttempt, story.idempotencyKey,
+            manifest.manifestHash, recoveryRef,
+          ],
+        );
+      }
+      for (const carried of dispatchIdentity.carriedForward) {
+        await client.query(
+          `INSERT INTO governed_retry_carry_forward (
+             dispatch_identity_hash, story_id, source_run_id, source_attempt, result_identity,
+             source_commit, resulting_head, integration_order, reason_code
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [dispatchIdentity.identityHash, carried.storyId, carried.sourceRunId, carried.sourceAttempt,
+            carried.resultIdentity, carried.sourceCommit, carried.resultingHead, carried.integrationOrder, carried.reasonCode],
+        );
+      }
     });
 
     // 14. Enqueue through the existing queue. Explicit queue creation is
-    // idempotent and pg-boss generates the UUID; runId remains payload data.
+    // idempotent and pg-boss generates the UUID; run/attempt identities stay in data.
     const boss = getBoss();
     await boss.createQueue('pipeline:retry');
     const bossJobId = await boss.send('pipeline:retry', jobPayload, {
-      retryLimit: 0,
+      retryLimit: 5,
+      retryDelay: 30,
       expireInSeconds: 300,
     });
     if (!bossJobId) {
       await execute(`UPDATE pipeline_retry_previews SET status = 'refused', refusal_reason = 'pgboss_send_returned_null' WHERE preview_hash = $1`, [previewHash]);
+      await execute(`UPDATE governed_retry_dispatches SET state = 'failed', failure_evidence = $2::jsonb WHERE identity_hash = $1 AND state = 'prepared'`, [dispatchIdentity.identityHash, JSON.stringify({ reason: 'pgboss_send_returned_null' })]);
       await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'retry_dispatch_failed' WHERE id = $1`, [newRunId]);
       throw new ServiceUnavailableError('Retry queue rejected dispatch');
     }
+    const dispatchTransition = await execute(
+      `UPDATE governed_retry_dispatches
+       SET state = 'dispatched', boss_job_id = $2::uuid
+       WHERE identity_hash = $1 AND state = 'prepared' AND state_version = 1`,
+      [dispatchIdentity.identityHash, bossJobId],
+    );
+    if (dispatchTransition.rowCount !== 1) throw new ConflictError('Retry dispatch lost its optimistic concurrency fence');
     await execute(
       `UPDATE pipeline_retry_previews SET status = 'dispatched', retry_run_id = $2, boss_job_id = $3::uuid, dispatched_at = NOW() WHERE preview_hash = $1 AND status = 'approved'`,
       [previewHash, newRunId, bossJobId],
@@ -7467,6 +7854,7 @@ async function recordTokenUsage(
  *               blockedBy: { type: array, items: { type: string }, nullable: true }
  *               activeSkills: { type: array, items: { type: string }, nullable: true }
  *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
+ *               rejectionEvidence: { description: "Arbitrary rejected value; accepted only for fail outcomes and stored as bounded, secret/path-redacted portable evidence." }
  *     responses:
  *       201: { description: "Story result recorded" }
  *       400: { description: "Missing required fields or invalid status" }
@@ -7477,7 +7865,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey,
+      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey, rejectionEvidence,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
@@ -7485,6 +7873,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
       completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
+      rejectionEvidence?: unknown;
     };
 
     if (!runId || !storyId || !status) {
@@ -7503,6 +7892,17 @@ router.post('/story-result', async (req: Request, res: Response) => {
     if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
       throw new ValidationError('completionPacket must be an object');
     }
+    if (rejectionEvidence !== undefined && status !== 'fail') {
+      throw new ValidationError('rejectionEvidence is valid only for fail outcomes');
+    }
+    const portableRejection = rejectionEvidence === undefined
+      ? undefined
+      : normalizeRejectedStoryEvidence(storyId, rejectionEvidence);
+    const safeCompletionPacket = completionPacket ? { ...completionPacket } : undefined;
+    if (safeCompletionPacket) delete safeCompletionPacket.rejectionEvidence;
+    const persistedCompletionPacket = portableRejection
+      ? { ...(safeCompletionPacket ?? {}), rejectionEvidence: portableRejection }
+      : safeCompletionPacket;
 
     const projection = await queryOne<{
       workspace_id: string;
@@ -7552,7 +7952,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
       activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
-      completionPacket ? JSON.stringify(completionPacket) : null,
+      persistedCompletionPacket ? JSON.stringify(persistedCompletionPacket) : null,
       specId,
       projection.spec_revision,
       projection.story_revision,
@@ -7709,6 +8109,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
  *                 failureReason: { type: string, nullable: true }
  *                 failureAttempts: { type: integer, nullable: true }
  *                 blockedBy: { type: array, items: { type: string }, nullable: true }
+ *                 rejectionEvidence: { type: object, nullable: true, description: "Bounded portable rejection reason and stack; secrets and host paths are redacted." }
  *                 output: { type: array, items: { type: string } }
  *                 lineCount: { type: integer }
  *       400: { description: "Invalid runId" }
@@ -7740,6 +8141,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
     let blockedBy: string[] | null = null;
+    let rejectionEvidence: PortableRejectionEvidence | null = null;
     if (walEvent?.payload) {
       try {
         const payload = typeof walEvent.payload === 'string' ? JSON.parse(walEvent.payload) : walEvent.payload;
@@ -7747,6 +8149,14 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
         failureAttempts = payload.attempts ?? null;
         if (Array.isArray(payload.blockedBy)) blockedBy = payload.blockedBy;
       } catch { /* ignore */ }
+    }
+
+    const completionPacket = (storyResult as any).completion_packet as Record<string, unknown> | string | null;
+    if (completionPacket) {
+      try {
+        const parsed = typeof completionPacket === 'string' ? JSON.parse(completionPacket) : completionPacket;
+        rejectionEvidence = sanitizeStoredRejectedStoryEvidence(storyId, parsed?.rejectionEvidence);
+      } catch { /* malformed historical completion packet has no portable rejection projection */ }
     }
 
     // Also check story_results.blocked_by
@@ -7833,6 +8243,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
       failureReason,
       failureAttempts,
       blockedBy,
+      rejectionEvidence,
       output: outputLines,
       lineCount: outputLines.length,
     });

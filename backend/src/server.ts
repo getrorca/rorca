@@ -142,6 +142,7 @@ import lifecycleEvidenceRouter from './routes/lifecycle-evidence';
 import lifecycleDecisionsRouter from './routes/lifecycle-decisions';
 import lifecycleMutationsRouter from './routes/lifecycle-mutations';
 import deliveryGovernanceRouter from './routes/delivery-governance';
+import waveQualificationRouter from './routes/wave-qualification';
 import { startSsdlcEvidenceNormalizer } from './lib/ssdlc-evidence-subscriber';
 import { randomUUID } from 'crypto';
 
@@ -425,6 +426,7 @@ app.use('/api/workspaces', captureIngestRouter);
 app.use('/api/pipeline', pipelineRouter);
 // Admin-only and deliberately absent from MCP/OpenAPI tool generation.
 app.use('/api/admin/recovery', recoveryRouter);
+app.use('/api/admin/wave-qualification', waveQualificationRouter);
 app.use('/api/execution-environments', executionEnvironmentsRouter);
 app.use('/api/pipeline/hooks', hooksRouter);
 app.use('/api/pipeline/schedules', schedulesRouter);

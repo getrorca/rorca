@@ -41,3 +41,16 @@ declare module "@earendil-works/pi-coding-agent" {
 declare module "@sinclair/typebox" {
   export const Type: any;
 }
+
+declare module "@mariozechner/pi-tui" {
+  export interface Component {}
+  export interface TUI {
+    requestRender(): void;
+  }
+  export function truncateToWidth(value: string, width: number, ellipsis?: string, preserveAnsi?: boolean): string;
+  export function visibleWidth(value: string): number;
+}
+
+declare module "typebox" {
+  export const Type: any;
+}

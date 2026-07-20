@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "baselineVersion": "wave-stress-v1",
+  "recordedAgainst": "deterministic-fixture-agent-v1",
+  "policy": "Each observation must satisfy both the absolute cap and baseline multiplied by baselineMultiplier.",
+  "metrics": {
+    "dispatchLatencyMs": { "baseline": 12, "absoluteCap": 100, "baselineMultiplier": 3 },
+    "mergeCloseoutLatencyMs": { "baseline": 24, "absoluteCap": 200, "baselineMultiplier": 3 },
+    "peakMemoryMiB": { "baseline": 80, "absoluteCap": 256, "baselineMultiplier": 2 },
+    "peakDiskMiB": { "baseline": 16, "absoluteCap": 128, "baselineMultiplier": 3 },
+    "peakProcessCount": { "baseline": 8, "absoluteCap": 24, "baselineMultiplier": 2 },
+    "peakOutputBacklogKiB": { "baseline": 16, "absoluteCap": 64, "baselineMultiplier": 2 },
+    "queueLagMs": { "baseline": 16, "absoluteCap": 150, "baselineMultiplier": 3 },
+    "leaseRenewalMs": { "baseline": 12, "absoluteCap": 100, "baselineMultiplier": 3 },
+    "cleanupMs": { "baseline": 20, "absoluteCap": 200, "baselineMultiplier": 3 }
+  }
+}

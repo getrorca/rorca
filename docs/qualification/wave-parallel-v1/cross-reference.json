@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "indexId": "rorca-wave-parallel-production-cross-reference-v1",
+  "entries": [
+    {
+      "requirementId": "WPE-010-R01",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-005", "WPE-INV-006"],
+      "scenarioIds": ["WPE-Q-006", "WPE-Q-007", "WPE-Q-010"],
+      "assertionIds": ["WPE-A-REPORT-BINDINGS", "WPE-A-REPORT-DETERMINISM"],
+      "evidenceClasses": ["automated_test_output", "durable_database_wal", "git_integration"]
+    },
+    {
+      "requirementId": "WPE-010-R02",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-006"],
+      "scenarioIds": ["WPE-Q-010"],
+      "assertionIds": ["WPE-A-EVIDENCE-CLASS-AUTHORITY"],
+      "evidenceClasses": ["automated_test_output", "durable_database_wal", "git_integration", "independent_checker", "operator_observation", "skipped_check", "environmental_blocker"]
+    },
+    {
+      "requirementId": "WPE-010-R03",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-003", "WPE-INV-004"],
+      "scenarioIds": ["WPE-Q-008", "WPE-Q-009", "WPE-Q-010"],
+      "assertionIds": ["WPE-A-TELEMETRY-BOUNDED"],
+      "evidenceClasses": ["durable_database_wal", "operator_observation"]
+    },
+    {
+      "requirementId": "WPE-010-R04",
+      "invariantIds": ["WPE-INV-004", "WPE-INV-006", "WPE-INV-007"],
+      "scenarioIds": ["WPE-Q-002", "WPE-Q-005", "WPE-Q-010"],
+      "assertionIds": ["WPE-A-PORTABLE-PRIVACY"],
+      "evidenceClasses": ["independent_checker"]
+    },
+    {
+      "requirementId": "WPE-010-R05",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-006"],
+      "scenarioIds": ["WPE-Q-010"],
+      "assertionIds": ["WPE-A-RECEIPT-SCHEMA", "WPE-A-RECEIPT-AUTH"],
+      "evidenceClasses": ["independent_checker", "durable_database_wal"]
+    },
+    {
+      "requirementId": "WPE-010-R06",
+      "invariantIds": ["WPE-INV-002", "WPE-INV-006", "WPE-INV-007"],
+      "scenarioIds": ["WPE-Q-005", "WPE-Q-010"],
+      "assertionIds": ["WPE-A-LOCAL-RECOMPUTE", "WPE-A-REPLAY-REJECTION"],
+      "evidenceClasses": ["git_integration", "independent_checker"]
+    },
+    {
+      "requirementId": "WPE-010-R07",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-003", "WPE-INV-005"],
+      "scenarioIds": ["WPE-Q-008", "WPE-Q-009", "WPE-Q-010"],
+      "assertionIds": ["WPE-A-RUN-CLOSEOUT-AUTHORITY", "WPE-A-OPERATOR-LABELS"],
+      "evidenceClasses": ["durable_database_wal", "git_integration", "operator_observation"]
+    },
+    {
+      "requirementId": "WPE-010-R08",
+      "invariantIds": ["WPE-INV-001", "WPE-INV-002", "WPE-INV-006"],
+      "scenarioIds": ["WPE-Q-010"],
+      "assertionIds": ["WPE-A-FAIL-CLOSED-PUBLICATION"],
+      "evidenceClasses": ["environmental_blocker", "durable_database_wal"]
+    },
+    {
+      "requirementId": "WPE-010-R09",
+      "invariantIds": ["WPE-INV-006"],
+      "scenarioIds": ["WPE-Q-010"],
+      "assertionIds": ["WPE-A-DOCUMENT-INDEX"],
+      "evidenceClasses": ["independent_checker"]
+    },
+    {
+      "requirementId": "WPE-010-R10",
+      "invariantIds": ["WPE-INV-005", "WPE-INV-006"],
+      "scenarioIds": ["WPE-Q-010"],
+      "assertionIds": ["WPE-A-REPORT-DETERMINISM"],
+      "evidenceClasses": ["automated_test_output", "independent_checker"]
+    }
+  ]
+}
