@@ -319,7 +319,10 @@ function withoutPidIsolationForSensitivityProbe(args: readonly string[]): string
   if (index < 0) throw new Error('sandbox sensitivity probe requires canonical --unshare-all');
   return [
     ...args.slice(0, index),
-    '--unshare-user-try', '--unshare-ipc', '--unshare-net', '--unshare-uts', '--unshare-cgroup-try',
+    // Deliberately retain the supervisor's user and PID namespaces. A new user
+    // namespace can make its otherwise-visible /proc/<pid>/environ unreadable
+    // and would turn the ancestor-marker sensitivity check vacuous again.
+    '--unshare-ipc', '--unshare-net', '--unshare-uts', '--unshare-cgroup-try',
     ...args.slice(index + 1),
   ];
 }
