@@ -40,6 +40,10 @@ const config: Config = {
     'src/__tests__/pg-boss-restart\\.test\\.ts',
     'src/__tests__/pg-boss-scheduler\\.test\\.ts',
     'src/__tests__/pg-boss-zero-downtime\\.test\\.ts',
+    // node:test WPE suites are executed by the root test:wave-node command.
+    // Jest importing them would execute TAP tests as side effects, then fail
+    // because those files intentionally contain no Jest test registrations.
+    '\\.node\\.test\\.ts$',
   ],
   modulePathIgnorePatterns: ['<rootDir>/dist/'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],

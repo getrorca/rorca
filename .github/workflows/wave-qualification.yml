@@ -103,10 +103,10 @@ jobs:
           # avoids unbounded unrelated integration handles consuming the
           # platform qualification budget without skipping WPE evidence.
           npx vitest run src/panels/__tests__/ForgeReasoningControls.test.tsx src/lib/__tests__/run-closeout-reconciliation.test.ts --maxWorkers=1
-          cd backend
           DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" \
             DATABASE_URL_TEST="$RORCA_QUALIFICATION_DATABASE_URL" \
-            npm test -- --runInBand --forceExit src/lib/__tests__/qualification-isolation.node.test.ts src/lib/__tests__/deterministic-fixture-agent.node.test.ts src/lib/__tests__/successful-wave-integration.node.test.ts src/lib/__tests__/rejected-wave-closeout.node.test.ts src/lib/__tests__/conflicted-wave-integration.node.test.ts src/lib/__tests__/wave-execution-safety.node.test.ts src/lib/__tests__/wave-production-policy.node.test.ts src/lib/__tests__/governed-story-retry.node.test.ts src/lib/__tests__/governed-retry-production-contract.node.test.ts src/lib/__tests__/wave-release-readiness.node.test.ts
+            RORCA_TEST_DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" \
+            npm run test:wave-node
       - name: Exercise real isolation and pg-boss queue ownership boundary
         run: node scripts/run-wave-qualification.mjs backend/src/__tests__/fixtures/wave-isolation-smoke-scenario.mjs > qualification-isolation-evidence.json
       - name: Run deterministic blocking profile with diagnostic-only flaky retry
@@ -235,10 +235,10 @@ jobs:
           # avoids unbounded unrelated integration handles consuming the
           # platform qualification budget without skipping WPE evidence.
           npx vitest run src/panels/__tests__/ForgeReasoningControls.test.tsx src/lib/__tests__/run-closeout-reconciliation.test.ts --maxWorkers=1
-          cd backend
           DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" \
             DATABASE_URL_TEST="$RORCA_QUALIFICATION_DATABASE_URL" \
-            npm test -- --runInBand --forceExit src/lib/__tests__/qualification-isolation.node.test.ts src/lib/__tests__/deterministic-fixture-agent.node.test.ts src/lib/__tests__/successful-wave-integration.node.test.ts src/lib/__tests__/rejected-wave-closeout.node.test.ts src/lib/__tests__/conflicted-wave-integration.node.test.ts src/lib/__tests__/wave-execution-safety.node.test.ts src/lib/__tests__/wave-production-policy.node.test.ts src/lib/__tests__/governed-story-retry.node.test.ts src/lib/__tests__/governed-retry-production-contract.node.test.ts src/lib/__tests__/wave-release-readiness.node.test.ts
+            RORCA_TEST_DATABASE_URL="$RORCA_QUALIFICATION_DATABASE_URL" \
+            npm run test:wave-node
       - name: Exercise real isolation and pg-boss queue ownership boundary
         run: node scripts/run-wave-qualification.mjs backend/src/__tests__/fixtures/wave-isolation-smoke-scenario.mjs > qualification-isolation-evidence.json
       - name: Run deterministic blocking profile with diagnostic-only flaky retry

@@ -21,7 +21,10 @@ import {
 
 const revision = 'a'.repeat(40);
 const digest = (character: string) => `sha256:${character.repeat(64)}`;
-const now = '2026-07-19T12:00:00.000Z';
+const referenceTime = Date.now();
+const now = new Date(referenceTime).toISOString();
+const issuedAt = new Date(referenceTime - 60 * 60 * 1000).toISOString();
+const expiresAt = new Date(referenceTime + 60 * 60 * 1000).toISOString();
 
 function packet(): WaveReleaseReadinessPacket {
   const reviewers = Object.fromEntries(WAVE_REVIEW_ROLES.map((role, index) => [role, `human-reviewer-${index + 1}`]));
@@ -30,7 +33,7 @@ function packet(): WaveReleaseReadinessPacket {
     workspaceId: 'workspace-canary',
     qualification: {
       receiptId: 'receipt-41', reportHash: digest('1'), sourceRevision: revision,
-      issuedAt: '2026-07-19T11:00:00.000Z', expiresAt: '2026-07-20T11:00:00.000Z',
+      issuedAt, expiresAt,
     },
     pullRequest: {
       number: 412, headRevision: revision, deliveryMode: 'reviewed-pull-request', reviewed: true,
@@ -124,7 +127,7 @@ test('stale receipts, non-PR delivery, auto-merge, deployment, and stale validat
   rejects(value => { value.pullRequest.autoMergeEnabled = true as false; }, /PR-only/);
   rejects(value => { value.pullRequest.deploymentEnabled = true as false; }, /PR-only/);
   rejects(value => { value.validations[0].sourceRevision = 'e'.repeat(40); }, /validation is skipped, failed, or stale/);
-  assert.throws(() => assertWaveReleaseReadinessPacket(packet(), '2026-07-21T12:00:00.000Z'), /expired/);
+  assert.throws(() => assertWaveReleaseReadinessPacket(packet(), new Date(referenceTime + 2 * 60 * 60 * 1000).toISOString()), /expired/);
 });
 
 test('platform isolation, canary, soak, rollback, and protected inventory are mandatory', () => {
@@ -165,12 +168,17 @@ test('blocking CI qualifies Linux and macOS on Node 20/22 with owned PostgreSQL 
   assert.match(workflow, /RORCA_QUALIFICATION_DATABASE_URL/);
   assert.match(workflow, /runPgMigrations/);
   assert.equal((workflow.match(/npx vitest run/g) ?? []).length, 2);
-  assert.equal((workflow.match(/npm test -- --runInBand/g) ?? []).length, 2);
+  assert.equal((workflow.match(/npm run test:wave-node/g) ?? []).length, 2);
+  assert.doesNotMatch(workflow, /npm test -- --runInBand[^\n]*\.node\.test\.ts/);
   assert.match(workflow, /DATABASE_URL_TEST="\$RORCA_QUALIFICATION_DATABASE_URL"/);
   assert.match(workflow, /npm run test:wave-qualification/);
   assert.match(workflow, /First authoritative attempt failed; running one automatic diagnostic retry without converting the gate to success/);
   assert.equal((workflow.match(/DROP DATABASE :"database" WITH \(FORCE\)/g) ?? []).length, 2);
   assert.equal((workflow.match(/DATABASE_URL_TEST="\$RORCA_QUALIFICATION_DATABASE_URL"/g) ?? []).length, 2);
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+  assert.match(packageJson.scripts?.['test:wave-node'] ?? '', /tsx --test .*\.node\.test\.ts/);
+  const jestConfig = fs.readFileSync(path.join(repositoryRoot, 'backend/jest.config.ts'), 'utf8');
+  assert.match(jestConfig, /WPE suites are executed by the root test:wave-node/);
   assert.doesNotMatch(workflow, /RORCA_WAVE_PARALLEL_PRODUCTION_ENABLED|deployment:/);
 });
 
