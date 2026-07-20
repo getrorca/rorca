@@ -314,19 +314,6 @@ export function prepareAutonomousSandboxLaunch(options: AutonomousSandboxOptions
   };
 }
 
-function withoutPidIsolationForSensitivityProbe(args: readonly string[]): string[] {
-  const index = args.indexOf('--unshare-all');
-  if (index < 0) throw new Error('sandbox sensitivity probe requires canonical --unshare-all');
-  return [
-    ...args.slice(0, index),
-    // Deliberately retain the supervisor's user and PID namespaces. A new user
-    // namespace can make its otherwise-visible /proc/<pid>/environ unreadable
-    // and would turn the ancestor-marker sensitivity check vacuous again.
-    '--unshare-ipc', '--unshare-net', '--unshare-uts', '--unshare-cgroup-try',
-    ...args.slice(index + 1),
-  ];
-}
-
 function runBoundaryProbe(cwd: string, env: NodeJS.ProcessEnv): void {
   const sentinelRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sandbox-credential-'));
   const sentinel = path.join(sentinelRoot, 'credentials');
@@ -361,25 +348,31 @@ Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>proc
       return tool;
     });
     const node = tools[0];
+    const probeArgs = ['-e', script, sentinel, workspaceCredential, JSON.stringify(tools)];
     const launch = prepareAutonomousSandboxLaunch({
       command: node,
-      args: ['-e', script, sentinel, workspaceCredential, JSON.stringify(tools)],
+      args: probeArgs,
       cwd: probeRoot,
       env: { PATH: '/usr/local/bin:/usr/bin:/bin' },
     });
-    const runThroughMarkedSupervisor = (args: string[]): ReturnType<typeof spawnSync> => {
+    const runThroughMarkedSupervisor = (candidate: AutonomousSandboxLaunch): ReturnType<typeof spawnSync> => {
       const marker = `rorca-ancestor-secret-${crypto.randomBytes(24).toString('hex')}`;
       return spawnSync(process.execPath, ['-e', BOUNDARY_PROBE_SUPERVISOR], {
         env: { ...launch.env, RORCA_ANCESTOR_SECRET_PROBE: marker },
-        input: JSON.stringify({ ...launch, args }),
+        input: JSON.stringify(candidate),
         encoding: 'utf8', timeout: 20_000,
       });
     };
-    const sensitivity = runThroughMarkedSupervisor(withoutPidIsolationForSensitivityProbe(launch.args));
+    // Sensitivity deliberately has neither PID nor user isolation. The exact
+    // child probe and sanitized environment must see its marked supervisor;
+    // only after that proves exit 41 do we trust the canonical bwrap result.
+    const sensitivity = runThroughMarkedSupervisor({
+      command: node, args: probeArgs, cwd: probeRoot, env: launch.env, isolated: false,
+    });
     if (sensitivity.status !== 41) {
       throw new Error(`autonomous sandbox PID-isolation sensitivity probe expected ancestor visibility exit 41, got ${sensitivity.status ?? sensitivity.signal ?? 'unknown'}`);
     }
-    const result = runThroughMarkedSupervisor(launch.args);
+    const result = runThroughMarkedSupervisor(launch);
     if (result.status !== 0) {
       throw new Error(`autonomous sandbox capability probe failed (${result.status ?? result.signal ?? 'unknown'})`);
     }

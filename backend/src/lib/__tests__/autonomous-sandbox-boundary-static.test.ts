@@ -74,8 +74,8 @@ test('boundary is topology with an exec-time ancestor marker and a no-PID-isolat
     "'/usr/local/bin/node'", "'/usr/bin/python3'", "'/usr/bin/git'", "'/usr/bin/gh'",
     "'/usr/local/bin/npm'", "'/usr/local/bin/npx'", "fs.readFileSync('/proc/'",
     "Buffer.from('RORCA_ANCESTOR_SECRET_PROBE=')", 'BOUNDARY_PROBE_SUPERVISOR',
-    "sensitivity.status !== 41", "'--unshare-ipc'", "'--unshare-cgroup-try'",
-    "retain the supervisor's user and PID namespaces",
+    "sensitivity.status !== 41", 'neither PID nor user isolation',
+    'command: node, args: probeArgs', 'env: launch.env, isolated: false',
   ]) expect(sandbox).toContain(required);
   expect(sandbox).not.toContain('process.env.RORCA_ANCESTOR_SECRET_PROBE =');
   expect(sandbox).not.toMatch(/args:\s*\[[^\]]*marker/);
