@@ -30,7 +30,7 @@ import {
 } from '../wave-integration-protocol';
 
 const checkerPath = path.resolve(process.cwd(), 'backend', 'src', '__tests__', 'fixtures', 'independent-wave-trace-checker.mjs');
-const migrationPath = path.resolve(process.cwd(), 'backend', 'src', 'db', 'pg-migrations', '20260719090000_wave_story_integration_ledger.sql');
+const migrationPath = path.resolve(process.cwd(), 'backend', 'src', 'db', 'pg-migrations', '20260719090500_wave_story_integration_ledger.sql');
 const gitEnvironment = {
   ...process.env,
   GIT_AUTHOR_NAME: 'Rorca Successful Wave',
