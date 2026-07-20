@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { commitGuardedMerge } from './story-worktree-lifecycle';
+import { commitGuardedMerge, integrationGitEnvironment } from './story-worktree-lifecycle';
 
 export const WAVE_INTEGRATION_STATES = [
   'prepared',
@@ -449,7 +449,7 @@ export class WaveIntegrationLedger {
       try {
         execFileSync('git', ['merge', '--no-ff', '--no-commit', record.sourceCommit], {
           cwd: this.repositoryPath,
-          env: process.env,
+          env: integrationGitEnvironment(),
           stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (mergeError) {

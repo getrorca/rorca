@@ -413,6 +413,16 @@ export function assertExpectedParentHead(repositoryPath: string, expectedParentH
  * branch with an explicit old-OID compare-and-swap. A concurrent ref advance
  * leaves only an unreachable candidate commit; it never receives this story.
  */
+export function integrationGitEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...environment,
+    GIT_AUTHOR_NAME: environment.GIT_AUTHOR_NAME || 'Rorca Wave Integration',
+    GIT_AUTHOR_EMAIL: environment.GIT_AUTHOR_EMAIL || 'wave-integration@rorca.invalid',
+    GIT_COMMITTER_NAME: environment.GIT_COMMITTER_NAME || 'Rorca Wave Integration',
+    GIT_COMMITTER_EMAIL: environment.GIT_COMMITTER_EMAIL || 'wave-integration@rorca.invalid',
+  };
+}
+
 export function commitGuardedMerge(
   repositoryPath: string,
   message: string,
@@ -431,13 +441,7 @@ export function commitGuardedMerge(
     // Clean runners and service-owned worktrees may intentionally have no
     // global Git identity. commit-tree must still produce an attributable
     // integration commit without depending on mutable host configuration.
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'Rorca Wave Integration',
-      GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'wave-integration@rorca.invalid',
-      GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'Rorca Wave Integration',
-      GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'wave-integration@rorca.invalid',
-    },
+    env: integrationGitEnvironment(),
     input: `${message}\n`,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
