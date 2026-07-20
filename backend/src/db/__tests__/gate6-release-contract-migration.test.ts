@@ -17,7 +17,9 @@ test('next unique upgrade migration truthfully replaces the historical run statu
   const files = fs.readdirSync(migrations).filter((file) => file.endsWith('.sql')).sort();
   const prefixes = files.map((file) => file.match(/^(\d+)_/)?.[1]).filter(Boolean);
   expect(new Set(prefixes).size).toBe(prefixes.length);
-  expect(files.at(-1)).toBe('20260718170000_gate6_release_contract.sql');
+  expect(files.indexOf('20260718170000_gate6_release_contract.sql')).toBeGreaterThan(
+    files.indexOf('20260718140000_story_result_authority_and_github_projection.sql'),
+  );
   expect(init).not.toContain("'release_pending'");
   expect(releaseSource).toContain("status = CASE WHEN status = 'done' THEN status ELSE 'release_pending' END");
   expect(sql).toContain('DROP CONSTRAINT IF EXISTS pipeline_runs_status_check');

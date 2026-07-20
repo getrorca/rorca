@@ -66,6 +66,13 @@ describe('raw PTY archive', () => {
           PTY_RAW_ARCHIVE_ROOT,
           'escaped/segment.gz',
         )).toThrow(ForbiddenError);
+        expect(() => resolveRawArchiveSegmentPath(
+          workspace,
+          PTY_RAW_ARCHIVE_ROOT,
+          'escaped/new-segment.gz',
+          false,
+        )).toThrow(ForbiddenError);
+        expect(fs.existsSync(path.join(outside, 'new-segment.gz'))).toBe(false);
         fs.rmSync(outside, { recursive: true, force: true });
       }
     } finally {

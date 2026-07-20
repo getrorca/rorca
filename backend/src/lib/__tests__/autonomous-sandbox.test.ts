@@ -80,6 +80,9 @@ test('Linux launch topology has fresh namespaces, private proc/home/tmp, exact w
   const cwd = fixture();
   try {
     fs.writeFileSync(path.join(cwd, '.env'), 'DATABASE_URL=must-not-be-readable\n', { mode: 0o600 });
+    fs.mkdirSync(path.join(cwd, 'backend'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'backend', '.env.local'), 'TOKEN=nested-must-not-be-readable\n', { mode: 0o600 });
+    fs.mkdirSync(path.join(cwd, '.rorca', 'pty-archives'), { recursive: true });
     const args = buildLinuxSandboxArgumentsForTests({
       command: '/usr/bin/node', args: ['--version'], cwd,
       env: { PATH: '/usr/bin', DATABASE_URL: 'must-not-appear' },
@@ -93,6 +96,8 @@ test('Linux launch topology has fresh namespaces, private proc/home/tmp, exact w
     expect(text).toContain(git(cwd, 'rev-parse', '--absolute-git-dir'));
     expect(text).not.toContain('must-not-appear');
     expect(text).toContain(`--ro-bind\n${os.devNull}\n${path.join(fs.realpathSync(cwd), '.env')}`);
+    expect(text).toContain(`--ro-bind\n${os.devNull}\n${path.join(fs.realpathSync(cwd), 'backend', '.env.local')}`);
+    expect(text).toContain(`--tmpfs\n${path.join(fs.realpathSync(cwd), '.rorca', 'pty-archives')}`);
     expect(text).not.toMatch(/--(?:ro-)?bind\n\/\n\//);
     expect(args.slice(-3)).toEqual(['--', '/usr/bin/node', '--version']);
   } finally {

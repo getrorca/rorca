@@ -200,21 +200,44 @@ function addBind(args: string[], source: string, destination: string, readOnly: 
 
 function maskWorkspaceCredentialFiles(args: string[], cwd: string): void {
   const candidates: string[] = [];
-  for (const entry of fs.readdirSync(cwd, { withFileTypes: true })) {
-    if (entry.isFile() && /^\.env(?:\..+)?$/.test(entry.name)
-      && !/\.(?:example|sample|template)$/.test(entry.name)) candidates.push(path.join(cwd, entry.name));
-  }
-  for (const relative of [
-    '.npmrc', '.netrc', '.pypirc',
-    '.ssh', '.aws', '.config/gh', '.config/gcloud',
+  const stack = [cwd];
+  let visited = 0;
+  const sensitiveDirectoryNames = new Set(['.ssh', '.aws']);
+  const sensitiveFileNames = new Set(['.npmrc', '.netrc', '.pypirc']);
+  const sensitiveSuffixes = [
+    '.config/gh', '.config/gcloud',
     '.claude/.credentials.json', '.claude/settings.local.json',
     '.codex/auth.json', '.pi/agent/auth.json',
-  ]) {
-    const candidate = path.join(cwd, relative);
-    if (fs.existsSync(candidate)) candidates.push(candidate);
+  ];
+  while (stack.length > 0) {
+    const directory = stack.pop()!;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      visited += 1;
+      if (visited > 250_000) throw new Error('Autonomous credential scan exceeded its bounded workspace inventory');
+      const candidate = path.join(directory, entry.name);
+      const relative = path.relative(cwd, candidate).split(path.sep).join('/');
+      const envFile = /^\.env(?:\..+)?$/.test(entry.name)
+        && !/\.(?:example|sample|template)$/.test(entry.name);
+      const sensitive = envFile || sensitiveFileNames.has(entry.name)
+        || sensitiveDirectoryNames.has(entry.name)
+        || sensitiveSuffixes.some(suffix => relative === suffix || relative.endsWith(`/${suffix}`));
+      if (sensitive) {
+        candidates.push(candidate);
+        continue;
+      }
+      if (entry.isDirectory() && !['.git', 'node_modules', 'dist', 'build', '.next'].includes(entry.name)) {
+        stack.push(candidate);
+      }
+    }
   }
+  // Restricted raw PTY evidence belongs to the trusted host writer. Hide the
+  // host archive behind an isolated tmpfs whenever it already exists before
+  // the model namespace is created.
+  const rawArchive = path.join(cwd, '.rorca', 'pty-archives');
+  if (fs.existsSync(rawArchive)) candidates.push(rawArchive);
   for (const candidate of [...new Set(candidates)]) {
     const stat = fs.lstatSync(candidate);
+    if (stat.isSymbolicLink()) throw new Error('Autonomous workspace credential/archive path cannot be a symbolic link');
     if (stat.isDirectory()) args.push('--tmpfs', candidate);
     else args.push('--ro-bind', os.devNull, candidate);
   }

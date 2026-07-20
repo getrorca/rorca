@@ -386,15 +386,47 @@ export async function pushExactForTests(
   });
 }
 
+interface ProviderPullRequest {
+  number?: number;
+  html_url?: string;
+  draft?: boolean;
+  state?: string;
+  head?: { sha?: string; ref?: string; repo?: { id?: number; full_name?: string } };
+  base?: { sha?: string; ref?: string; repo?: { id?: number; full_name?: string } };
+}
+
 async function fetchPullRequest(
   authority: GithubRepositoryAuthority,
   token: string,
   number: number,
-): Promise<{ number?: number; draft?: boolean; state?: string; head?: { sha?: string; ref?: string } }> {
+): Promise<ProviderPullRequest> {
   const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
     githubRepoApiUrl(authority.owner, authority.name, `/pulls/${number}`), { headers: headers(token) }));
   if (!response.ok) throw githubProviderError(response, 'GITHUB_RELEASE_PR_VERIFY_FAILED');
-  return response.json() as Promise<{ number?: number; draft?: boolean; state?: string; head?: { sha?: string; ref?: string } }>;
+  return response.json() as Promise<ProviderPullRequest>;
+}
+
+function assertCanonicalPullRequest(
+  pr: ProviderPullRequest,
+  exact: RunReleaseIdentity,
+  authority: GithubRepositoryAuthority,
+  expectedNumber: number,
+  draft: boolean,
+): void {
+  const fullName = `${authority.owner}/${authority.name}`.toLowerCase();
+  if (pr.number !== expectedNumber
+    || pr.html_url !== `https://github.com/${authority.owner}/${authority.name}/pull/${expectedNumber}`
+    || pr.state !== 'open'
+    || Boolean(pr.draft) !== draft
+    || pr.head?.sha?.toLowerCase() !== exact.authorizedSha
+    || pr.head?.ref !== exact.providerReleaseRef
+    || pr.head?.repo?.full_name?.toLowerCase() !== fullName
+    || pr.base?.sha?.toLowerCase() !== exact.baseSha
+    || pr.base?.ref !== exact.baseBranch
+    || pr.base?.repo?.full_name?.toLowerCase() !== fullName
+    || (authority.repositoryId != null && (pr.head?.repo?.id !== authority.repositoryId || pr.base?.repo?.id !== authority.repositoryId))) {
+    throw new Error('pull request differs from immutable release authority');
+  }
 }
 
 async function quarantinePullRequest(
@@ -428,7 +460,7 @@ export async function createOrFinalizePullRequestForTests(row: ReleaseIntentRow,
       githubRepoApiUrl(authority.owner, authority.name, `/pulls?head=${encodeURIComponent(head)}&state=all&per_page=10`),
       { headers: headers(credential.token) }));
     if (!lookup.ok) throw githubProviderError(lookup, 'GITHUB_RELEASE_PR_LOOKUP_FAILED');
-    const existing = await lookup.json().catch(() => null) as Array<{ number?: number; draft?: boolean; state?: string; head?: { sha?: string; ref?: string } }> | null;
+    const existing = await lookup.json().catch(() => null) as ProviderPullRequest[] | null;
     if (!Array.isArray(existing)) throw new Error('pull request lookup response shape was indeterminate');
     const owned = existing.filter((pr) => pr.head?.ref === exact.providerReleaseRef && Number.isSafeInteger(pr.number));
     if (owned.some((pr) => pr.state !== 'open' && pr.state !== 'closed')) {
@@ -439,10 +471,15 @@ export async function createOrFinalizePullRequestForTests(row: ReleaseIntentRow,
     // replacement create/verify converges without forgetting prior attempts.
     const open = owned.filter((pr) => pr.state === 'open');
     if (open.length > 1) throw new Error('multiple open pull requests share the unique release ref');
-    let pr = open[0];
-    if (pr && pr.head?.sha?.toLowerCase() !== exact.authorizedSha) {
-      await quarantinePullRequest(authority, credential.token, Number(pr.number));
-      throw new Error('provider head raced before PR create/finalize; pull request quarantined');
+    let pr: ProviderPullRequest | undefined;
+    if (open[0]) {
+      const number = Number(open[0].number);
+      pr = await fetchPullRequest(authority, credential.token, number);
+      try { assertCanonicalPullRequest(pr, exact, authority, number, draft); }
+      catch {
+        await quarantinePullRequest(authority, credential.token, number);
+        throw new Error('recovered pull request differs from immutable release authority; pull request quarantined');
+      }
     }
     if (!pr) {
       await assertExactProviderHead(exact, authority, credential); // immediately before mutation
@@ -457,37 +494,17 @@ export async function createOrFinalizePullRequestForTests(row: ReleaseIntentRow,
           }),
         }));
       if (!created.ok) throw githubProviderError(created, 'GITHUB_RELEASE_PR_CREATE_FAILED');
-      pr = await created.json().catch(() => null) as typeof pr;
-      if (!Number.isSafeInteger(pr?.number)) throw new Error('pull request create response omitted its identity');
-      const verified = await fetchPullRequest(authority, credential.token, Number(pr!.number));
-      if (verified.head?.sha?.toLowerCase() !== exact.authorizedSha
-        || verified.head?.ref !== exact.providerReleaseRef) {
-        await quarantinePullRequest(authority, credential.token, Number(pr!.number));
-        throw new Error('provider head raced during PR create; pull request quarantined');
+      const createdPr = await created.json().catch(() => null) as ProviderPullRequest | null;
+      if (!Number.isSafeInteger(createdPr?.number)) throw new Error('pull request create response omitted its identity');
+      const verified = await fetchPullRequest(authority, credential.token, Number(createdPr!.number));
+      try { assertCanonicalPullRequest(verified, exact, authority, Number(createdPr!.number), draft); }
+      catch {
+        await quarantinePullRequest(authority, credential.token, Number(createdPr!.number));
+        throw new Error('created pull request differs from immutable release authority; pull request quarantined');
       }
       pr = verified;
     }
     if (!Number.isSafeInteger(pr?.number)) throw new Error('pull request identity was not returned');
-    if (!draft && pr!.draft === true) {
-      await assertExactProviderHead(exact, authority, credential);
-      const immediatelyBefore = await fetchPullRequest(authority, credential.token, Number(pr!.number));
-      if (immediatelyBefore.head?.sha?.toLowerCase() !== exact.authorizedSha
-        || immediatelyBefore.head?.ref !== exact.providerReleaseRef) {
-        await quarantinePullRequest(authority, credential.token, Number(pr!.number));
-        throw new Error('provider head raced before draft finalization; pull request quarantined');
-      }
-      const finalized = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
-        githubRepoApiUrl(authority.owner, authority.name, `/pulls/${pr!.number}`), {
-          method: 'PATCH', headers: headers(credential.token), body: JSON.stringify({ draft: false }),
-        }));
-      if (!finalized.ok) throw githubProviderError(finalized, 'GITHUB_RELEASE_PR_FINALIZE_FAILED');
-      const verified = await fetchPullRequest(authority, credential.token, Number(pr!.number));
-      if (verified.draft === true || verified.head?.sha?.toLowerCase() !== exact.authorizedSha
-        || verified.head?.ref !== exact.providerReleaseRef) {
-        await quarantinePullRequest(authority, credential.token, Number(pr!.number));
-        throw new Error('provider head raced during draft finalization; pull request quarantined');
-      }
-    }
     return Number(pr!.number);
   });
 }
@@ -626,7 +643,9 @@ async function ensureReleaseEffects(row: ReleaseIntentRow, posture?: MergeResolu
     if (external && (row.merge_strategy === 'pr' || row.merge_strategy === 'draft-pr') && shouldActuateReleaseStep(state.pr)) {
       await setStep(exact.runId, 'pr', 'processing');
       const prNumber = await createOrFinalizePullRequestForTests(row, row.merge_strategy === 'draft-pr');
-      const updated = await execute('UPDATE pipeline_runs SET pr_number = $1, pr_creating = FALSE, pr_creation_error = NULL WHERE id = $2', [prNumber, exact.runId]);
+      const updated = await execute(`UPDATE pipeline_runs
+        SET pr_number = $1, pr_creating = FALSE, pr_creation_error = NULL
+        WHERE id = $2 AND (pr_number IS NULL OR pr_number = $1)`, [prNumber, exact.runId]);
       if (updated.rowCount !== 1) throw new Error('PR identity did not bind exact run');
       await setStep(exact.runId, 'pr', 'completed');
     } else if ((row.merge_strategy === 'branch-only' || !external) && shouldActuateReleaseStep(state.pr)) {

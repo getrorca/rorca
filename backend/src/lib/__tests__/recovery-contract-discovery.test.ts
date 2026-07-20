@@ -37,7 +37,7 @@ test('trusted checkpoint evidence is produced before pass and immutable in Postg
     engine.indexOf('async function finalizeIntegratedStoryPass'),
     engine.indexOf('async function recordStoryMergeConflict'),
   );
-  expect(finalize).toContain('recordIntegratedCheckpointAttestation(config, workspaceId, pending)');
+  expect(finalize).toContain('recordIntegratedCheckpointAttestation(config, workspaceId, pending, integratedHead)');
   expect(finalize.indexOf('recordIntegratedCheckpointAttestation')).toBeLessThan(finalize.indexOf('markStoryPassed'));
 
   const migration = fs.readFileSync(

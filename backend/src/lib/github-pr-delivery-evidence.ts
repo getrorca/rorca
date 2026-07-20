@@ -137,6 +137,13 @@ interface RunBindingRow {
   repo_owner: string;
   repo_name: string;
   release_base_branch: string;
+  release_head_ref: string | null;
+  release_authorized_sha: string;
+  repository_authority_source: string;
+  repository_binding_id: string | null;
+  repository_installation_id: number | string | null;
+  repository_id: number | string | null;
+  release_merge_strategy: string;
 }
 
 interface EvidenceRow {
@@ -500,17 +507,35 @@ export async function observeGithubPrDeliveryEvidence(
   const authority = await deps.resolveAuthority(input.workspaceId);
   const run = await deps.queryOne<RunBindingRow>(
     `SELECT r.id, r.workspace_id, r.spec_path, r.branch_name, r.pr_number,
-            $3::text AS repo_owner, $4::text AS repo_name,
-            i.base_branch AS release_base_branch
+            i.repository_owner AS repo_owner, i.repository_name AS repo_name,
+            i.base_branch AS release_base_branch,
+            i.provider_release_ref AS release_head_ref,
+            i.authorized_sha AS release_authorized_sha,
+            i.repository_authority_source,
+            i.repository_binding_id,
+            i.repository_installation_id,
+            i.repository_id,
+            i.merge_strategy AS release_merge_strategy
        FROM pipeline_runs r
        JOIN pipeline_run_release_intents i
          ON i.run_id = r.id AND i.workspace_id = r.workspace_id
       WHERE r.id = $1 AND r.workspace_id = $2`,
-    [input.runId, input.workspaceId, authority.owner, authority.name],
+    [input.runId, input.workspaceId],
   );
   if (!run) throw new NotFoundError('GitHub-bound pipeline run', String(input.runId));
   if (!run.pr_number) throw new UnprocessableError('Run has no canonical pull request binding', 'PR_BINDING_REQUIRED');
   if (!run.branch_name) throw new UnprocessableError('Run has no canonical branch binding', 'BRANCH_BINDING_REQUIRED');
+  if (!run.release_head_ref) throw new UnprocessableError('Run has no immutable provider release ref', 'PR_HEAD_BINDING_REQUIRED');
+  if (run.release_authorized_sha.toLowerCase() !== expectedHeadSha) {
+    throw new ConflictError('Requested evidence SHA differs from immutable release authority');
+  }
+  const authorityMatches = authority.owner.toLowerCase() === run.repo_owner.toLowerCase()
+    && authority.name.toLowerCase() === run.repo_name.toLowerCase()
+    && authority.source === run.repository_authority_source
+    && (authority.bindingId ?? null) === (run.repository_binding_id ?? null)
+    && Number(authority.installationId ?? 0) === Number(run.repository_installation_id ?? 0)
+    && Number(authority.repositoryId ?? 0) === Number(run.repository_id ?? 0);
+  if (!authorityMatches) throw new ConflictError('Current GitHub authority differs from immutable run release authority');
 
   const token = await deps.resolveToken(input.workspaceId, {
     repository: { owner: run.repo_owner, name: run.repo_name },
@@ -524,14 +549,18 @@ export async function observeGithubPrDeliveryEvidence(
   const headSha = normalizedSha(pr.head?.sha, 'pullRequest.head.sha');
   const baseSha = normalizedSha(pr.base?.sha, 'pullRequest.base.sha');
   const providerRepo = boundedText(pr.head?.repo?.full_name, 512).toLowerCase();
-  if (providerRepo && providerRepo !== `${owner}/${repo}`.toLowerCase()) {
-    throw new ConflictError('Pull request repository does not match the workspace GitHub binding');
+  const providerBaseRepo = boundedText(pr.base?.repo?.full_name, 512).toLowerCase();
+  if (providerRepo !== `${owner}/${repo}`.toLowerCase()
+    || providerBaseRepo !== `${owner}/${repo}`.toLowerCase()) {
+    throw new ConflictError('Pull request repository does not match immutable release authority');
   }
   const expectedPrUrl = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
   if (pr.html_url !== expectedPrUrl) throw new ConflictError('GitHub returned an unexpected pull request URL');
   if (pr.number !== prNumber) throw new ConflictError('GitHub returned a different pull request identity');
-  if (pr.head.ref !== run.branch_name) throw new ConflictError('Pull request head branch does not match the canonical run branch');
+  if (pr.head.ref !== run.release_head_ref) throw new ConflictError('Pull request head branch does not match the immutable provider release ref');
   if (pr.base.ref !== run.release_base_branch) throw new ConflictError('Pull request base branch does not match the immutable run release intent');
+  const expectedDraft = run.release_merge_strategy === 'draft-pr';
+  if (Boolean(pr.draft) !== expectedDraft) throw new ConflictError('Pull request draft posture differs from immutable release intent');
   if (headSha !== expectedHeadSha) {
     throw new ConflictError('Pull request head SHA changed; observe again using the current immutable SHA', {
       expectedHeadSha,

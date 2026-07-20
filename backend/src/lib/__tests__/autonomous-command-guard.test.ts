@@ -177,10 +177,19 @@ describe('autonomous-command-guard', () => {
     delete untrustedEnv.RORCA_TEST_DATABASE_URL;
     delete untrustedEnv.DATABASE_URL_TEST;
 
-    const guarded = createAutonomousCommandGuard({
-      cwd: workspace,
-      env: untrustedEnv,
-    });
+    // Build against a deterministic host command path: npm is available, but
+    // Jest is intentionally absent outside the generated guard directory.
+    const realBin = path.join(workspace, 'real-bin');
+    fs.mkdirSync(realBin, { recursive: true });
+    fs.writeFileSync(path.join(realBin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${realBin}:/usr/bin:/bin`;
+    let guarded: ReturnType<typeof createAutonomousCommandGuard>;
+    try {
+      guarded = createAutonomousCommandGuard({ cwd: workspace, env: { ...untrustedEnv, PATH: process.env.PATH } });
+    } finally {
+      process.env.PATH = originalPath;
+    }
 
     try {
       const blocked = spawnSync('jest', ['--version'], {

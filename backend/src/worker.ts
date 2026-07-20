@@ -434,7 +434,7 @@ async function synthesizeInterruptedStoryFailure(params: {
 async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   // Process all jobs concurrently — batchSize controls how many are fetched per poll,
   // but each spawns an independent child process that should run in parallel.
-  await Promise.allSettled(jobs.map(async (job) => {
+  const outcomes = await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
     logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:run received');
 
@@ -1027,6 +1027,41 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     logger.info({ runId, pid: child.pid }, '[worker] Engine spawned — releasing pg-boss job');
   }));
+
+  const unboundFailures: unknown[] = [];
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status !== 'rejected') continue;
+    const parsed = PipelineRunJobPayload.safeParse(jobs[index]?.data);
+    if (!parsed.success) {
+      unboundFailures.push(outcome.reason);
+      continue;
+    }
+    const runId = parsed.data.runId;
+    const reasonText = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+    const reason = /sandbox|isolation|bubblewrap/i.test(reasonText)
+      ? 'autonomous_sandbox_preflight_failed'
+      : /egress|broker/i.test(reasonText)
+        ? 'autonomous_model_egress_preflight_failed'
+        : 'worker_preflight_failed';
+    const failed = await queryOne<{ workspace_id: string }>(`
+      UPDATE pipeline_runs
+         SET status = 'failed', finished_at = NOW(), summary = $2
+       WHERE id = $1 AND status NOT IN ('done', 'failed', 'partial_failure', 'cancelled')
+       RETURNING workspace_id
+    `, [runId, reason]);
+    if (failed) {
+      await transitionRunLifecycle(runId, 'failed', {
+        owner: 'worker', process: 'fresh_run_preflight', reason,
+      });
+      await emitWalEvent('run_finished', failed.workspace_id, {
+        run_id: runId, status: 'failed', reason, source: 'worker', infra_error: true,
+      });
+    }
+    logger.error({ runId, reason }, '[worker] Fresh pipeline run rejected before spawn and was terminalized');
+  }
+  if (unboundFailures.length > 0) {
+    throw new AggregateError(unboundFailures, 'One or more pipeline:run jobs had invalid unbound payloads');
+  }
 }
 
 // ── Job handler: pipeline:retry ───────────────────────────────────────────

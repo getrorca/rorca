@@ -37,6 +37,19 @@ let workspace: string;
 let worktree: string;
 let release: RunReleaseIdentity;
 
+function exactAppToken() {
+  return {
+    token: 'memory-only', source: 'github-app-installation',
+    metadata: {
+      source: 'github-app-installation', bindingId: release.repository!.bindingId,
+      appId: 1, appSlug: 'rorca', installationId: release.repository!.installationId,
+      repositoryId: release.repository!.repositoryId,
+      repository: { owner: release.repository!.owner, name: release.repository!.name },
+      permissions: {}, expiresAt: '2026-07-20T07:00:00.000Z',
+    },
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-release-identity-'));
@@ -87,7 +100,7 @@ beforeEach(() => {
     owner: 'getrorca', name: 'rorca', source: 'github-app-installation', status: 'active',
     bindingId: release.repository!.bindingId, installationId: 71, repositoryId: 72,
   });
-  resolveToken.mockResolvedValue({ token: 'memory-only', source: 'github-app-installation' });
+  resolveToken.mockImplementation(async () => exactAppToken());
 });
 
 afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -106,13 +119,31 @@ test.each(['merge', 'pulls-write', 'repository-read', 'checks-write'] as const)(
       fs.writeFileSync(path.join(worktree, 'race.txt'), purpose);
       git(worktree, 'add', 'race.txt');
       git(worktree, 'commit', '-q', '-m', `race ${purpose}`);
-      return { token: 'memory-only', source: 'github-app-installation' };
+      return exactAppToken();
     });
     const actuator = jest.fn();
     await expect(withGithubReleaseActuation(release, purpose, actuator)).rejects.toThrow(/HEAD differs|HEAD advanced/);
     expect(actuator).not.toHaveBeenCalled();
   },
 );
+
+test('same-repository binding replacement during token resolution blocks actuation', async () => {
+  const replacement = {
+    workspaceId: release.workspaceId,
+    owner: 'getrorca', name: 'rorca', source: 'github-app-installation', status: 'active',
+    bindingId: '00000000-0000-4000-8000-000000000099', installationId: 99, repositoryId: 72,
+  };
+  getAuthority
+    .mockResolvedValueOnce({ ...replacement, bindingId: release.repository!.bindingId, installationId: 71 })
+    .mockResolvedValueOnce(replacement);
+  resolveToken.mockResolvedValueOnce({
+    ...exactAppToken(),
+    metadata: { ...exactAppToken().metadata, bindingId: replacement.bindingId, installationId: 99 },
+  });
+  const actuator = jest.fn();
+  await expect(withGithubReleaseActuation(release, 'merge', actuator)).rejects.toThrow(/authority changed|metadata/i);
+  expect(actuator).not.toHaveBeenCalled();
+});
 
 test('App credential failure fails closed without invoking an alternate actuator', async () => {
   resolveToken.mockRejectedValueOnce(new Error('installation token unavailable'));

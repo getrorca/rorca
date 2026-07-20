@@ -1,6 +1,6 @@
 {
-  "contractVersion": "11.0.0",
-  "generatedAt": "2026-07-19T20:41:16.959Z",
+  "contractVersion": "12.0.0",
+  "generatedAt": "2026-07-20T09:07:22.385Z",
   "routes": [
     {
       "method": "GET",
@@ -3893,51 +3893,6 @@
       "hash": "sha256:d69339acbddc4e82ede5e2cde4ba9a002cf60e7335f2f4a67485786df96014f3"
     },
     {
-      "method": "POST",
-      "path": "/api/pipeline/runs/{runId}/input",
-      "parameters": [
-        {
-          "name": "body",
-          "in": "body",
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "dataBase64": {
-                    "description": "Base64-encoded UTF-8 terminal input bytes from xterm.onData.",
-                    "type": "string"
-                  },
-                  "generationToken": {
-                    "description": "Exact active PTY generation token",
-                    "format": "uuid",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "generationToken",
-                  "dataBase64"
-                ],
-                "type": "object"
-              }
-            }
-          }
-        },
-        {
-          "name": "runId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "integer"
-          }
-        }
-      ],
-      "responseSchema": {
-        "200": {}
-      },
-      "hash": "sha256:2cf1e9e87e4fdf6f14a9e3d6514befe40dc24f4ffd24c392059d2d2d1a2bd5db"
-    },
-    {
       "method": "GET",
       "path": "/api/pipeline/runs/{runId}/liveness",
       "parameters": [
@@ -4071,87 +4026,6 @@
         }
       },
       "hash": "sha256:ca36a1dc66789a1c44012909df215def540b38084d19222f55c3970eb421174b"
-    },
-    {
-      "method": "GET",
-      "path": "/api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}",
-      "parameters": [
-        {
-          "name": "checkpointId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "format": "uuid",
-            "type": "string"
-          }
-        },
-        {
-          "name": "runId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "integer"
-          }
-        }
-      ],
-      "responseSchema": {
-        "200": {},
-        "404": {},
-        "422": {}
-      },
-      "hash": "sha256:7deaa77d1849fdbe288e5d37c9dbe3fea024b59844e7bfb011e6be5ee5e7b457"
-    },
-    {
-      "method": "POST",
-      "path": "/api/pipeline/runs/{runId}/pty/resize",
-      "parameters": [
-        {
-          "name": "body",
-          "in": "body",
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "cols": {
-                    "maximum": 500,
-                    "minimum": 1,
-                    "type": "integer"
-                  },
-                  "generationToken": {
-                    "description": "Exact active PTY generation token",
-                    "format": "uuid",
-                    "type": "string"
-                  },
-                  "rows": {
-                    "maximum": 200,
-                    "minimum": 1,
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "generationToken",
-                  "cols",
-                  "rows"
-                ],
-                "type": "object"
-              }
-            }
-          }
-        },
-        {
-          "name": "runId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "integer"
-          }
-        }
-      ],
-      "responseSchema": {
-        "200": {}
-      },
-      "hash": "sha256:90761864a665a7e02c8a8f6a440549b94847e23996030593a68528a05e4276c0"
     },
     {
       "method": "GET",

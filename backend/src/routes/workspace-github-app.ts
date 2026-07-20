@@ -26,6 +26,7 @@ import { extractGithubProviderError, isAuthoritativeGithubFailure } from '../lib
 import { assertGithubRepositoryIdentity } from '../lib/github-repository-authority';
 import { getIntegrationSecret, insertPreparedIntegrationSecret, prepareIntegrationSecret } from '../lib/integration-vault';
 import { requireProviderMutationAuthority } from '../lib/provider-mutation-authority';
+import { withGithubRepositoryAuthorityLock } from '../lib/release-identity';
 
 const router = Router({ strict: true, caseSensitive: true });
 const SETUP_TTL_MS = 10 * 60_000;
@@ -425,6 +426,7 @@ router.post('/:id/github/app/bind', requireProviderMutationAuthority, requireWor
     const replacementReason = typeof req.body?.replacementReason === 'string' ? req.body.replacementReason.trim() : '';
     if (!Number.isSafeInteger(installationId) || installationId <= 0 || !Number.isSafeInteger(repositoryId) || repositoryId <= 0) throw new ValidationError('installationId and repositoryId must be positive safe integers');
     assertGithubRepositoryIdentity(repoOwner, repoName);
+    await withGithubRepositoryAuthorityLock(workspaceId, repoOwner, repoName, async () => {
     const current = await getWorkspaceGithubAppBinding(workspaceId);
     if (current && replacementReason.length < 8) throw new ConflictError('Replacing the current App binding requires an audited replacementReason of at least 8 characters');
     const registration = await activeRegistration();
@@ -490,6 +492,7 @@ router.post('/:id/github/app/bind', requireProviderMutationAuthority, requireWor
       repository: { owner: repoOwner, name: repoName }, capabilities: { repository: true, actions: true, pulls: true, contents: true, statuses: true, checks: true, issues: true, webhooks: true },
       webhookHealth: { configured: true, signedDeliveryObserved: false, lastWebhookAt: null },
       nextAction: 'Credential and provider webhook configuration are ready. Await a valid signed delivery to establish observed webhook health.' });
+    });
   } catch (error) { next(error); }
 });
 

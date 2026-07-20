@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `11.0.0`
+Contract version: `12.0.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -61,12 +61,9 @@ Contract version: `11.0.0`
 | GET | `/api/pipeline/runs/{runId}` | path:runId (required) | `sha256:30043f8edd511560ee7725204fe083b92c03e29d0f3395c13f6e025e3550dc5e` |
 | POST | `/api/pipeline/runs/{runId}/cancel` | path:runId (required) | `sha256:ad6baae22c0e39dd86fef78bc70d6a748e644f8931b3e666db4e9790150b7da3` |
 | GET | `/api/pipeline/runs/{runId}/context-trace/{rawRef}` | path:rawRef (required), path:runId (required) | `sha256:d69339acbddc4e82ede5e2cde4ba9a002cf60e7335f2f4a67485786df96014f3` |
-| POST | `/api/pipeline/runs/{runId}/input` | body:dataBase64 (required), body:generationToken (required), path:runId (required) | `sha256:2cf1e9e87e4fdf6f14a9e3d6514befe40dc24f4ffd24c392059d2d2d1a2bd5db` |
 | GET | `/api/pipeline/runs/{runId}/liveness` | path:runId (required), query:storyId (optional) | `sha256:0dae8bc7840d62cd28caee483fc271bf96c6c4253aac1723a8ef41217b025bf3` |
 | GET | `/api/pipeline/runs/{runId}/log` | path:runId (required) | `sha256:46e8b2c0eace7e3cda5b3bf722724d4997719e6477091a3f280c98fe42142764` |
 | GET | `/api/pipeline/runs/{runId}/output` | header:Last-Event-ID (optional), path:runId (required), query:afterSequence (optional), query:generationToken (optional), query:outputGenerationId (optional), query:outputSource (optional), query:recoverTerminal (optional) | `sha256:ca36a1dc66789a1c44012909df215def540b38084d19222f55c3970eb421174b` |
-| GET | `/api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}` | path:checkpointId (required), path:runId (required) | `sha256:7deaa77d1849fdbe288e5d37c9dbe3fea024b59844e7bfb011e6be5ee5e7b457` |
-| POST | `/api/pipeline/runs/{runId}/pty/resize` | body:cols (required), body:generationToken (required), body:rows (required), path:runId (required) | `sha256:90761864a665a7e02c8a8f6a440549b94847e23996030593a68528a05e4276c0` |
 | GET | `/api/pipeline/runs/{runId}/retrieval-telemetry/{telemetryId}` | path:runId (required), path:telemetryId (required) | `sha256:79a73a02d19c6bedd4af114f4e25cd55bd631d570264d276f3a0b952472e6d1d` |
 | POST | `/api/pipeline/runs/{runId}/retry` | body:approvalToken (optional), body:approvedPreview (optional), body:cancelPreview (optional), body:forceSequential (optional), body:previewHash (optional), body:previewIdentity (optional), body:safeMode (optional), body:storyIds (optional), path:runId (required) | `sha256:38dd330b5ff3389c07cd6bf257b9965dbcd1f1ecd5b70e6525d5e5381af17d8b` |
 | POST | `/api/pipeline/task-manifests/trigger` | body:agentOverride (optional), body:autoMerge (optional), body:autoWorktree (optional), body:dryRun (optional), body:effortLevel (optional), body:executionEnvironment (optional), body:executionEnvironmentId (optional), body:idempotencyKey (required), body:manifest (required), body:mergeStrategy (optional), body:modelOverride (optional), body:terminalMode (optional), body:terminal_mode (optional), body:workspaceId (required) | `sha256:8beff74c282556146184c8baf891822626022fecfb02d921d3caa877f56c1bab` |

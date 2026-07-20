@@ -118,7 +118,7 @@ const evidence: GithubPrDeliveryEvidence = {
     state: 'open',
     draft: false,
     merged: false,
-    headRef: delivery.branch_name,
+    headRef: 'rorca/release/run-42-aaaaaaaaaaaa',
     baseRef: delivery.base_branch,
     headSha,
     baseSha,
@@ -210,7 +210,7 @@ describe('autonomous exact-SHA merge provider errors', () => {
     const fetchMock = jest.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
         state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: 'clean',
-        head: { sha: headSha, ref: delivery.branch_name },
+        head: { sha: headSha, ref: 'rorca/release/run-42-aaaaaaaaaaaa' },
         base: { sha: baseSha, ref: delivery.base_branch },
       }), { status: 200, headers: { 'content-type': 'application/json' } }))
       .mockResolvedValueOnce(mergeFailureResponse)

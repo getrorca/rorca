@@ -15,7 +15,7 @@ jest.mock('../release-identity', () => ({
   withRunReleaseLock: async (_identity: unknown, fn: () => Promise<unknown>) => fn(),
   withGithubReleaseActuation: async (identity: unknown, _purpose: unknown, fn: (value: unknown) => Promise<unknown>) => fn({
     identity,
-    authority: { owner: 'getrorca', name: 'rorca' },
+    authority: { owner: 'getrorca', name: 'rorca', repositoryId: 2 },
     credential: { token: 'memory-only', source: 'github-app-installation' },
   }),
 }));
@@ -36,6 +36,7 @@ import { createOrFinalizePullRequestForTests } from '../release-authority';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
+const BASE = 'd'.repeat(40);
 const releaseRef = `rorca/release/run-91-${A.slice(0, 12)}`;
 const row = {
   run_id: 91, workspace_id: 'ws-pr', spec_id: 'exact-pr', authorized_sha: A,
@@ -43,7 +44,7 @@ const row = {
   repository_owner: 'getrorca', repository_name: 'rorca', repository_authority_source: 'github-app-installation',
   repository_binding_id: 'binding', repository_installation_id: 1, repository_id: 2,
   merge_strategy: 'pr', auto_merge: false, external_send: true, identity_hash: 'c'.repeat(64),
-  status: 'processing', step_state: {}, base_branch: 'main', base_sha: 'd'.repeat(40),
+  status: 'processing', step_state: {}, base_branch: 'main', base_sha: BASE,
   provider_release_ref: releaseRef, integration_checkout_path: '/integration', merge_commit_sha: null, terminal_event_id: null,
 };
 
@@ -52,8 +53,16 @@ function response(body: unknown, status = 200): Response {
 }
 
 function ref(sha: string): Response { return response({ object: { sha } }); }
-function pr(sha: string, draft = true): Response {
-  return response({ number: 17, state: 'open', draft, head: { sha, ref: releaseRef } });
+function canonicalPr(number: number, sha = A, draft = false, overrides: Record<string, unknown> = {}) {
+  return {
+    number,
+    html_url: `https://github.com/getrorca/rorca/pull/${number}`,
+    state: 'open',
+    draft,
+    head: { sha, ref: releaseRef, repo: { id: 2, full_name: 'getrorca/rorca' } },
+    base: { sha: BASE, ref: 'main', repo: { id: 2, full_name: 'getrorca/rorca' } },
+    ...overrides,
+  };
 }
 
 beforeEach(() => { jest.clearAllMocks(); });
@@ -63,80 +72,56 @@ test('exact unique provider ref creates and verifies one PR', async () => {
     .mockResolvedValueOnce(ref(A))
     .mockResolvedValueOnce(response([]))
     .mockResolvedValueOnce(ref(A))
-    .mockResolvedValueOnce(response({ number: 17, draft: false }))
-    .mockResolvedValueOnce(pr(A, false));
+    .mockResolvedValueOnce(response({ number: 17 }))
+    .mockResolvedValueOnce(response(canonicalPr(17)));
   await expect(createOrFinalizePullRequestForTests(row as never, false)).resolves.toBe(17);
   expect(providerFetch.mock.calls.filter(([, init]) => (init as RequestInit).method === 'POST')).toHaveLength(1);
 });
 
-test('closed replacement create/verify crash converges to the one exact open PR on restart', async () => {
-  const closed = { number: 17, state: 'closed', draft: false, head: { sha: A, ref: releaseRef } };
-  const replacement = { number: 18, state: 'open', draft: false, head: { sha: A, ref: releaseRef } };
+test('closed replacement create/verify crash converges to one exact open PR on restart', async () => {
+  const closed = { number: 17, state: 'closed', head: { ref: releaseRef } };
+  const replacement = canonicalPr(18);
   providerFetch
-    // First attempt: replacement is created and verified, then the fixture
-    // models a crash before pipeline_runs/step_state persistence by simply
-    // calling the provider reconciler again.
-    .mockResolvedValueOnce(ref(A))
-    .mockResolvedValueOnce(response([closed]))
-    .mockResolvedValueOnce(ref(A))
-    .mockResolvedValueOnce(response({ number: 18, draft: false }))
-    .mockResolvedValueOnce(response(replacement))
-    // Restart: retain the closed PR as history and select the exact open one.
-    .mockResolvedValueOnce(ref(A))
-    .mockResolvedValueOnce(response([closed, replacement]));
-
+    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([closed]))
+    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response({ number: 18 })).mockResolvedValueOnce(response(replacement))
+    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([closed, replacement])).mockResolvedValueOnce(response(replacement));
   await expect(createOrFinalizePullRequestForTests(row as never, false)).resolves.toBe(18);
   await expect(createOrFinalizePullRequestForTests(row as never, false)).resolves.toBe(18);
   expect(providerFetch.mock.calls.filter(([, init]) => (init as RequestInit).method === 'POST')).toHaveLength(1);
 });
 
 test('multiple exact open PRs for the run-owned ref remain ambiguous and are rejected', async () => {
-  providerFetch
-    .mockResolvedValueOnce(ref(A))
-    .mockResolvedValueOnce(response([
-      { number: 17, state: 'open', draft: false, head: { sha: A, ref: releaseRef } },
-      { number: 18, state: 'open', draft: false, head: { sha: A, ref: releaseRef } },
-    ]));
+  providerFetch.mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([
+    canonicalPr(17), canonicalPr(18),
+  ]));
   await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/multiple open pull requests/);
-  expect(providerFetch.mock.calls.some(([, init]) => (init as RequestInit).method === 'POST')).toBe(false);
 });
 
-test('A-to-B advance before create blocks provider mutation', async () => {
+test('provider head advance before create blocks mutation', async () => {
   providerFetch.mockResolvedValueOnce(ref(B));
   await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/provider release ref differs/);
   expect(providerFetch.mock.calls.some(([, init]) => (init as RequestInit).method === 'POST')).toBe(false);
 });
 
-test('A-to-B advance after lookup and immediately before create blocks mutation', async () => {
-  providerFetch
-    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([])).mockResolvedValueOnce(ref(B));
-  await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/provider release ref differs/);
-  expect(providerFetch.mock.calls.some(([, init]) => (init as RequestInit).method === 'POST')).toBe(false);
-});
-
-test('A-to-B race during create is detected and the PR is quarantined', async () => {
+test('provider head race during create quarantines the untrusted PR', async () => {
   providerFetch
     .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([])).mockResolvedValueOnce(ref(A))
-    .mockResolvedValueOnce(response({ number: 17, draft: false })).mockResolvedValueOnce(pr(B, false))
+    .mockResolvedValueOnce(response({ number: 17 })).mockResolvedValueOnce(response(canonicalPr(17, B)))
     .mockResolvedValueOnce(response({ state: 'closed' }));
-  await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/during PR create.*quarantined/);
+  await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/created pull request differs.*quarantined/);
   expect(providerFetch.mock.calls.some(([, init]) => String((init as RequestInit).body).includes('"state":"closed"'))).toBe(true);
 });
 
-test('A-to-B race immediately before draft finalization quarantines without finalizing', async () => {
+test.each([
+  ['wrong base', { base: { sha: BASE, ref: 'develop', repo: { id: 2, full_name: 'getrorca/rorca' } } }, false],
+  ['wrong head repository', { head: { sha: A, ref: releaseRef, repo: { id: 99, full_name: 'other/repo' } } }, false],
+  ['wrong draft posture', { draft: true }, false],
+  ['wrong non-draft posture', { draft: false }, true],
+] as const)('recovered PR with %s is quarantined and never adopted', async (_label, overrides, requestedDraft) => {
+  const listed = canonicalPr(17, A, Boolean((overrides as { draft?: boolean }).draft), overrides as Record<string, unknown>);
   providerFetch
-    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([{ number: 17, state: 'open', draft: true, head: { sha: A, ref: releaseRef } }]))
-    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(pr(B, true)).mockResolvedValueOnce(response({ state: 'closed' }));
-  await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/before draft finalization.*quarantined/);
-  expect(providerFetch.mock.calls.some(([, init]) => String((init as RequestInit).body).includes('"draft":false'))).toBe(false);
-});
-
-test('A-to-B race during draft finalization is detected and quarantined', async () => {
-  providerFetch
-    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([{ number: 17, state: 'open', draft: true, head: { sha: A, ref: releaseRef } }]))
-    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(pr(A, true))
-    .mockResolvedValueOnce(response({ number: 17, draft: false })).mockResolvedValueOnce(pr(B, false))
-    .mockResolvedValueOnce(response({ state: 'closed' }));
-  await expect(createOrFinalizePullRequestForTests(row as never, false)).rejects.toThrow(/during draft finalization.*quarantined/);
-  expect(providerFetch.mock.calls.some(([, init]) => String((init as RequestInit).body).includes('"state":"closed"'))).toBe(true);
+    .mockResolvedValueOnce(ref(A)).mockResolvedValueOnce(response([listed]))
+    .mockResolvedValueOnce(response(listed)).mockResolvedValueOnce(response({ state: 'closed' }));
+  await expect(createOrFinalizePullRequestForTests(row as never, requestedDraft)).rejects.toThrow(/recovered pull request differs.*quarantined/);
+  expect(providerFetch.mock.calls.some(([, init]) => (init as RequestInit).method === 'POST')).toBe(false);
 });

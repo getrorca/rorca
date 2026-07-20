@@ -48,6 +48,7 @@ interface RunTerminalMetaState {
   ptyAvailable?: boolean;
   ptyUnavailableHint?: string | null;
   ptyGenerationId?: string | null;
+  evidenceGenerationId?: string | null;
   ptyGenerationToken?: string | null;
   ptyStoryId?: string | null;
   ptyAttempt?: number | null;
@@ -1392,6 +1393,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           pty_replay_source?: unknown;
           outputGenerationId?: string | null;
           output_generation_id?: string | null;
+          evidenceGenerationId?: string | null;
+          evidence_generation_id?: string | null;
           transcriptAvailable?: boolean;
           transcript_available?: boolean;
           archiveAvailable?: boolean;
@@ -1405,6 +1408,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const nextReplaySource = meta.outputSource ?? meta.output_source ?? meta.ptyReplaySource ?? meta.pty_replay_source;
         const nextGenerationId = meta.outputGenerationId ?? meta.output_generation_id
           ?? meta.ptyGenerationId ?? meta.pty_generation_id ?? null;
+        const nextEvidenceGenerationId = meta.evidenceGenerationId ?? meta.evidence_generation_id ?? nextGenerationId;
         const nextGenerationToken = meta.ptyGenerationToken ?? meta.pty_generation_token ?? null;
         const generationChanged = typeof nextGenerationId === 'string'
           && ptyGenerationIdRef.current !== null
@@ -1507,6 +1511,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           ptyAvailable: typeof meta.ptyAvailable === 'boolean' ? meta.ptyAvailable : undefined,
           ptyUnavailableHint,
           ptyGenerationId: typeof nextGenerationId === 'string' ? nextGenerationId : null,
+          evidenceGenerationId: typeof nextEvidenceGenerationId === 'string' ? nextEvidenceGenerationId : null,
           transcriptAvailable: meta.transcriptAvailable ?? meta.transcript_available ?? false,
           archiveAvailable: meta.archiveAvailable ?? meta.archive_available ?? false,
           expectedMaxLatencyMs: meta.ptyExpectedMaxLatencyMs ?? meta.pty_expected_max_latency_ms ?? null,
@@ -2269,9 +2274,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
         {resolvedMode === 'transcript' && (
           <RunTranscript
-            key={`${runId}:${terminalMeta.ptyGenerationId ?? 'legacy'}`}
+            key={`${runId}:${terminalMeta.evidenceGenerationId ?? terminalMeta.ptyGenerationId ?? 'legacy'}`}
             runId={runId}
-            generationId={terminalMeta.ptyGenerationId ?? null}
+            generationId={terminalMeta.evidenceGenerationId ?? terminalMeta.ptyGenerationId ?? null}
             available={terminalMeta.transcriptAvailable === true}
             archiveAvailable={terminalMeta.archiveAvailable === true}
             active={!streamEnded && terminalMeta.ptyGenerationActive === true}

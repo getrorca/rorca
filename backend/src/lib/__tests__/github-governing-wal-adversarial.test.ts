@@ -174,6 +174,9 @@ const projectionClient = {
         external_id: params[10], projection_status: 'pending', check_run_id: null,
         provider_head_sha: null, claim_token: null, claimed_at: null, attempts: 0,
         next_attempt_at: null,
+        repository_owner: params[11], repository_name: params[12],
+        repository_authority_source: params[13], repository_binding_id: params[14],
+        repository_installation_id: params[15], repository_id: params[16],
       };
       return { rows: [] };
     }
@@ -227,8 +230,18 @@ beforeEach(() => {
     }
     return { rowCount: 1 };
   });
-  resolveToken.mockResolvedValue({ token: 'host-token' });
-  getAuthority.mockResolvedValue({ owner: 'acme', name: 'widgets' });
+  resolveToken.mockResolvedValue({
+    token: 'host-token', source: 'github-app-installation',
+    metadata: {
+      source: 'github-app-installation', bindingId: 'binding-a', appId: 1, appSlug: 'rorca',
+      installationId: 11, repositoryId: 12, repository: { owner: 'acme', name: 'widgets' },
+      permissions: { checks: 'write' }, expiresAt: '2026-07-18T11:00:00.000Z',
+    },
+  });
+  getAuthority.mockResolvedValue({
+    owner: 'acme', name: 'widgets', source: 'github-app-installation',
+    bindingId: 'binding-a', installationId: 11, repositoryId: 12,
+  });
   assertCanonicalRunCheckout.mockImplementation(() => ({
     headSha: terminalRows.filter(row => row.status === 'pass').at(-1)?.commit_sha ?? 'b'.repeat(40),
     branchName: 'run/spec-a', cwd: '/tmp/canonical-run', repositoryTopLevel: '/tmp/canonical-run',
@@ -261,6 +274,7 @@ beforeEach(() => {
   queryOne.mockImplementation(async (sqlValue: unknown) => {
     const sql = String(sqlValue);
     if (sql.includes('SELECT id, workspace_id, spec_path, status, lifecycle_status')) return currentRun;
+    if (sql.includes('SELECT repository_owner, repository_name, repository_authority_source')) return undefined;
     if (sql.includes('SELECT pr.worktree_path')) {
       return { worktree_path: '/tmp/canonical-run', workspace_id: currentRun.workspace_id,
         branch_name: 'run/spec-a', workspace_path: '/tmp/canonical-run' };
@@ -604,7 +618,7 @@ describe('check run terminal completeness authority', () => {
     await handleCheckRunWalEvent(trustedEvent({
       eventType: 'run_finished', source: 'worker', payload: { status: 'done' },
     }));
-    expect(getAuthority).not.toHaveBeenCalled();
+    expect(getAuthority).toHaveBeenCalledTimes(1); // authority frozen during durable acceptance only
     expect(resolveToken).not.toHaveBeenCalled();
     expect(providerFetch).not.toHaveBeenCalled();
   });

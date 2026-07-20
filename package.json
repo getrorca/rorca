@@ -1,6 +1,6 @@
 {
   "name": "rorca",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "AI spec orchestration pipeline — turn plain-English briefs into validated, executed code",
   "type": "module",
   "workspaces": [

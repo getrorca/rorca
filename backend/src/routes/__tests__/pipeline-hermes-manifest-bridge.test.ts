@@ -222,6 +222,7 @@ jest.mock('../../lib/opencode-server', () => ({
 
 jest.mock('../../lib/auth-utils', () => ({
   authRequired: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireWorkspaceAdmin: () => (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
 
 jest.mock('../../worker', () => ({

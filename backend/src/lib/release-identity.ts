@@ -74,6 +74,26 @@ function sameRepository(
     && expected.repositoryId === actual.repositoryId;
 }
 
+function credentialMatchesRepository(
+  expected: NonNullable<RunReleaseIdentity['repository']>,
+  credential: ResolvedGitHubToken,
+): boolean {
+  if (expected.source === 'github-app-installation') {
+    const metadata = credential.source === 'github-app-installation' ? credential.metadata : null;
+    return Boolean(metadata && 'bindingId' in metadata
+      && metadata.bindingId === expected.bindingId
+      && metadata.installationId === expected.installationId
+      && metadata.repositoryId === expected.repositoryId
+      && metadata.repository.owner.toLowerCase() === expected.owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === expected.name.toLowerCase());
+  }
+  const metadata = credential.metadata;
+  return ['workspace-oauth', 'workspace-pat'].includes(credential.source)
+    && Boolean(metadata && 'fallback' in metadata
+      && metadata.repository.owner.toLowerCase() === expected.owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === expected.name.toLowerCase());
+}
+
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -121,6 +141,19 @@ async function acquireTarget(target: string, identity: RunReleaseIdentity): Prom
       await new Promise(resolve => setTimeout(resolve, 25));
     }
   }
+}
+
+export async function withGithubRepositoryAuthorityLock<T>(
+  workspaceId: string,
+  owner: string,
+  name: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = `authority:${workspaceId}:${owner.toLowerCase()}/${name.toLowerCase()}`;
+  const target = path.join(os.tmpdir(), `rorca-release-${crypto.createHash('sha256').update(key).digest('hex')}.lock`);
+  const release = await acquireTarget(target, { runId: 0 } as RunReleaseIdentity);
+  try { return await operation(); }
+  finally { release(); }
 }
 
 export async function withRunReleaseLock<T>(
@@ -198,27 +231,42 @@ export async function withGithubReleaseActuation<T>(
   return withRunReleaseLock(identity, async () => {
     await revalidateRunReleaseIdentity(identity);
     if (!identity.repository) throw new Error('release has no frozen repository authority');
-    const authority = await getGithubRepositoryAuthority(identity.workspaceId, {
-      requireActive: true,
-      expectedRepository: identity.repository,
-    });
-    if (!authority || !sameRepository(identity.repository, authority)) {
-      throw new Error('canonical repository authority changed after release authorization');
-    }
-    const credential = await resolveWorkspaceGitHubToken(identity.workspaceId, {
-      repository: { owner: authority.owner, name: authority.name },
-      purpose,
-    });
-    if (!credential) throw new Error('purpose-scoped release credential is unavailable');
-    if (authority.source === 'github-app-installation'
-      && credential.source !== 'github-app-installation') {
-      throw new Error('GitHub App release authority cannot downgrade to legacy credentials');
-    }
-    if (authority.source === 'pat-oauth-fallback'
-      && !['workspace-oauth', 'workspace-pat'].includes(credential.source)) {
-      throw new Error('legacy credential was not explicitly selected by repository authority');
-    }
-    await revalidateRunReleaseIdentity(identity);
-    return actuator({ identity, authority, credential });
+    return withGithubRepositoryAuthorityLock(
+      identity.workspaceId,
+      identity.repository.owner,
+      identity.repository.name,
+      async () => {
+        const authority = await getGithubRepositoryAuthority(identity.workspaceId, {
+          requireActive: true,
+          expectedRepository: identity.repository!,
+        });
+        if (!authority || !sameRepository(identity.repository!, authority)) {
+          throw new Error('canonical repository authority changed after release authorization');
+        }
+        const credential = await resolveWorkspaceGitHubToken(identity.workspaceId, {
+          repository: { owner: authority.owner, name: authority.name },
+          purpose,
+        });
+        if (!credential) throw new Error('purpose-scoped release credential is unavailable');
+        if (identity.repository!.source === 'github-app-installation'
+          && credential.source !== 'github-app-installation') {
+          throw new Error('GitHub App release authority cannot downgrade to legacy credentials');
+        }
+        if (identity.repository!.source === 'pat-oauth-fallback'
+          && !['workspace-oauth', 'workspace-pat'].includes(credential.source)) {
+          throw new Error('legacy credential was not explicitly selected by repository authority');
+        }
+        const postTokenAuthority = await getGithubRepositoryAuthority(identity.workspaceId, {
+          requireActive: true,
+          expectedRepository: identity.repository!,
+        });
+        if (!postTokenAuthority || !sameRepository(identity.repository!, postTokenAuthority)
+          || !credentialMatchesRepository(identity.repository!, credential)) {
+          throw new Error('GitHub credential metadata or canonical authority changed during token resolution');
+        }
+        await revalidateRunReleaseIdentity(identity);
+        return actuator({ identity, authority: postTokenAuthority, credential });
+      },
+    );
   });
 }

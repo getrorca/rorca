@@ -79,8 +79,8 @@ export function deriveAutonomousBackendJestEnv(env: Record<string, string | unde
   return explicitTestUrl ? buildAutonomousBackendJestEnv(explicitTestUrl) : null;
 }
 
-function resolveRealCommand(command: string): string | null {
-  const pathParts = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+function resolveRealCommand(command: string, searchPath: string | undefined): string | null {
+  const pathParts = (searchPath ?? '').split(path.delimiter).filter(Boolean);
   for (const part of pathParts) {
     if (part.includes(GUARD_DIR_PREFIX)) continue;
     const candidate = path.join(part, command);
@@ -224,7 +224,7 @@ export function createAutonomousCommandGuard(options: AutonomousCommandGuardOpti
   ];
 
   for (const command of commands) {
-    writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command), profile));
+    writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command, options.env.PATH), profile));
   }
 
   const autonomousBackendJestEnv = deriveAutonomousBackendJestEnv(options.env);

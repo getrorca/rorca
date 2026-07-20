@@ -187,6 +187,33 @@ export function resolveRawArchiveSegmentPath(
     return realCandidate;
   }
 
+  // Creation is permitted only below an already-created, real archive parent.
+  // Reject every existing symlink component before opening with O_NOFOLLOW.
+  let realRoot: string;
+  try {
+    realRoot = fs.realpathSync(archiveRoot);
+    let current = archiveRoot;
+    const parentRelative = path.relative(archiveRoot, path.dirname(candidate));
+    for (const part of parentRelative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, part);
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new ForbiddenError('Raw archive creation parent is not a real directory');
+      }
+    }
+    const realParent = fs.realpathSync(path.dirname(candidate));
+    const parentWithinRoot = path.relative(realRoot, realParent);
+    if (parentWithinRoot.startsWith('..') || path.isAbsolute(parentWithinRoot)) {
+      throw new ForbiddenError('Raw archive creation parent resolves outside its archive root');
+    }
+  } catch (error) {
+    if (error instanceof ForbiddenError) throw error;
+    throw new RawArchiveIntegrityError('Raw archive creation parent is unavailable', {
+      segment: segmentRelativePath,
+      cause: error instanceof Error && 'code' in error ? String((error as NodeJS.ErrnoException).code) : 'unavailable',
+    });
+  }
+
   return candidate;
 }
 
@@ -250,7 +277,10 @@ async function listSegmentRows(manifestId: string): Promise<ArchiveSegmentRow[]>
 }
 
 async function persistCompleteSegment(manifest: ArchiveManifestRow, segment: PendingSegment): Promise<void> {
-  const compressed = fs.readFileSync(segment.absolutePath);
+  const readFd = fs.openSync(segment.absolutePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let compressed: Buffer;
+  try { compressed = fs.readFileSync(readFd); }
+  finally { fs.closeSync(readFd); }
   const compressedSize = compressed.length;
   const digest = hashContent(compressed);
   const rawSize = segment.rawEnd - segment.rawStart;
@@ -319,7 +349,12 @@ export class RawPtyArchiveWriter {
         const slice = bytes.subarray(offset, offset + take);
         // Each append is a complete gzip member. Concatenated members preserve
         // exact byte order and remain standards-compliant gzip streams.
-        fs.appendFileSync(this.current.absolutePath, gzipSync(slice, { level: 6 }));
+        const appendFd = fs.openSync(
+          this.current.absolutePath,
+          fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
+        );
+        try { fs.writeSync(appendFd, gzipSync(slice, { level: 6 })); }
+        finally { fs.closeSync(appendFd); }
         this.current.rawEnd += slice.length;
         this.rawOffset += slice.length;
         offset += slice.length;
@@ -375,7 +410,11 @@ export class RawPtyArchiveWriter {
     );
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o700 });
     // Exclusive creation prevents a resumed writer from overwriting evidence.
-    const fd = fs.openSync(absolutePath, 'wx', 0o600);
+    const fd = fs.openSync(
+      absolutePath,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
     fs.closeSync(fd);
     return {
       segmentIndex,
@@ -419,6 +458,24 @@ export class RawPtyArchiveWriter {
   }
 }
 
+function ensureSecureArchiveGenerationDirectory(workspacePath: string, archiveRootRelative: string, generationId: string): string {
+  const workspaceRoot = fs.realpathSync(workspacePath);
+  let current = workspaceRoot;
+  for (const part of [...archiveRootRelative.split(/[\\/]/).filter(Boolean), generationId]) {
+    current = path.join(current, part);
+    if (!fs.existsSync(current)) fs.mkdirSync(current, { mode: 0o700 });
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new RawArchiveWriteError('Raw PTY archive directory is not a trusted real directory');
+    }
+    const relative = path.relative(workspaceRoot, fs.realpathSync(current));
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new RawArchiveWriteError('Raw PTY archive directory escapes its workspace');
+    }
+  }
+  return current;
+}
+
 /** Create or safely resume a generation archive after reconciling prior files. */
 export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<RawPtyArchiveWriter> {
   const identity = await queryOne<{
@@ -435,9 +492,7 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
   if (!identity) throw new ConflictError('PTY generation identity is stale or mismatched');
   if (!identity.is_active) throw new ConflictError('Cannot open a raw archive writer for a closed PTY generation');
 
-  const archiveRoot = path.resolve(identity.workspace_path, PTY_RAW_ARCHIVE_ROOT);
-  const generationDir = path.resolve(archiveRoot, generation.generationId);
-  fs.mkdirSync(generationDir, { recursive: true, mode: 0o700 });
+  ensureSecureArchiveGenerationDirectory(identity.workspace_path, PTY_RAW_ARCHIVE_ROOT, generation.generationId);
   const retentionDays = getRawArchiveRetentionDays();
   const rows = await query<ArchiveManifestRow>(
     `INSERT INTO pty_raw_archive_manifests
@@ -480,9 +535,11 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
 async function reconcileRawPtyArchive(manifest: ArchiveManifestRow): Promise<void> {
   const workspacePath = manifest.workspace_path;
   if (!workspacePath) throw new RawArchiveIntegrityError('Archive workspace path is unavailable');
-  const archiveRoot = path.resolve(workspacePath, manifest.archive_root_relative);
-  const generationDir = path.resolve(archiveRoot, manifest.generation_id);
-  fs.mkdirSync(generationDir, { recursive: true, mode: 0o700 });
+  const generationDir = ensureSecureArchiveGenerationDirectory(
+    workspacePath,
+    manifest.archive_root_relative,
+    manifest.generation_id,
+  );
 
   const names = fs.readdirSync(generationDir)
     .filter((name) => /^segment-\d{6}\.gz$/.test(name))

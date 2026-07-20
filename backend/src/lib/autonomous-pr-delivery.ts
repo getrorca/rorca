@@ -108,6 +108,10 @@ interface RunDeliveryBinding {
   workspace_path: string;
   repo_owner: string;
   repo_name: string;
+  release_provider_ref: string | null;
+  release_authorized_sha: string | null;
+  release_base_branch: string | null;
+  release_base_sha: string | null;
   compiler_version: string | null;
   risk_level: string | null;
   risk_assignment_count: number | string | null;
@@ -175,6 +179,10 @@ async function bindingForRun(workspaceId: string, runId: number): Promise<RunDel
            r.pr_number, r.merge_strategy, r.status, r.agent_type, r.agent_model,
            r.terminal_mode, r.thinking_enabled, r.thinking_budget, r.effort_level,
            w.path AS workspace_path, gh.repo_owner, gh.repo_name,
+           ri.provider_release_ref AS release_provider_ref,
+           ri.authorized_sha AS release_authorized_sha,
+           ri.base_branch AS release_base_branch,
+           ri.base_sha AS release_base_sha,
            cp.compiler_version,
            cp.provenance_json->>'riskLevel' AS risk_level,
            cp.provenance_json->>'riskAssignmentCount' AS risk_assignment_count,
@@ -183,6 +191,8 @@ async function bindingForRun(workspaceId: string, runId: number): Promise<RunDel
     JOIN workspaces w ON w.id = r.workspace_id
     JOIN github_workspace_repository_authority gh
       ON gh.workspace_id = r.workspace_id AND gh.authority_status = 'active'
+    JOIN pipeline_run_release_intents ri
+      ON ri.run_id = r.id AND ri.workspace_id = r.workspace_id
     LEFT JOIN LATERAL (
       SELECT compiler_version, provenance_json
       FROM ssdlc_compiled_plans
@@ -308,7 +318,9 @@ export async function queueAutonomousPrDeliveryForRun(input: {
   }
   if (binding.merge_strategy !== 'pr') return { queued: false, deliveryId: null, reason: 'merge_strategy_not_pr', replayed: false };
   if (binding.status !== 'done') return { queued: false, deliveryId: null, reason: 'run_not_complete', replayed: false };
-  if (!binding.branch_name || !binding.worktree_path || !binding.pr_number) {
+  if (!binding.branch_name || !binding.worktree_path || !binding.pr_number
+    || !binding.release_provider_ref || !binding.release_authorized_sha
+    || !binding.release_base_branch || !binding.release_base_sha) {
     return { queued: false, deliveryId: null, reason: 'canonical_pr_binding_incomplete', replayed: false };
   }
   if (!['low', 'medium', 'high', 'critical'].includes(binding.risk_level ?? '')
@@ -351,6 +363,12 @@ export async function queueAutonomousPrDeliveryForRun(input: {
   if (!worktree.ok) return { queued: false, deliveryId: null, reason: `worktree_guard:${worktree.reason}`, replayed: false };
   const headSha = (await simpleGit(binding.worktree_path).revparse(['HEAD'])).trim().toLowerCase();
   if (!isFullGitObjectId(headSha)) throw new UnprocessableError('Run branch HEAD is not a full Git SHA', 'REVISION_UNAVAILABLE');
+  if (headSha !== binding.release_authorized_sha.toLowerCase()) {
+    return { queued: false, deliveryId: null, reason: 'release_authorized_sha_mismatch', replayed: false };
+  }
+  if (policy.baseBranch !== binding.release_base_branch) {
+    return { queued: false, deliveryId: null, reason: 'policy_release_base_mismatch', replayed: false };
+  }
   const id = crypto.randomUUID();
   const sourceRequestId = input.sourceRequestId ?? `autonomous-pr-delivery:${input.runId}:${headSha}`;
   const deadline = new Date(Date.now() + policy.retryBudget.maxElapsedMinutes * 60_000);
@@ -623,7 +641,7 @@ async function providerMerge(
   };
   if (!preflight.ok || currentPr.state !== 'open' || currentPr.draft === true || currentPr.merged === true
     || currentPr.head?.sha?.toLowerCase() !== delivery.current_head_sha
-    || currentPr.head?.ref !== delivery.branch_name || currentPr.base?.ref !== delivery.base_branch
+    || currentPr.head?.ref !== releaseIdentity.providerReleaseRef || currentPr.base?.ref !== releaseIdentity.baseBranch
     || currentPr.base?.sha?.toLowerCase() !== evidence.pullRequest.baseSha
     || currentPr.mergeable !== true || !['clean', 'has_hooks'].includes(String(currentPr.mergeable_state ?? ''))) {
     throw new ConflictError('GitHub PR changed after final authorization observation');
@@ -879,23 +897,28 @@ export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Pr
       AND workspace_id = $2 AND run_id = $3
   `, [evidence.id, delivery.workspace_id, delivery.run_id]);
   if (!lifecycleRows?.merge_id) return false;
-  const token = await resolveWorkspaceGitHubToken(delivery.workspace_id, {
-    repository: { owner: delivery.repo_owner, name: delivery.repo_name },
-    purpose: 'reviewed-delivery',
+  const releaseIdentity = await loadRunReleaseIdentity(Number(delivery.run_id), delivery.current_head_sha);
+  const observed = await withGithubReleaseActuation(releaseIdentity, 'reviewed-delivery', async ({ authority, credential }) => {
+    if (authority.owner !== delivery.repo_owner || authority.name !== delivery.repo_name) return null;
+    const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
+      `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`,
+      { headers: { Authorization: `Bearer ${credential.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
+    ));
+    const pr = await response.json().catch(() => ({})) as {
+      merged?: boolean;
+      merged_at?: string;
+      merge_commit_sha?: string;
+      head?: { sha?: string; ref?: string };
+      base?: { ref?: string };
+    };
+    if (!response.ok || pr.merged !== true || pr.head?.sha?.toLowerCase() !== delivery.current_head_sha
+      || pr.head?.ref !== releaseIdentity.providerReleaseRef
+      || pr.base?.ref !== releaseIdentity.baseBranch
+      || !isFullGitObjectId(pr.merge_commit_sha)) return null;
+    return pr;
   });
-  if (!token) return false;
-  const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch,
-    `https://api.github.com/repos/${encodeURIComponent(delivery.repo_owner)}/${encodeURIComponent(delivery.repo_name)}/pulls/${number(delivery.pr_number)}`,
-    { headers: { Authorization: `Bearer ${token.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } },
-  ));
-  const pr = await response.json().catch(() => ({})) as {
-    merged?: boolean;
-    merged_at?: string;
-    merge_commit_sha?: string;
-    head?: { sha?: string };
-  };
-  if (!response.ok || pr.merged !== true || pr.head?.sha?.toLowerCase() !== delivery.current_head_sha
-    || !isFullGitObjectId(pr.merge_commit_sha)) return false;
+  if (!observed || !isFullGitObjectId(observed.merge_commit_sha)) return false;
+  const pr = observed;
   const lifecycle: DeliveryLifecycleBridgeResult = {
     validationEvidenceId: lifecycleRows.validation_id ?? lifecycleRows.merge_id,
     mergeEvidenceId: lifecycleRows.merge_id,
@@ -912,7 +935,7 @@ export async function reconcileAutonomousPrDeliveryMerge(deliveryId: string): Pr
     delivery,
     evidence,
     lifecycle,
-    mergedSha: pr.merge_commit_sha,
+    mergedSha: pr.merge_commit_sha!,
     responseHash: sha({ merged: true, reconciledAfterCrash: true, sha: pr.merge_commit_sha }),
     mergedAt: pr.merged_at ?? new Date().toISOString(),
   });

@@ -2822,10 +2822,18 @@ function resolveTaskManifestExecutionEnvironment(
   const bridgeSupported = hasExecutionEnvironmentSupport();
   const requestedEnvironment = body.executionEnvironment ?? manifest.execution.executionEnvironment ?? 'remote-rorca';
   const requestedEnvironmentId = body.executionEnvironmentId ?? manifest.execution.executionEnvironmentId;
-  const resolved = resolveExecutionEnvironment(requestedEnvironment);
+  // External Hermes labels are advisory compatibility metadata, not authority
+  // to select a Rorca execution engine. Unknown labels fail safely onto the
+  // remote broker and are reported as unsupported. The recognized local-user
+  // value still traverses the strict resolver and fails before insertion when
+  // no signed local execution bridge is available.
+  const recognizedEnvironment = requestedEnvironment === 'remote-rorca' || requestedEnvironment === 'local-user';
+  const resolved = recognizedEnvironment
+    ? resolveExecutionEnvironment(requestedEnvironment)
+    : { requested: 'remote-rorca' as const, effective: 'remote-rorca' as const };
 
   return {
-    supported: bridgeSupported,
+    supported: bridgeSupported && recognizedEnvironment,
     executionEnvironment: resolved.effective,
     ...(requestedEnvironmentId ? { executionEnvironmentId: requestedEnvironmentId } : {}),
   };
@@ -6434,9 +6442,9 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Resize the live PTY terminal for a running pipeline run
  *     operationId: resizePipelineRunPty
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Terminal resize is a local run-control operation for an already-running user-owned pipeline."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Terminal resize requires the operator-only generation credential and is excluded from MCP."
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: runId
@@ -6464,6 +6472,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
 
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
+    if (!isSuperUser(req.user)) throw new ForbiddenError('PTY controls require local operator admin access');
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
       throw new ValidationError('generationToken must be a UUID');
     }
@@ -6504,9 +6513,9 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Send keyboard input to the live PTY for a running pipeline run
  *     operationId: sendPipelineRunInput
- *     x-rorca-tier: public
- *     x-rorca-rationale: "PTY stdin is local interactive run control for an already-running user-owned pipeline in single-user mode."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "PTY stdin requires the operator-only generation credential and is excluded from MCP."
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: runId
@@ -6533,6 +6542,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
     if (isNaN(runId)) {
       throw new ValidationError('Invalid runId');
     }
+    if (!isSuperUser(req.user)) throw new ForbiddenError('PTY controls require local operator admin access');
     if (!PTY_AVAILABLE) {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
@@ -6600,6 +6610,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     operationId: getPipelinePtyControl
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "The generation credential grants terminal input/resize authority and must remain operator-only and outside SSE telemetry."
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: runId
@@ -6628,9 +6639,9 @@ router.get('/runs/:runId/pty/control', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Fetch a validated PTY terminal-state checkpoint
  *     operationId: getPipelinePtyCheckpoint
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only, checksummed terminal recovery state for local run reattachment."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Serialized terminal state can contain sensitive operator/model content and remains operator-only outside MCP."
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: runId
@@ -6649,6 +6660,7 @@ router.get('/runs/:runId/pty/checkpoints/:checkpointId', async (req: Request, re
   const runId = Number(req.params.runId);
   const checkpointId = String(req.params.checkpointId);
   if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!isSuperUser(req.user)) throw new ForbiddenError('PTY checkpoints require local operator admin access');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(checkpointId)) {
     throw new ValidationError('checkpointId must be a UUID');
   }
@@ -6804,7 +6816,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let hasResumeCursor = resumeCursor !== null;
   let lastSequence = resumeCursor?.sequence ?? 0;
   const generationReaderEnabled = isPtyGenerationReaderEnabled();
-  const preselectedPtyGeneration = isPtyTerminalMode(normalizeTerminalMode(runRow.terminal_mode)) && generationReaderEnabled
+  // Structured Pi runs persist generation-scoped transcript evidence even when
+  // their renderer remains ansi-html. Resolve the generation independently of
+  // renderer choice so API/UI transcript discovery is never lost.
+  const preselectedPtyGeneration = generationReaderEnabled
     ? await getRunPtyGeneration(runId, requestedGenerationToken)
     : null;
   if (requestedGenerationToken && !preselectedPtyGeneration) {
@@ -6855,6 +6870,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
   const configuredPtyMode = isPtyTerminalMode(requestedTerminalMode);
   const requestedPtyMode = configuredPtyMode && generationReaderEnabled;
+  const selectedEvidenceGeneration = preselectedPtyGeneration;
   let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
   const ptyStatusAtOpen = selectedPtyGeneration?.status ?? null;
   // An active PTY run is legitimately session-pending while context routing and
@@ -6907,7 +6923,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     return;
   }
 
-  const evidenceAvailabilityAtOpen = await getRunOutputEvidenceAvailability(outputGenerationId);
+  const evidenceGenerationId = selectedEvidenceGeneration?.generationId ?? null;
+  const evidenceAvailabilityAtOpen = await getRunOutputEvidenceAvailability(evidenceGenerationId);
   const checkpointSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyCheckpointSequence ?? 0);
   const firstRetainedSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyFirstRetainedSequence ?? 1);
   // This authoritative identity frame must precede reset/checkpoint and deltas.
@@ -6918,6 +6935,12 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     output_source: replaySource,
     outputGenerationId,
     output_generation_id: outputGenerationId,
+    evidenceGenerationId,
+    evidence_generation_id: evidenceGenerationId,
+    evidenceStoryId: selectedEvidenceGeneration?.storyId ?? null,
+    evidence_story_id: selectedEvidenceGeneration?.storyId ?? null,
+    evidenceAttempt: selectedEvidenceGeneration?.attempt ?? null,
+    evidence_attempt: selectedEvidenceGeneration?.attempt ?? null,
     storyId: selectedPtyGeneration?.storyId ?? null,
     story_id: selectedPtyGeneration?.storyId ?? null,
     attempt: selectedPtyGeneration?.attempt ?? null,

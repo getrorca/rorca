@@ -63,6 +63,14 @@ describe('GitHub authority × parallel-wave reconciliation collisions', () => {
     expect(snapshot).toBeGreaterThan(egress);
     expect(manifestArg).toBeGreaterThan(snapshot);
     expect(spawn).toBeGreaterThan(manifestArg);
+    const outcomes = handler.indexOf('const outcomes = await Promise.allSettled');
+    const terminalization = handler.indexOf("process: 'fresh_run_preflight'", outcomes);
+    const failedUpdate = handler.indexOf("SET status = 'failed'", outcomes);
+    const unboundReject = handler.indexOf('throw new AggregateError', terminalization);
+    expect(outcomes).toBeGreaterThan(0);
+    expect(failedUpdate).toBeGreaterThan(outcomes);
+    expect(terminalization).toBeGreaterThan(failedUpdate);
+    expect(unboundReject).toBeGreaterThan(terminalization);
   });
 
   test('wave settlement cannot become pass before integration and durable result authority', () => {

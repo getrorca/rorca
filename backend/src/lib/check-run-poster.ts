@@ -14,7 +14,7 @@ import {
   type WalEvent,
 } from './sse-hub';
 import { execute, query, queryOne, transaction } from '../db/index';
-import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { resolveWorkspaceGitHubToken, type ResolvedGitHubToken } from './github-token-resolver';
 import {
   getGithubRepositoryAuthority,
   githubRepoApiUrl,
@@ -35,6 +35,7 @@ import {
 } from './github-poster-authority';
 import { ConflictError } from './errors';
 import { assertCanonicalRunCheckout } from './run-git-authority';
+import { withGithubRepositoryAuthorityLock } from './release-identity';
 
 interface PipelineRunRow {
   worktree_path: string | null;
@@ -95,6 +96,12 @@ interface ProjectionRow {
   claimed_at: string | null;
   attempts: number;
   next_attempt_at: string | null;
+  repository_owner: string;
+  repository_name: string;
+  repository_authority_source: 'github-app-installation' | 'pat-oauth-fallback';
+  repository_binding_id: string | null;
+  repository_installation_id: number | string | null;
+  repository_id: number | string | null;
 }
 
 interface ProjectionClaim extends ProjectionRow {
@@ -248,6 +255,53 @@ function startedPayload(runId: number): ProjectionPayload {
   };
 }
 
+interface ProjectionAuthority {
+  owner: string;
+  name: string;
+  source: 'github-app-installation' | 'pat-oauth-fallback';
+  bindingId: string | null;
+  installationId: number | null;
+  repositoryId: number | null;
+}
+
+async function resolveProjectionAuthority(workspaceId: string, runId: number, headSha: string): Promise<ProjectionAuthority> {
+  const frozen = await queryOne<{
+    repository_owner: string | null; repository_name: string | null;
+    repository_authority_source: ProjectionAuthority['source'] | null;
+    repository_binding_id: string | null; repository_installation_id: number | string | null;
+    repository_id: number | string | null; authorized_sha: string;
+  }>(`SELECT repository_owner, repository_name, repository_authority_source,
+             repository_binding_id, repository_installation_id, repository_id, authorized_sha
+        FROM pipeline_run_release_intents WHERE run_id = $1 AND workspace_id = $2`, [runId, workspaceId]);
+  if (frozen) {
+    if (!frozen.repository_owner || !frozen.repository_name || !frozen.repository_authority_source
+      || frozen.authorized_sha.toLowerCase() !== headSha.toLowerCase()) {
+      throw new ConflictError('Release intent cannot freeze this Check Run projection authority');
+    }
+    return {
+      owner: frozen.repository_owner, name: frozen.repository_name, source: frozen.repository_authority_source,
+      bindingId: frozen.repository_binding_id,
+      installationId: frozen.repository_installation_id == null ? null : Number(frozen.repository_installation_id),
+      repositoryId: frozen.repository_id == null ? null : Number(frozen.repository_id),
+    };
+  }
+  const current = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
+  if (!current) throw new ConflictError('Canonical GitHub repository authority is unavailable');
+  return {
+    owner: current.owner, name: current.name, source: current.source,
+    bindingId: current.bindingId, installationId: current.installationId, repositoryId: current.repositoryId,
+  };
+}
+
+function projectionAuthorityMatches(row: ProjectionRow, authority: ProjectionAuthority): boolean {
+  return row.repository_owner.toLowerCase() === authority.owner.toLowerCase()
+    && row.repository_name.toLowerCase() === authority.name.toLowerCase()
+    && row.repository_authority_source === authority.source
+    && row.repository_binding_id === authority.bindingId
+    && Number(row.repository_installation_id ?? 0) === Number(authority.installationId ?? 0)
+    && Number(row.repository_id ?? 0) === Number(authority.repositoryId ?? 0);
+}
+
 async function persistDesiredProjection(input: {
   event: WalEvent;
   runId: number;
@@ -257,6 +311,7 @@ async function persistDesiredProjection(input: {
   headSha: string;
   conclusion: 'success' | 'failure' | 'neutral' | null;
   payload: ProjectionPayload;
+  authority: ProjectionAuthority;
 }): Promise<void> {
   const eventHash = input.event.event_identity_hash;
   if (!eventHash || !/^[0-9a-f]{64}$/.test(eventHash)) {
@@ -277,7 +332,8 @@ async function persistDesiredProjection(input: {
     )).rows[0];
     if (existing && (existing.workspace_id !== input.workspaceId
       || existing.spec_id !== input.specId
-      || existing.external_id !== externalId(input.runId))) {
+      || existing.external_id !== externalId(input.runId)
+      || !projectionAuthorityMatches(existing, input.authority))) {
       throw new ConflictError('GitHub Check Run projection does not own the canonical run identity');
     }
     if (existing?.desired_state === 'completed') {
@@ -293,12 +349,15 @@ async function persistDesiredProjection(input: {
         INSERT INTO github_check_run_projections (
           run_id, workspace_id, spec_id, desired_event_id,
           desired_event_identity_hash, desired_state, head_sha, conclusion,
-          desired_payload, desired_payload_hash, external_id, projection_status
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,'pending')
+          desired_payload, desired_payload_hash, external_id, projection_status,
+          repository_owner, repository_name, repository_authority_source,
+          repository_binding_id, repository_installation_id, repository_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,'pending',$12,$13,$14,$15,$16,$17)
       `, [
         input.runId, input.workspaceId, input.specId, input.event.id, eventHash,
         input.state, input.headSha, input.conclusion, JSON.stringify(input.payload),
-        payloadHash, externalId(input.runId),
+        payloadHash, externalId(input.runId), input.authority.owner, input.authority.name,
+        input.authority.source, input.authority.bindingId, input.authority.installationId, input.authority.repositoryId,
       ]);
       return;
     }
@@ -328,6 +387,7 @@ export async function acceptCheckRunWalEvent(event: WalEvent): Promise<number | 
       || !['starting', 'pty_attached', 'running'].includes(authorized.run.lifecycleStatus)) return null;
     const headSha = await resolveBranchHead(authorized.run.id, authorized.run.workspaceId);
     if (!isFullGitObjectId(headSha)) return null;
+    const authority = await resolveProjectionAuthority(authorized.run.workspaceId, authorized.run.id, headSha);
     await persistDesiredProjection({
       event,
       runId: authorized.run.id,
@@ -337,6 +397,7 @@ export async function acceptCheckRunWalEvent(event: WalEvent): Promise<number | 
       headSha: headSha.toLowerCase(),
       conclusion: null,
       payload: startedPayload(authorized.run.id),
+      authority,
     });
     return authorized.run.id;
   }
@@ -352,6 +413,7 @@ export async function acceptCheckRunWalEvent(event: WalEvent): Promise<number | 
   const localHead = complete.finalCommitSha
     ?? await resolveBranchHead(complete.run.id, complete.run.workspaceId);
   if (!isFullGitObjectId(localHead)) return null;
+  const authority = await resolveProjectionAuthority(complete.run.workspaceId, complete.run.id, localHead);
   await persistDesiredProjection({
     event,
     runId: complete.run.id,
@@ -361,6 +423,7 @@ export async function acceptCheckRunWalEvent(event: WalEvent): Promise<number | 
     headSha: localHead.toLowerCase(),
     conclusion,
     payload: terminalPayload(complete, conclusion),
+    authority,
   });
   return complete.run.id;
 }
@@ -394,16 +457,35 @@ async function claimProjection(runId: number): Promise<ProjectionClaim | null> {
   });
 }
 
-async function getRepository(workspaceId: string): Promise<{ owner: string; repo: string } | null> {
+async function getRepository(workspaceId: string): Promise<ProjectionAuthority | null> {
   const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
-  return authority ? { owner: authority.owner, repo: authority.name } : null;
+  return authority ? {
+    owner: authority.owner, name: authority.name, source: authority.source,
+    bindingId: authority.bindingId, installationId: authority.installationId, repositoryId: authority.repositoryId,
+  } : null;
 }
 
-async function getToken(workspaceId: string, owner: string, repo: string): Promise<string | null> {
-  const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
+async function getToken(workspaceId: string, owner: string, repo: string): Promise<ResolvedGitHubToken | null> {
+  return resolveWorkspaceGitHubToken(workspaceId, {
     repository: { owner, name: repo }, purpose: 'checks-write',
   });
-  return resolved?.token ?? null;
+}
+
+function credentialMatchesProjection(claim: ProjectionClaim, credential: ResolvedGitHubToken): boolean {
+  if (claim.repository_authority_source === 'github-app-installation') {
+    const metadata = credential.source === 'github-app-installation' ? credential.metadata : null;
+    return Boolean(metadata && 'bindingId' in metadata
+      && metadata.bindingId === claim.repository_binding_id
+      && metadata.installationId === Number(claim.repository_installation_id)
+      && metadata.repositoryId === Number(claim.repository_id)
+      && metadata.repository.owner.toLowerCase() === claim.repository_owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === claim.repository_name.toLowerCase());
+  }
+  const metadata = credential.metadata;
+  return ['workspace-oauth', 'workspace-pat'].includes(credential.source)
+    && Boolean(metadata && 'fallback' in metadata
+      && metadata.repository.owner.toLowerCase() === claim.repository_owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === claim.repository_name.toLowerCase());
 }
 
 function headers(token: string): Record<string, string> {
@@ -670,25 +752,35 @@ export async function reconcileCheckRunProjection(runId: number): Promise<boolea
     }
     // Repository authority and token resolution happen only after the immutable
     // local projection has been durably accepted, claimed, and reverified.
-    const repository = await getRepository(claim.workspace_id);
-    if (!repository) {
-      await finishClaim(claim, 'retry', {
-        errorCode: 'GITHUB_REPOSITORY_AUTHORITY_UNAVAILABLE',
-        errorMessage: 'Canonical GitHub repository authority is unavailable',
-        retryDelayMs: 30_000,
-      });
-      return false;
-    }
-    const token = await getToken(claim.workspace_id, repository.owner, repository.repo);
-    if (!token) {
-      await finishClaim(claim, 'retry', {
-        errorCode: 'GITHUB_CHECKS_TOKEN_UNAVAILABLE',
-        errorMessage: 'Purpose-scoped GitHub Checks token is unavailable',
-        retryDelayMs: 30_000,
-      });
-      return false;
-    }
-    const checkRunId = await applyProviderProjection(repository.owner, repository.repo, token, claim);
+    const checkRunId = await withGithubRepositoryAuthorityLock(
+      claim.workspace_id,
+      claim.repository_owner,
+      claim.repository_name,
+      async () => {
+        const repository = await getRepository(claim.workspace_id);
+        if (!repository || !projectionAuthorityMatches(claim, repository)) {
+          throw new ProjectionProviderError(
+            'GITHUB_REPOSITORY_AUTHORITY_CHANGED', false, false, null, null,
+            'Canonical GitHub repository authority differs from the frozen Check projection',
+          );
+        }
+        const credential = await getToken(claim.workspace_id, repository.owner, repository.name);
+        if (!credential || !credentialMatchesProjection(claim, credential)) {
+          throw new ProjectionProviderError(
+            'GITHUB_CHECKS_TOKEN_AUTHORITY_MISMATCH', false, false, null, null,
+            'Purpose-scoped GitHub Checks credential differs from frozen projection authority',
+          );
+        }
+        const postTokenRepository = await getRepository(claim.workspace_id);
+        if (!postTokenRepository || !projectionAuthorityMatches(claim, postTokenRepository)) {
+          throw new ProjectionProviderError(
+            'GITHUB_REPOSITORY_AUTHORITY_CHANGED', false, false, null, null,
+            'Canonical GitHub repository authority changed during Checks token resolution',
+          );
+        }
+        return applyProviderProjection(repository.owner, repository.name, credential.token, claim);
+      },
+    );
     const status = claim.desired_state === 'completed' ? 'completed' : 'projected';
     if (await finishClaim(claim, status, {
       checkRunId,

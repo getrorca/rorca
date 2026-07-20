@@ -87,6 +87,7 @@ import {
 } from './run-pty-store';
 import { attachRunPtyLifecycle, transitionRunLifecycle } from './run-lifecycle';
 import { openRawPtyArchive, type RawPtyArchiveWriter } from './pty-raw-archive';
+import { recordPtyByteTelemetry } from './pty-operational-telemetry';
 import { PtyTranscriptRecorder } from './pty-transcript-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
@@ -2527,12 +2528,25 @@ async function spawnAgentViaPty(
             rawArchiveWriter.append(buf);
           } catch (err: unknown) {
             rawArchiveWriteFailed = true;
+            if (generationRef) recordPtyByteTelemetry(
+              { ...generationRef, storyId: storyIdForMarker },
+              'unrecoverable',
+              'archive',
+              buf.length,
+            );
             transcriptRecorder?.recordError(
               'raw_archive_write_failed',
               'Exact raw PTY archive write failed; earlier verified segments remain available.',
             );
             logRunPtyStoreError('Failed to append exact raw PTY archive bytes', ptyOptions.runId, err);
           }
+        } else if (generationRef) {
+          recordPtyByteTelemetry(
+            { ...generationRef, storyId: storyIdForMarker },
+            'unrecoverable',
+            'archive',
+            buf.length,
+          );
         }
         transcriptRecorder?.recordModelBytes(buf);
         // node-pty is push-only. The bounded replay-ring writer batches durable

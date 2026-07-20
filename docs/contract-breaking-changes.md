@@ -26,6 +26,33 @@ Migration path:
 - Describe any temporary compatibility strategy.
 ```
 
+<!-- contract-break: 2026-07-20 GET /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId} -->
+## 2026-07-20 `GET /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}`
+
+Justification: trusted PTY checkpoint evidence contains recovery authority and is now restricted to authenticated operator/admin REST callers; it must not remain a public or MCP-callable surface.
+
+Migration path:
+- Operator clients must use authenticated REST access with the required operator tier.
+- Public/MCP clients should consume redacted run status and lifecycle evidence instead of checkpoint authority.
+
+<!-- contract-break: 2026-07-20 POST /api/pipeline/runs/{runId}/input -->
+## 2026-07-20 `POST /api/pipeline/runs/{runId}/input`
+
+Justification: PTY keyboard input is an execution-control operation and is now restricted to authenticated operator/admin REST callers to prevent public or MCP-driven command injection.
+
+Migration path:
+- Interactive operator consoles must authenticate and call the operator REST route.
+- Automation must use governed TaskManifest or retry APIs and cannot inject terminal input.
+
+<!-- contract-break: 2026-07-20 POST /api/pipeline/runs/{runId}/pty/resize -->
+## 2026-07-20 `POST /api/pipeline/runs/{runId}/pty/resize`
+
+Justification: PTY attachment mutation is now operator-only and excluded from public/MCP contracts so untrusted clients cannot influence an active terminal session.
+
+Migration path:
+- Authenticated operator consoles may continue through the operator REST route.
+- Public/MCP consumers should treat terminal dimensions as read-only telemetry when exposed.
+
 <!-- contract-break: 2026-07-15 GET /api/health/detailed -->
 ## 2026-07-15 `GET /api/health/detailed`
 

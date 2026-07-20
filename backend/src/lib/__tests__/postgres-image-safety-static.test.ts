@@ -19,6 +19,7 @@ const rootGitignore = read('.gitignore');
 const compose = read('docker-compose.yml');
 const ovhIngress = read('deploy/ovh/github-webhook-traefik.dynamic.yml');
 const initSql = read('docker/postgres/init.sql');
+const productionEnvExample = read('deploy/env.production.example');
 
 function trackedPaths(): string[] {
   return execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
@@ -92,6 +93,16 @@ test('tracked source contains no database export, seed, backup directory, or com
     || /\.(?:dump|pgdump|backup|bak|sql\.(?:gz|bz2|xz)|tar|tar\.(?:gz|bz2|xz)|tgz|zip|7z|rar)$/i.test(trackedPath)
   ));
   expect(forbidden).toEqual([]);
+});
+
+test('production env example has unique assignments and preserves the private operator port', () => {
+  const assignments = productionEnvExample.split(/\r?\n/)
+    .filter(line => /^[A-Z][A-Z0-9_]*=/.test(line))
+    .map(line => line.slice(0, line.indexOf('=')));
+  expect(new Set(assignments).size).toBe(assignments.length);
+  expect(productionEnvExample).toMatch(/^RORCA_BIND_ADDRESS=127\.0\.0\.1$/m);
+  expect(productionEnvExample.match(/^RORCA_PORT=3030$/gm)).toHaveLength(1);
+  expect(productionEnvExample).not.toMatch(/^RORCA_PORT=443$/m);
 });
 
 test('Compose keeps the operator API/UI private and exposes only the exact signed webhook route', () => {
