@@ -238,6 +238,21 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       }
 
       const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+      // Qualification runners intentionally use a stock isolated PostgreSQL 16
+      // image. They may exercise ownership and wave migrations without the
+      // optional pgvector extension; never pretend production has that limit.
+      if (process.env.RORCA_QUALIFICATION_SKIP_VECTOR_MIGRATIONS === 'true' && /\bvector\b/i.test(sql)) {
+        const vectorAvailable = await client.query(`SELECT to_regtype('vector')::text AS type`);
+        if (!vectorAvailable.rows[0]?.type) {
+          await client.query(
+            'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
+            [version, `${file} [skipped: qualification pgvector unavailable]`],
+          );
+          skippedCount++;
+          console.warn(`[pg-migrate] Skipping vector-dependent qualification migration: ${file}`);
+          continue;
+        }
+      }
 
       // Wrap each migration in a transaction
       try {
