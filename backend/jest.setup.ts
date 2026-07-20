@@ -54,14 +54,21 @@ export default async function globalSetup(): Promise<void> {
 
     // Test harness shim for Supabase/PostgREST auth helpers used by RLS migrations.
     // Local Postgres doesn't provide auth schema/functions, so create minimal stubs.
-    await testPool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-          CREATE ROLE authenticated;
-        END IF;
-      END $$;
-    `);
+    try {
+      await testPool.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+            CREATE ROLE authenticated;
+          END IF;
+        END $$;
+      `);
+    } catch (error: unknown) {
+      // Qualification uses a deliberately least-privilege owner role. Its
+      // isolated database does not need a cluster-global test helper role.
+      if ((error as { code?: string }).code !== '42501') throw error;
+      console.warn('[jest-setup] authenticated helper role unavailable under least-privilege qualification role');
+    }
 
     await testPool.query(`CREATE SCHEMA IF NOT EXISTS auth`);
 
