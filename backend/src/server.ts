@@ -241,6 +241,7 @@ app.use(cors({
 // Capture raw body for webhook signature verification.
 // The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
 app.use(express.json({
+  limit: '500kb',
   verify: (req, _res, buf) => {
     const url = (req as express.Request).originalUrl || '';
     if (url.startsWith('/api/webhooks/')) {
