@@ -400,6 +400,8 @@ const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
 const RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS = Math.max(1_000, RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 5);
 const RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS = readBoundedIntegerEnv('RORCA_OUTPUT_REPLAY_MAX_CHUNKS', 2_048, 100, 25_000);
 const RUN_OUTPUT_REPLAY_BATCH_CHUNKS = getRunPtyOutputLimits().replayBatchChunks;
+const MIN_PTY_COLS = 80;
+const MIN_PTY_ROWS = 12;
 const MAX_PTY_COLS = 500;
 const MAX_PTY_ROWS = 200;
 const MAX_PTY_INPUT_CHUNK_BYTES = 65_536;
@@ -5988,7 +5990,8 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     });
     const passedStories = Array.from(latestByStory.values()).filter((s) => {
       const reconciliation = reconciliationByStory.get(s.story_id);
-      return s.status === 'pass' && reconciliation?.status === 'consistent-passed';
+      return s.status === 'pass'
+        && (reconciliation?.status === 'consistent-passed' || reconciliation?.status === 'safely-repairable');
     });
 
     if (failedStories.length === 0) {
@@ -6074,7 +6077,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       const latest = latestByStory.get(story.id);
       if (story.excluded || reconciled?.reasonCodes.includes('EXCLUDED_STORY')) return { storyId: story.id, status: 'excluded' };
       if (story.skipped) return { storyId: story.id, status: 'skipped' };
-      if (reconciled?.status === 'consistent-passed') return { storyId: story.id, status: 'passed' };
+      if (reconciled?.status === 'consistent-passed' || reconciled?.status === 'safely-repairable') {
+        return { storyId: story.id, status: 'passed' };
+      }
       if (latest && (latest.status === 'fail' || latest.status === 'skip')) return { storyId: story.id, status: 'failed' };
       return { storyId: story.id, status: 'other' };
     });
@@ -7512,8 +7517,8 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *             required: [generationToken, cols, rows]
  *             properties:
  *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
- *               cols: { type: integer, minimum: 1, maximum: 500 }
- *               rows: { type: integer, minimum: 1, maximum: 200 }
+ *               cols: { type: integer, minimum: 80, maximum: 500 }
+ *               rows: { type: integer, minimum: 12, maximum: 200 }
  *     responses:
  *       200: { description: PTY resize request recorded }
  */
@@ -7528,9 +7533,9 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
       throw new ValidationError('generationToken must be a UUID');
     }
-    if (!Number.isInteger(cols) || cols <= 0 || cols > MAX_PTY_COLS
-      || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
-      throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
+    if (!Number.isInteger(cols) || cols < MIN_PTY_COLS || cols > MAX_PTY_COLS
+      || !Number.isInteger(rows) || rows < MIN_PTY_ROWS || rows > MAX_PTY_ROWS) {
+      throw new ValidationError(`cols must be ${MIN_PTY_COLS}-${MAX_PTY_COLS} and rows must be ${MIN_PTY_ROWS}-${MAX_PTY_ROWS}`);
     }
     if (!PTY_AVAILABLE) {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);

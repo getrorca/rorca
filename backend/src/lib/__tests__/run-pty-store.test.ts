@@ -18,6 +18,7 @@ import {
   getRunPtyGeneration,
   getRunPtySessionHealth,
   initializeRunPtySequence,
+  finalizeActiveRunPtyAfterEngineExit,
   listRunPtyChunks,
   markRunPtyCompletionMarkerSeen,
   recordRunPtyHeartbeat,
@@ -186,6 +187,16 @@ describe('run-pty-store generations', () => {
     await completeRunPtySession(ref(generation), 'exited', 0, null);
     await expect(requestRunPtyInput(runId, generation.generationToken, Buffer.from('late')))
       .rejects.toBeInstanceOf(ConflictError);
+    await expect(requestRunPtyResize(runId, generation.generationToken, 100, 30))
+      .rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('closes a stale active generation when the engine process exits', async () => {
+    const generation = await start();
+    await finalizeActiveRunPtyAfterEngineExit(runId, 'failed', 134, null);
+
+    const health = await getRunPtySessionHealth(runId, generation.generationToken);
+    expect(health).toMatchObject({ status: 'failed', isActive: false, exit_code: 134 });
     await expect(requestRunPtyResize(runId, generation.generationToken, 100, 30))
       .rejects.toBeInstanceOf(ConflictError);
   });

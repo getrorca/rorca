@@ -756,12 +756,17 @@ describe('PTY resize forwarding and SSE attach/disconnect', () => {
       .post(`/api/pipeline/runs/${runId}/pty/resize`)
       .set('Authorization', `Bearer ${authToken}`)
       .send({ generationToken, cols: 501, rows: 24 });
+    const undersizedResize = await request(app)
+      .post(`/api/pipeline/runs/${runId}/pty/resize`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ generationToken, cols: 11, rows: 5 });
     const input = await request(app)
       .post(`/api/pipeline/runs/${runId}/input`)
       .set('Authorization', `Bearer ${authToken}`)
       .send({ generationToken, dataBase64: Buffer.from([0xc3, 0x28]).toString('base64') });
 
     expect(resize.status).toBe(400);
+    expect(undersizedResize.status).toBe(400);
     expect(input.status).toBe(400);
     const controls = await db.queryOne<{ inputs: string; resizes: string }>(
       `SELECT
