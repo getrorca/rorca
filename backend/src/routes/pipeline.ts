@@ -7916,13 +7916,21 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const configuredPtyMode = isPtyTerminalMode(requestedTerminalMode);
   const requestedPtyMode = configuredPtyMode && generationReaderEnabled;
   let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
-  const ptyStatusAtOpen = selectedPtyGeneration?.status ?? null;
+  // A synthetic legacy generation backed only by run_output_chunks is ANSI
+  // evidence, not proof that a requested PTY ever started. Treating it as PTY
+  // makes ended fallback runs look interactive and reintroduces false replay.
+  const selectedGenerationIsAnsiFallback = selectedPtyGeneration?.source === 'legacy'
+    && selectedPtyGeneration.replaySource === 'legacy_run_output';
+  const ptyStatusAtOpen = selectedGenerationIsAnsiFallback
+    ? null
+    : selectedPtyGeneration?.status ?? null;
   // An active PTY run is legitimately session-pending while context routing and
   // prompt assembly run. Never permanently demote it because the browser attached
   // before node-pty started. A terminal run with no session is a real fallback.
   const usePtyCapture = requestedPtyMode
     && PTY_AVAILABLE
     && (ptyStatusAtOpen !== null || !runIsTerminalAtOpen);
+  if (!usePtyCapture) selectedPtyGeneration = null;
   const ptyHealthPayloadAtOpen = usePtyCapture
     ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken))
     : null;
