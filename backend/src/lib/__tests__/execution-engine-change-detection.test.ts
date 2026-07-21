@@ -13,6 +13,7 @@ import { execSync } from 'child_process';
 import {
   classifyStoryWorkingTreeChanges,
   getCommittedStoryChangesSince,
+  getStoryWorkingTreeChanges,
   getStoriesFromStart,
   isMeaningfulStoryChange,
   resolveClaudeCliModelId,
@@ -51,6 +52,38 @@ describe('execution-engine meaningful change detection', () => {
   test('treats project-local pi extension source as meaningful code', () => {
     expect(isMeaningfulStoryChange('.pi/agent/extensions/rorca/lib/story-executor.ts')).toBe(true);
     expect(isMeaningfulStoryChange('.pi/extensions/rorca-mcp/index.ts')).toBe(true);
+  });
+
+  test('preserves the leading porcelain status column when metadata is the first unstaged entry', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-story-status-parser-'));
+    try {
+      execSync('git init', { cwd: dir, stdio: 'pipe' });
+      execSync('git config user.email test@example.com', { cwd: dir, stdio: 'pipe' });
+      execSync('git config user.name Test', { cwd: dir, stdio: 'pipe' });
+      fs.mkdirSync(path.join(dir, 'forge', 'specs', 'approved'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+      const specPath = path.join(dir, 'forge', 'specs', 'approved', 'plan.json');
+      const sourcePath = path.join(dir, 'src', 'index.ts');
+      fs.writeFileSync(specPath, '{"passes":false}\n');
+      fs.writeFileSync(sourcePath, 'export const before = true;\n');
+      execSync('git add -A && git commit -m initial', { cwd: dir, stdio: 'pipe' });
+
+      fs.writeFileSync(specPath, '{"passes":true}\n');
+      expect(execSync('git status --porcelain=v1', { cwd: dir, encoding: 'utf8' }))
+        .toBe(' M forge/specs/approved/plan.json\n');
+      expect(getStoryWorkingTreeChanges(dir)).toEqual({
+        meaningfulFiles: [],
+        metadataFiles: ['forge/specs/approved/plan.json'],
+      });
+
+      fs.writeFileSync(sourcePath, 'export const after = true;\n');
+      expect(getStoryWorkingTreeChanges(dir)).toEqual({
+        meaningfulFiles: ['src/index.ts'],
+        metadataFiles: ['forge/specs/approved/plan.json'],
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('detects meaningful files from agent-created commits even when the worktree is clean', () => {

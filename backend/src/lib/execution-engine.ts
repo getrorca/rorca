@@ -4522,19 +4522,24 @@ function classifyStoryWorkingTreeChanges(files: string[]): StoryWorkingTreeChang
 
 function getStoryWorkingTreeChanges(cwd: string): StoryWorkingTreeChanges {
   const env = buildCleanEnv();
+  // Preserve the leading XY status columns. String.trim() removes the leading
+  // space from an unstaged first entry (` M path` -> `M path`), shifting the
+  // path parser by one byte and potentially reclassifying engine-owned metadata
+  // as meaningful story output. Only discard trailing line terminators.
   const porcelain = execSync('git status --porcelain=v1 --untracked-files=all', {
     cwd,
     env,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
-  }).trim();
+  }).trimEnd();
 
-  if (!porcelain) {
+  if (!porcelain.trim()) {
     return { meaningfulFiles: [], metadataFiles: [] };
   }
 
   const files = porcelain
-    .split('\n')
+    .split(/\r?\n/)
+    .filter(Boolean)
     .map(line => normalizeGitStatusPath(line.length > 3 ? line.slice(3) : ''))
     .filter(Boolean);
 
@@ -8173,6 +8178,7 @@ export {
   preparePiRpcSession,
   isMeaningfulStoryChange,
   classifyStoryWorkingTreeChanges,
+  getStoryWorkingTreeChanges,
   getCommittedStoryChangesSince,
   storyAllowsNoCodeChanges,
   formatRetrievedMemorySection,
