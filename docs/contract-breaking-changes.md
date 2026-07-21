@@ -26,6 +26,15 @@ Migration path:
 - Describe any temporary compatibility strategy.
 ```
 
+<!-- contract-break: 2026-07-20 POST /api/specs/authoring/preflight/confirm -->
+## 2026-07-20 `POST /api/specs/authoring/preflight/confirm`
+
+Justification: authoring-plan confirmation now requires an exact signed provider-human event bound to the accepted plan and preflight hashes. This prevents a caller or Hermes from manufacturing approval authority after the draft changes.
+
+Migration path:
+- Obtain the canonical confirmation target from authoring preflight and require the human to confirm that exact target through an authorized provider tenant.
+- Send the resulting `provider-human-event.v1` attestation; legacy caller-shaped actor objects are rejected.
+
 <!-- contract-break: 2026-07-20 GET /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId} -->
 ## 2026-07-20 `GET /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}`
 

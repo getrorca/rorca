@@ -1,6 +1,6 @@
 {
-  "contractVersion": "13.0.0",
-  "generatedAt": "2026-07-20T19:56:04.475Z",
+  "contractVersion": "14.0.0",
+  "generatedAt": "2026-07-21T03:37:55.384Z",
   "routes": [
     {
       "method": "GET",
@@ -4128,8 +4128,8 @@
             "application/json": {
               "schema": {
                 "properties": {
-                  "approvalToken": {
-                    "description": "Existing explicit operator approval token required when the preview marks requiresApproval",
+                  "approvalReceipt": {
+                    "description": "One-time expiring Rorca-issued human approval receipt required when the preview marks requiresApproval",
                     "type": "string"
                   },
                   "approvedPreview": {
@@ -4206,7 +4206,7 @@
         "404": {},
         "409": {}
       },
-      "hash": "sha256:38dd330b5ff3389c07cd6bf257b9965dbcd1f1ecd5b70e6525d5e5381af17d8b"
+      "hash": "sha256:2c8e9e0cc134d11e7385673bdfeb50804700fe8a3dc88538218b51219f6be59d"
     },
     {
       "method": "POST",
@@ -4593,8 +4593,8 @@
                   },
                   "parallelism": {
                     "default": 1,
-                    "description": "Requested effective story parallelism. Values above 1 require the non-production experimental gate.",
-                    "maximum": 10,
+                    "description": "Explicit wave parallelism. Production values 2-4 require the complete governed receipt/review/activation/cohort envelope; omitted fields remain sequential.",
+                    "maximum": 4,
                     "minimum": 1,
                     "type": "integer"
                   },
@@ -4706,7 +4706,7 @@
         "404": {},
         "422": {}
       },
-      "hash": "sha256:a6973c83a75fc1b7ef5cfbd80aba48c2005ca9ccd53aaa8d9770fbbd27cf4852"
+      "hash": "sha256:a22da2c186eb646323d7200cd74ac4cad1432147c9225b6476c6418dfa8782b3"
     },
     {
       "method": "GET",
@@ -7417,8 +7417,9 @@
                   "acceptedPreflightHash": {
                     "type": "string"
                   },
-                  "actor": {
+                  "attestation": {
                     "additionalProperties": false,
+                    "description": "Required when a service principal relays an authenticated provider-human event.",
                     "type": "object"
                   },
                   "confirmed": {
@@ -7435,8 +7436,7 @@
                   "workspaceId",
                   "acceptedPlanHash",
                   "acceptedPreflightHash",
-                  "confirmed",
-                  "actor"
+                  "confirmed"
                 ],
                 "type": "object"
               }
@@ -7448,7 +7448,7 @@
         "200": {},
         "404": {}
       },
-      "hash": "sha256:ffc941f078454dea65220aa6b01f308556764f584fad23277d8946a49b64ba5c"
+      "hash": "sha256:83a61ab794984742a0ef1e138a04483e412aab4b4626834ab39dffc892a7fe52"
     },
     {
       "method": "POST",
