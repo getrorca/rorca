@@ -83,6 +83,7 @@ import {
 } from './lib/governed-retry-publication';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
 import { isPtyTerminalMode } from './lib/terminal-mode';
+import { finalizeActiveRunPtyAfterEngineExit } from './lib/run-pty-store';
 import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
 import {
@@ -1038,6 +1039,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         }
 
         logger.info({ runId, code, signal, status, wasCancelled }, '[worker] execution-engine exited');
+        await finalizeActiveRunPtyAfterEngineExit(
+          runId,
+          wasCancelled ? 'killed' : status === 'done' ? 'exited' : 'failed',
+          code,
+          signal,
+        );
         await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : 'validating', {
           owner: 'worker', process: 'exited', exitCode: code, exitSignal: signal,
           semantic: 'engine_exit_observed',
@@ -2240,6 +2247,12 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           : null;
 
         logger.info({ runId, code, finalStatus, wasCancelled, retryScopeComplete, fullSpecComplete, remainingStoryIds }, '[worker] retry execution-engine exited');
+        await finalizeActiveRunPtyAfterEngineExit(
+          runId,
+          wasCancelled ? 'killed' : finalStatus === 'done' ? 'exited' : 'failed',
+          code,
+          null,
+        );
         await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : 'validating', {
           owner: 'worker_retry', process: 'exited', exitCode: code, semantic: 'engine_exit_observed',
         });

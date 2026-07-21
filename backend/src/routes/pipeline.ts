@@ -400,6 +400,8 @@ const RUN_OUTPUT_PTY_HEALTH_EMIT_INTERVAL_MS = 2_000;
 const RUN_OUTPUT_PTY_SLOW_POLL_WARN_MS = Math.max(1_000, RUN_OUTPUT_PTY_POLL_INTERVAL_MS * 5);
 const RUN_OUTPUT_INITIAL_REPLAY_MAX_CHUNKS = readBoundedIntegerEnv('RORCA_OUTPUT_REPLAY_MAX_CHUNKS', 2_048, 100, 25_000);
 const RUN_OUTPUT_REPLAY_BATCH_CHUNKS = getRunPtyOutputLimits().replayBatchChunks;
+const MIN_PTY_COLS = 80;
+const MIN_PTY_ROWS = 12;
 const MAX_PTY_COLS = 500;
 const MAX_PTY_ROWS = 200;
 const MAX_PTY_INPUT_CHUNK_BYTES = 65_536;
@@ -5988,7 +5990,8 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     });
     const passedStories = Array.from(latestByStory.values()).filter((s) => {
       const reconciliation = reconciliationByStory.get(s.story_id);
-      return s.status === 'pass' && reconciliation?.status === 'consistent-passed';
+      return s.status === 'pass'
+        && (reconciliation?.status === 'consistent-passed' || reconciliation?.status === 'safely-repairable');
     });
 
     if (failedStories.length === 0) {
@@ -6074,7 +6077,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       const latest = latestByStory.get(story.id);
       if (story.excluded || reconciled?.reasonCodes.includes('EXCLUDED_STORY')) return { storyId: story.id, status: 'excluded' };
       if (story.skipped) return { storyId: story.id, status: 'skipped' };
-      if (reconciled?.status === 'consistent-passed') return { storyId: story.id, status: 'passed' };
+      if (reconciled?.status === 'consistent-passed' || reconciled?.status === 'safely-repairable') {
+        return { storyId: story.id, status: 'passed' };
+      }
       if (latest && (latest.status === 'fail' || latest.status === 'skip')) return { storyId: story.id, status: 'failed' };
       return { storyId: story.id, status: 'other' };
     });
@@ -7532,6 +7537,10 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
       throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
     }
+    // Preserve the public 1..N input contract while preventing tiny browser
+    // layout races from collapsing a full-screen TUI into a redraw storm.
+    const safeCols = Math.max(cols, MIN_PTY_COLS);
+    const safeRows = Math.max(rows, MIN_PTY_ROWS);
     if (!PTY_AVAILABLE) {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
@@ -7549,7 +7558,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const generation = await requestRunPtyResize(runId, generationToken, cols, rows);
+    const generation = await requestRunPtyResize(runId, generationToken, safeCols, safeRows);
     res.json({ ok: true, runId, cols, rows, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Resize PTY run');
@@ -7911,13 +7920,21 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const configuredPtyMode = isPtyTerminalMode(requestedTerminalMode);
   const requestedPtyMode = configuredPtyMode && generationReaderEnabled;
   let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
-  const ptyStatusAtOpen = selectedPtyGeneration?.status ?? null;
+  // A synthetic legacy generation backed only by run_output_chunks is ANSI
+  // evidence, not proof that a requested PTY ever started. Treating it as PTY
+  // makes ended fallback runs look interactive and reintroduces false replay.
+  const selectedGenerationIsAnsiFallback = selectedPtyGeneration?.source === 'legacy'
+    && selectedPtyGeneration.replaySource === 'legacy_run_output';
+  const ptyStatusAtOpen = selectedGenerationIsAnsiFallback
+    ? null
+    : selectedPtyGeneration?.status ?? null;
   // An active PTY run is legitimately session-pending while context routing and
   // prompt assembly run. Never permanently demote it because the browser attached
   // before node-pty started. A terminal run with no session is a real fallback.
   const usePtyCapture = requestedPtyMode
     && PTY_AVAILABLE
     && (ptyStatusAtOpen !== null || !runIsTerminalAtOpen);
+  if (!usePtyCapture) selectedPtyGeneration = null;
   const ptyHealthPayloadAtOpen = usePtyCapture
     ? normalizePtyHealthPayload(await getRunPtySessionHealth(runId, selectedPtyGeneration?.generationToken))
     : null;

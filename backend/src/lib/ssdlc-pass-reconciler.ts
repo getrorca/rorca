@@ -70,6 +70,7 @@ export interface ReconciliationEvidenceRecord {
   resultId: number;
   runId: number;
   resultStatus: string;
+  resultReason: string | null;
   resultObservedAt: string;
   manifestHash: string | null;
   specRevision: string | null;
@@ -147,6 +148,7 @@ interface EvidenceRow {
   result_id: number;
   run_id: number;
   result_status: string;
+  result_reason: string | null;
   result_observed_at: string | Date;
   completion_packet: unknown;
   manifest_hash: string | null;
@@ -290,7 +292,9 @@ function classifyBaseStory(
   const newestAcceptedAt = acceptedPasses.reduce((latest, record) =>
     Math.max(latest, new Date(record.resultObservedAt).getTime()), -Infinity);
   const contradictory = matchingRevision.some((record) =>
-    ['fail', 'skip', 'timeout'].includes(record.resultStatus)
+    (record.resultStatus === 'fail'
+      || record.resultStatus === 'timeout'
+      || (record.resultStatus === 'skip' && record.resultReason !== 'previously_passed'))
     && new Date(record.resultObservedAt).getTime() >= newestAcceptedAt);
 
   if (acceptedPasses.length > 0 && !contradictory) {
@@ -487,6 +491,7 @@ function mapEvidenceRow(row: EvidenceRow, workspacePath: string): Reconciliation
     resultId: Number(row.result_id),
     runId: Number(row.run_id),
     resultStatus: row.result_status,
+    resultReason: row.result_reason,
     resultObservedAt: new Date(row.result_observed_at).toISOString(),
     manifestHash: row.manifest_hash,
     specRevision: row.spec_revision,
@@ -530,6 +535,7 @@ export async function inspectApprovedSpecPasses(
   const spec = JSON.parse(fs.readFileSync(absoluteSpecPath, 'utf8')) as ApprovedSpecDocument;
   const rows = await query<EvidenceRow>(`
     SELECT sr.story_id, sr.id AS result_id, sr.run_id, sr.status AS result_status,
+           sr.reason AS result_reason,
            COALESCE(sr.created_at, sr.started_at) AS result_observed_at,
            sr.completion_packet,
            sem.manifest_hash, sem.spec_revision, sem.story_revision,
@@ -599,6 +605,7 @@ export async function reconcileApprovedSpecPasses(
     // not acquire packet authority merely by saying "pass".
     const evidenceResult = await client.query<EvidenceRow>(`
       SELECT sr.story_id, sr.id AS result_id, sr.run_id, sr.status AS result_status,
+             sr.reason AS result_reason,
              COALESCE(sr.created_at, sr.started_at) AS result_observed_at,
              sr.completion_packet,
              sem.manifest_hash, sem.spec_revision, sem.story_revision,

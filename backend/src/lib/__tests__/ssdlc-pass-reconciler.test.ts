@@ -41,6 +41,7 @@ function proof(
     resultId: 11,
     runId: 7,
     resultStatus: 'pass',
+    resultReason: null,
     resultObservedAt: '2026-07-15T12:00:00.000Z',
     manifestHash: 'sha256:manifest',
     specRevision: deriveStoryContractRevision(sourceSpec),
@@ -154,6 +155,26 @@ describe('classifyPassReconciliation', () => {
     expect(report.stories[0].reasonCodes).toContain('CONTRADICTORY_RESULT');
   });
 
+  test('a later previously-passed skip preserves accepted pass evidence', () => {
+    const original = spec(false);
+    const carriedForward = proof(original, {
+      resultId: 13,
+      runId: 9,
+      resultStatus: 'skip',
+      resultReason: 'previously_passed',
+      resultObservedAt: '2026-07-15T13:00:00.000Z',
+      decisionId: null,
+      decisionStatus: null,
+      attemptResultId: null,
+      completionPacketPresent: false,
+      completionPacketValidated: false,
+      commitReferences: [],
+    });
+    const report = classify(original, [proof(original), carriedForward]);
+    expect(report.stories[0]).toMatchObject({ status: 'safely-repairable' });
+    expect(report.stories[0].reasonCodes).not.toContain('CONTRADICTORY_RESULT');
+  });
+
   test('progress Markdown remains supporting evidence and cannot prove pass', () => {
     const current = spec(true);
     const progressOnly = proof(spec(false), {
@@ -222,6 +243,8 @@ describe('pipeline reconciliation ordering', () => {
     expect(retryReconciliation).toBeGreaterThan(-1);
     expect(retryReconciliation).toBeLessThan(retrySource.indexOf('const retrySpecName'));
     expect(retryReconciliation).toBeLessThan(retrySource.indexOf("send('pipeline:retry'"));
+    expect(retrySource.match(/reconciliation\?\.status === 'safely-repairable'/g)).toHaveLength(1);
+    expect(retrySource.match(/reconciled\?\.status === 'safely-repairable'/g)).toHaveLength(1);
   });
 });
 
@@ -236,6 +259,7 @@ describe('reconcileApprovedSpecPasses transaction boundary', () => {
       result_id: evidence.resultId,
       run_id: evidence.runId,
       result_status: evidence.resultStatus,
+      result_reason: evidence.resultReason,
       result_observed_at: evidence.resultObservedAt,
       completion_packet: { status: 'validated', progressLogPath: '/workspace/.rorca/progress/run-7/US-001.md' },
       manifest_hash: evidence.manifestHash,
