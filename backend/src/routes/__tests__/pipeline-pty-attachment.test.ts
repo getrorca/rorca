@@ -677,7 +677,7 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(body).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
   });
 
-  test('legacy PTY transcript without a session is recovered into synthetic PTY replay metadata', async () => {
+  test('legacy PTY transcript without a session is exposed as explicit ANSI fallback evidence', async () => {
     const runId = await seedRun('done', 'pty');
     const legacyChunk = Buffer.from('legacy PTY transcript bytes\n', 'utf8');
     await db.execute('INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, legacyChunk]);
@@ -685,11 +685,12 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     const body = await streamOutput(runId);
 
     expect(body).toContain('event: run_meta');
-    expect(body).toContain('"terminalMode":"pty"');
+    expect(body).toContain('"terminalMode":"ansi-html"');
     expect(body).toContain('"requestedTerminalMode":"pty"');
-    expect(body).toContain('"isPty":true');
-    expect(body).toContain('"ptyFallbackActive":false');
-    expect(body).toContain('"storyId":"__legacy__"');
+    expect(body).toContain('"isPty":false');
+    expect(body).toContain('"ptyFallbackActive":true');
+    expect(body).toContain('"ptyFallbackReason":"pty-session-unavailable"');
+    expect(body).toContain('"evidenceStoryId":"__legacy__"');
     expect(body).toContain(`event: chunk\ndata: ${legacyChunk.toString('base64')}`);
   });
 });

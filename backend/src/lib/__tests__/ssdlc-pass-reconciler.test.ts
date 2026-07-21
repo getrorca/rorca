@@ -241,7 +241,7 @@ describe('pipeline reconciliation ordering', () => {
     expect(triggerSource.indexOf('await reconcileApprovedSpecPasses(')).toBeLessThan(triggerSource.indexOf("send('pipeline:run'"));
     const retryReconciliation = retrySource.indexOf('await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)(');
     expect(retryReconciliation).toBeGreaterThan(-1);
-    expect(retryReconciliation).toBeLessThan(retrySource.indexOf('const retrySpecName'));
+    expect(retryReconciliation).toBeLessThan(retrySource.indexOf('const retrySpecPath'));
     expect(retryReconciliation).toBeLessThan(retrySource.indexOf("send('pipeline:retry'"));
     expect(retrySource.match(/reconciliation\?\.status === 'safely-repairable'/g)).toHaveLength(1);
     expect(retrySource.match(/reconciled\?\.status === 'safely-repairable'/g)).toHaveLength(1);
