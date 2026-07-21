@@ -41,6 +41,10 @@ const DB_URL =
   process.env.DATABASE_URL ??
   'postgres://rorca:rorca@localhost:5432/rorca_test';
 
+// PgBoss alone owns this suite's schema; this also isolates real integration
+// evidence from legacy unit fixtures that created a partial `pgboss` schema.
+const BOSS_SCHEMA = 'pgboss_integration_cert';
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const MOCK_ENGINE_PATH = path.join(__dirname, 'fixtures', 'mock-engine.ts');
@@ -117,7 +121,7 @@ beforeAll(async () => {
   // 4. Start pg-boss pointing at the test DB with fast polling for tests
   boss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
   });
   boss.on('error', () => { /* suppress noise in test output */ });
@@ -527,12 +531,12 @@ describe('pg-boss integration — pipeline:run lifecycle', () => {
     // contains our runId. This confirms the job was enqueued with the correct payload.
     const jobFound = await waitFor(async () => {
       const { rows: archiveRows } = await pool.query<{ id: string }>(
-        `SELECT id FROM pgboss.archive WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
+        `SELECT id FROM ${BOSS_SCHEMA}.archive WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
         [runId],
       );
       // Also check active queue in case archiving hasn't happened yet
       const { rows: jobRows } = await pool.query<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
+        `SELECT id FROM ${BOSS_SCHEMA}.job WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
         [runId],
       );
       return archiveRows.length + jobRows.length > 0;

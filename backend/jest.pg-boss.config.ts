@@ -21,6 +21,10 @@ const config: Config = {
     '^chokidar$': '<rootDir>/src/__mocks__/chokidar.js',
     '^pdf-parse$': '<rootDir>/src/__mocks__/pdf-parse.js',
   },
+  setupFilesAfterEnv: [
+    ...(baseConfig.setupFilesAfterEnv ?? []),
+    '<rootDir>/jest.pg-boss.setup.ts',
+  ],
   testPathIgnorePatterns: ['/node_modules/', '/dist/'],
   testTimeout: 60_000,
   maxWorkers: 1,

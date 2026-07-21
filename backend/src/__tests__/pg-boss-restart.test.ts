@@ -48,6 +48,7 @@ const DB_URL =
   process.env.TEST_DATABASE_URL ??
   process.env.DATABASE_URL ??
   'postgres://rorca:rorca@localhost:5432/rorca_test';
+const BOSS_SCHEMA = 'pgboss_restart_cert';
 
 // ── Binary / file paths ────────────────────────────────────────────────────────
 
@@ -97,6 +98,7 @@ function spawnServer(): ChildProcess {
     {
       env: {
         DATABASE_URL: DB_URL,
+        PGBOSS_TEST_SCHEMA: BOSS_SCHEMA,
         PORT: String(TEST_PORT),
         PATH: process.env.PATH ?? '',
       },
@@ -339,7 +341,7 @@ beforeAll(async () => {
   // 3. Start pg-boss for the in-process worker
   boss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
   });
   boss.on('error', () => { /* suppress noise */ });

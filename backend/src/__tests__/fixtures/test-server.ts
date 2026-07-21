@@ -28,6 +28,7 @@ import { Pool } from 'pg';
 
 const PORT = parseInt(process.env.PORT ?? '3039', 10);
 const DB_URL = process.env.DATABASE_URL;
+const BOSS_SCHEMA = process.env.PGBOSS_TEST_SCHEMA ?? 'pgboss';
 
 if (!DB_URL) {
   process.stderr.write('[test-server] DATABASE_URL is not set — exiting\n');
@@ -42,7 +43,7 @@ async function getBoss(): Promise<PgBoss> {
   if (boss) return boss;
   boss = new PgBoss({
     connectionString: DB_URL!,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     maintenanceIntervalSeconds: 120,
     archiveCompletedAfterSeconds: 60 * 60 * 24 * 7,
   });

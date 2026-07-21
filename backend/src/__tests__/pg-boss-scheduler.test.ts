@@ -53,6 +53,10 @@ const DB_URL =
   process.env.DATABASE_URL ??
   'postgres://rorca:rorca@localhost:5432/rorca_test';
 
+// Keep this real-runtime suite isolated from unit-test fixtures that historically
+// created a noncanonical partial `pgboss` schema. PgBoss alone owns this schema.
+const BOSS_SCHEMA = 'pgboss_scheduler_cert';
+
 // -- Timing --
 
 const POLL_INTERVAL_MS = 200;
@@ -96,7 +100,7 @@ async function waitFor(
 async function makeBoss(): Promise<PgBoss> {
   const boss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
   });
   boss.on('error', () => { /* suppress */ });
@@ -314,7 +318,7 @@ describe('Test B — worker restart: schedule row persists after boss restart', 
       created_on: Date;
       updated_on: Date;
     }>(
-      `SELECT name, cron, created_on, updated_on FROM pgboss.schedule WHERE name = $1`,
+      `SELECT name, cron, created_on, updated_on FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
       [cronScheduleName],
     );
     expect(beforeRows.length).toBe(1);
@@ -339,7 +343,7 @@ describe('Test B — worker restart: schedule row persists after boss restart', 
       created_on: Date;
       updated_on: Date;
     }>(
-      `SELECT name, cron, created_on, updated_on FROM pgboss.schedule WHERE name = $1`,
+      `SELECT name, cron, created_on, updated_on FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
       [cronScheduleName],
     );
 
@@ -369,7 +373,7 @@ describe('Test C — schedule deletion: unschedule cleans up pgboss.schedule', (
 
     // Confirm schedule row exists
     const { rows: existRows } = await pool.query(
-      'SELECT name FROM pgboss.schedule WHERE name = $1',
+      `SELECT name FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
       [cronScheduleName],
     );
     expect(existRows.length).toBe(1);
@@ -385,7 +389,7 @@ describe('Test C — schedule deletion: unschedule cleans up pgboss.schedule', (
 
     // CORE ASSERTION 1: pgboss.schedule row gone
     const { rows: goneRows } = await pool.query(
-      'SELECT name FROM pgboss.schedule WHERE name = $1',
+      `SELECT name FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
       [cronScheduleName],
     );
     expect(goneRows.length).toBe(0);
@@ -414,7 +418,7 @@ describe('Test D — schedule update: unschedule + re-schedule with new expressi
 
     // Verify old schedule in pgboss.schedule
     const { rows: oldRows } = await pool.query<{ name: string; cron: string }>(
-      'SELECT name, cron FROM pgboss.schedule WHERE name = $1',
+      `SELECT name, cron FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
       [cronScheduleName],
     );
     expect(oldRows.length).toBe(1);
@@ -423,7 +427,7 @@ describe('Test D — schedule update: unschedule + re-schedule with new expressi
     // PATCH: unschedule old -> re-schedule new (mirrors production PATCH handler)
     await bossA.unschedule(cronScheduleName);
     const { rows: goneRows } = await pool.query(
-      'SELECT name FROM pgboss.schedule WHERE name = $1',
+      `SELECT name FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
       [cronScheduleName],
     );
     expect(goneRows.length).toBe(0);
@@ -436,7 +440,7 @@ describe('Test D — schedule update: unschedule + re-schedule with new expressi
 
     // CORE ASSERTION 1: new pgboss.schedule entry has updated expression
     const { rows: newRows } = await pool.query<{ name: string; cron: string }>(
-      'SELECT name, cron FROM pgboss.schedule WHERE name = $1',
+      `SELECT name, cron FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
       [cronScheduleName],
     );
     expect(newRows.length).toBe(1);

@@ -182,19 +182,6 @@ beforeEach(async () => {
     [WORKSPACE_ID, os.tmpdir()],
   );
 
-  await execute('CREATE SCHEMA IF NOT EXISTS pgboss').catch(() => {});
-  await execute(`
-    CREATE TABLE IF NOT EXISTS pgboss.job (
-      id uuid PRIMARY KEY,
-      name text NOT NULL,
-      state text NOT NULL,
-      created_on timestamptz,
-      started_on timestamptz,
-      data jsonb
-    )
-  `).catch(() => {});
-  await execute('TRUNCATE pgboss.job').catch(() => {});
-
   // Clean up spec files from prior tests
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
