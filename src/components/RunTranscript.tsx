@@ -145,7 +145,10 @@ export default function RunTranscript({
       lastSequenceRef.current = priorSequence;
       setItems(previous => initial ? page.items : [...previous, ...page.items]);
       setGaps(previous => initial ? page.gaps : [...previous, ...page.gaps]);
-      setCursor(page.nextCursor);
+      // An active-generation poll can legitimately return no new events and a
+      // null nextCursor. Preserve the last opaque cursor; resetting it would
+      // make the next poll fetch page one and falsely report a sequence mismatch.
+      setCursor(page.nextCursor ?? nextCursor);
       setHasMore(page.hasMore);
       setAnnouncement(`${page.items.length} transcript events loaded${page.hasMore ? '; more history is available.' : '; complete history is loaded.'}`);
     } catch (loadError) {

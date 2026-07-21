@@ -732,6 +732,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const ptyGenerationTokenRef = useRef<string | null>(null);
   const ptyProcessAliveRef = useRef(false);
   const activeResizeRetryRef = useRef(false);
+  const lastPtyResizeRef = useRef<string | null>(null);
   const { resolved } = useTheme();
   const resolvedRef = useRef(resolved);
   const [copied, setCopied] = useState(false);
@@ -782,6 +783,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   // Toggle state — persisted per run in localStorage
   const [mode, setMode] = useState<TerminalViewMode>(() => loadMode(runId));
+  const terminalViewModeRef = useRef<TerminalViewMode>(mode);
 
   // Semantic step state
   const [steps, setSteps] = useState<SemanticStep[]>([]);
@@ -806,6 +808,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   }, [terminalMode]);
 
   useEffect(() => {
+    terminalViewModeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
     runStatusRef.current = runStatus;
     ptySessionStatusRef.current = terminalMeta.ptySessionStatus;
   }, [runStatus, terminalMeta.ptySessionStatus]);
@@ -825,6 +831,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   // Persist mode changes
   const handleSetMode = useCallback((m: TerminalViewMode) => {
+    terminalViewModeRef.current = m;
     setMode(m);
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
@@ -838,14 +845,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const ansiConverterNoEscape = useMemo(() => createAnsiConverter(resolved, false), [resolved]);
 
   const postPtyResize = useCallback(async (cols: number, rows: number) => {
-    // PTY resize is only valid while the backend PTY session is active. Finished
-    // runs still render replay output, but the backend correctly rejects resize
-    // mutations with 409; avoid spamming the console/network panel for archived
-    // run views. Preserve test/back-compat behavior when runStatus is omitted.
-    const canResize = runStatus == null || runStatus === 'running' || runStatus === 'paused' || runStatus === 'blocked';
+    // Never resize the child from a hidden Terminal tab. xterm reports a tiny
+    // fallback grid while display:none, which previously forced full-screen
+    // agents to render at roughly ten columns and generated repaint storms.
+    if (terminalViewModeRef.current !== 'raw') return;
+    const currentRunStatus = runStatusRef.current;
+    const canResize = currentRunStatus == null || currentRunStatus === 'running' || currentRunStatus === 'paused' || currentRunStatus === 'blocked';
     const generationToken = ptyGenerationTokenRef.current;
     const exactGenerationActive = ptySessionStatusRef.current === 'active' && ptyProcessAliveRef.current;
-    if (!canResize || !exactGenerationActive || !generationToken) return;
+    if (!canResize || !exactGenerationActive || !generationToken || cols <= 0 || rows <= 0) return;
+    const resizeIdentity = `${generationToken}:${cols}:${rows}`;
+    if (lastPtyResizeRef.current === resizeIdentity) return;
+    lastPtyResizeRef.current = resizeIdentity;
 
     try {
       await apiFetch(`/api/pipeline/runs/${runId}/pty/resize`, {
@@ -855,9 +866,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         silent: true,
       });
     } catch {
-      // best effort — resize retries on the next fit cycle while active
+      // Best effort — allow a later visible fit cycle to retry.
+      if (lastPtyResizeRef.current === resizeIdentity) lastPtyResizeRef.current = null;
     }
-  }, [runId, runStatus]);
+  }, [runId]);
 
   const flushPtyInput = useCallback(() => {
     ptyInputFlushRef.current = null;
@@ -1007,7 +1019,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     setPtyReady(true);
 
     const syncSize = () => {
-      if (!fitAddonRef.current || !xtermRef.current) return;
+      if (!fitAddonRef.current || !xtermRef.current || terminalViewModeRef.current !== 'raw') return;
       fitAddonRef.current.fit();
       const cols = xtermRef.current.cols;
       const rows = xtermRef.current.rows;
@@ -1056,19 +1068,34 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   useEffect(() => {
     activeResizeRetryRef.current = false;
-  }, [runId, rendererMode]);
+    lastPtyResizeRef.current = null;
+  }, [runId, rendererMode, terminalMeta.ptyGenerationId]);
+
+  // A hidden xterm must never control the real child dimensions. Fit and send
+  // dimensions only after the operator makes Terminal visible.
+  useEffect(() => {
+    if (resolvedMode !== 'raw' || !isPtyTerminalMode(terminalMode)) return;
+    const frame = window.requestAnimationFrame(() => {
+      const terminal = xtermRef.current;
+      const fitAddon = fitAddonRef.current;
+      if (!terminal || !fitAddon) return;
+      fitAddon.fit();
+      void postPtyResize(terminal.cols, terminal.rows);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [postPtyResize, resolvedMode, terminalMode]);
 
   // Initial resize can race PTY creation. Retry exactly once after authoritative
   // active health arrives so the child starts with the browser's actual size.
   useEffect(() => {
-    if (activeResizeRetryRef.current || terminalMode !== 'pty' || terminalMeta.ptySessionStatus !== 'active') return;
+    if (resolvedMode !== 'raw' || activeResizeRetryRef.current || !isPtyTerminalMode(terminalMode) || terminalMeta.ptySessionStatus !== 'active') return;
     const terminal = xtermRef.current;
     const fitAddon = fitAddonRef.current;
     if (!terminal || !fitAddon) return;
     activeResizeRetryRef.current = true;
     fitAddon.fit();
     void postPtyResize(terminal.cols, terminal.rows);
-  }, [postPtyResize, ptyReady, terminalMeta.ptySessionStatus, terminalMode]);
+  }, [postPtyResize, ptyReady, resolvedMode, terminalMeta.ptySessionStatus, terminalMode]);
 
   // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML.
   // Lines prefixed with HTML_LINE_PREFIX are pre-HTML (markdown already converted) — use no-escape converter.
@@ -2152,7 +2179,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           style={{ color: 'var(--terminal-state-warning)', background: 'var(--terminal-state-warning-bg)', borderColor: 'var(--terminal-state-warning)' }}
           role="alert"
         >
-          <strong>Terminal capture loss detected.</strong> {captureLostBytes} bytes are missing within affected byte offsets 0–{possibleGapByteEnd}; logical output sequences 1–{possibleGapSequenceEnd} may be affected. This is distinct from safe checkpoint compaction. Open Transcript for explicit structured sequence gaps.
+          <strong>Terminal capture loss detected.</strong> {captureLostBytes} bytes are missing within affected byte offsets 0–{possibleGapByteEnd}; logical output sequences 1–{possibleGapSequenceEnd} may be affected. This is distinct from safe checkpoint compaction.{' '}
+          <button className="font-semibold underline focus-visible:outline focus-visible:outline-2" onClick={() => handleSetMode('transcript')}>Open Transcript</button>
+          {' '}for structured history{terminalMeta.archiveAvailable ? ' and access to the sensitive raw archive' : ''}.
         </div>
       )}
 
