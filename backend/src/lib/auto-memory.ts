@@ -252,15 +252,22 @@ const SPEC_SYNTHESIS_TIMEOUT_MS = 15_000;
  * codebase observations the LLM made during generation: architecture patterns,
  * complexity hotspots, missing conventions, technical debt.
  *
- * Non-fatal: all errors are caught and logged. Never throws.
+ * Returns a truthful bounded result. Callers decide whether their workflow
+ * policy treats synthesis failure as fatal; this helper still never throws.
  */
+export interface SpecMemorySynthesisResult {
+  success: boolean;
+  saved: number;
+  reason?: 'parse_failed' | 'no_entries' | 'no_valid_entries' | 'timeout' | 'provider_or_storage_failure';
+}
+
 export async function autoSynthesizeSpecMemory(
   specId: string,
   workspaceId: string,
   brief: string,
   generatedSpec: { stories: unknown[] },
   contextSummary: Record<string, unknown>,
-): Promise<void> {
+): Promise<SpecMemorySynthesisResult> {
   const t0 = Date.now();
 
   try {
@@ -330,12 +337,12 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
       entries = JSON.parse(cleaned);
     } catch (parseErr) {
       logger.warn(`[auto-memory] Failed to parse spec memory for ${specId}: ${(parseErr as Error).message}`);
-      return;
+      return { success: false, saved: 0, reason: 'parse_failed' };
     }
 
     if (!Array.isArray(entries) || entries.length === 0) {
       logger.warn(`[auto-memory] No spec memory entries extracted for ${specId}`);
-      return;
+      return { success: false, saved: 0, reason: 'no_entries' };
     }
 
     // Cap at 2 entries
@@ -351,7 +358,7 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
       return true;
     });
 
-    if (entries.length === 0) return;
+    if (entries.length === 0) return { success: false, saved: 0, reason: 'no_valid_entries' };
 
     // Store entries with embeddings
     for (const entry of entries) {
@@ -401,13 +408,15 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
     }
 
     logger.info(`[auto-memory] Saved ${entries.length} spec memories for ${specId} (${Date.now() - t0}ms)`);
+    return { success: true, saved: entries.length };
   } catch (err: any) {
     const elapsed = Date.now() - t0;
     if (err.message === 'spec_synthesis_timeout') {
       logger.warn(`[auto-memory] Spec memory synthesis timed out for ${specId} after ${elapsed}ms — skipping`);
-    } else {
-      logger.warn(`[auto-memory] Spec memory synthesis failed for ${specId}: ${err.message}`);
+      return { success: false, saved: 0, reason: 'timeout' };
     }
+    logger.warn(`[auto-memory] Spec memory synthesis failed for ${specId}: ${err.message}`);
+    return { success: false, saved: 0, reason: 'provider_or_storage_failure' };
   }
 }
 

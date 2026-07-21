@@ -34,7 +34,9 @@ function resolveBinPath() {
             fs.accessSync(envBin, fs.constants.X_OK);
             return fs.realpathSync(envBin);
         }
-        catch { return null; }
+        catch {
+            return null;
+        }
     }
     return detectPiAvailability().piBinPath;
 }
@@ -176,7 +178,7 @@ export function parsePiModelTable(stdout) {
 }
 export function listPiModels(binPath) {
     try {
-        const result = probeAutonomousCliSync(binPath, ['--list-models'], { timeoutMs: 10000 });
+        const result = probeAutonomousCliSync(binPath, ['--list-models'], { timeoutMs: 10_000 });
         if (result.error) {
             return [];
         }

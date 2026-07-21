@@ -248,8 +248,8 @@ import {
 import { runHostValidationRequirement } from './story-host-validation';
 import {
   rollbackRejectedWaveTarget,
+  WaveConflictAbort,
   WaveIntegrationLedger,
-  waveIntegrationLedgerKey,
   type WaveContributionIdentity,
 } from './wave-integration-protocol';
 import {
@@ -260,6 +260,8 @@ import {
 import {
   advanceDurableWaveIntegration,
   failDurableWaveIntegration,
+  markDurableWaveConflicted,
+  markDurableWaveConflictAborted,
   prepareDurableWaveIntegration,
   readDurableWaveIntegration,
   type DurableWaveIntegrationIdentity,
@@ -5105,13 +5107,6 @@ async function integrateAndFinalizeWaveContribution(
     })).digest('hex'),
   };
   ledger.markIntegratedValidated(identity, validationIdentity);
-  await advanceDurableWaveIntegration({
-    identity: durableIdentity,
-    from: 'integrated',
-    to: 'integrated_validated',
-    resultingHead: integrated.resultingHead,
-    validationIdentity,
-  });
 
   const idempotencyKey = deriveIntegratedPassStoryResultIdempotencyKey({
     workspaceId, runId: config.runId, storyId: wt.storyId, integratedSha: integrated.resultingHead,
@@ -5130,10 +5125,31 @@ async function integrateAndFinalizeWaveContribution(
   await finalizeIntegratedStoryPass(config, workspaceId, pending, {
     attempt: manifest.identity.attempt,
     resultingHead: integrated.resultingHead,
+    validationIdentity,
     finalizationIdentity,
   });
   ledger.finalize(identity, () => finalizationIdentity);
   } catch (error) {
+    if (error instanceof WaveConflictAbort) {
+      const fileRecord = ledger.get(identity);
+      if (!fileRecord?.conflictEvidence || fileRecord.state !== 'aborted'
+        || !fileRecord.failureReason || !fileRecord.conflictEvidence.postAbortHead) {
+        throw new Error('[wave-integration] filesystem conflict evidence is incomplete after abort', { cause: error });
+      }
+      const conflictedEvidence = { ...fileRecord.conflictEvidence, postAbortHead: null };
+      await markDurableWaveConflicted({
+        identity: durableIdentity,
+        evidence: conflictedEvidence,
+        reason: fileRecord.failureReason,
+      });
+      await markDurableWaveConflictAborted({
+        identity: durableIdentity,
+        priorEvidence: conflictedEvidence,
+        evidence: fileRecord.conflictEvidence,
+        reason: fileRecord.failureReason,
+      });
+      throw error;
+    }
     // The atomic backend finalization packet was persisted locally for replay.
     // Keep the database state at integrated_validated so the replay endpoint can
     // commit it; terminalizing it here would destroy the only safe recovery path.
@@ -5230,6 +5246,7 @@ async function finalizeIntegratedStoryPass(
   integrationFinalization?: {
     attempt: number;
     resultingHead: string;
+    validationIdentity: Record<string, unknown>;
     finalizationIdentity: {
       idempotencyKey: string;
       revision: string;
@@ -5423,7 +5440,7 @@ function createStoryWorktree(
   }
 }
 
-function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
+function _mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
   const env = buildCleanEnv();
   // Integration is fail-closed: an operator's dirty target is never folded into
   // an engine-generated commit. The guarded protocol verifies this again.
@@ -5593,7 +5610,7 @@ async function autoResolveConflicts(
   return { resolved: true, resolvedFiles: [...resolvedFiles, ...resolution.resolvedFiles] };
 }
 
-async function mergeWave(
+async function _mergeWave(
   waveBranches: StoryWorktree[],
   waveIndex: number,
   cwd: string,
@@ -8619,7 +8636,6 @@ async function runParallel(
   const evidenceFailureIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
   const queuedFinalizationIds = new Set<string>();
-  const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
@@ -8974,7 +8990,7 @@ async function runParallel(
     // before potentially expensive merge work begins.
     await persistNewlyBlockedStories(wave.index);
 
-    const finalizeMergedWorktree = async (wt: StoryWorktree): Promise<boolean> => {
+    const _finalizeMergedWorktree = async (wt: StoryWorktree): Promise<boolean> => {
       const pendingPass = pendingIntegratedPasses.get(wt.storyId);
       if (!pendingPass) {
         failedIds.add(wt.storyId);

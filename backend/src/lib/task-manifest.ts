@@ -125,6 +125,7 @@ export const TaskManifestSourceSchema = z.object({
     issueUrl: mediumString('Linear issue URL').optional(),
   }).strict().optional(),
   slack: z.object({
+    teamId: identifierString('Slack team id').optional(),
     channelId: identifierString('Slack channel id').optional(),
     threadTs: shortString('Slack thread timestamp').optional(),
     messageTs: shortString('Slack message timestamp').optional(),

@@ -674,8 +674,11 @@ export async function runMemorySynthesisJob(
   const stories = Array.isArray(memory.stories) ? memory.stories : [];
   const contextSummary = isRecord(memory.contextSummary) ? memory.contextSummary : {};
 
-  await autoSynthesizeSpecMemory(payload.specId, payload.workspaceId, brief, { stories }, contextSummary);
-  await onProgress?.({ current: 1, total: 1, message: 'Spec memory synthesis completed' });
+  const synthesis = await autoSynthesizeSpecMemory(payload.specId, payload.workspaceId, brief, { stories }, contextSummary);
+  if (!synthesis.success) {
+    throw new Error(`Required spec memory synthesis did not complete (${synthesis.reason ?? 'unknown'})`);
+  }
+  await onProgress?.({ current: 1, total: 1, message: `Spec memory synthesis completed (${synthesis.saved} saved)` });
   return { success: true, synthesized: true };
 }
 

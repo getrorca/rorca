@@ -16,6 +16,7 @@ import { execute, query, queryOne, transaction } from '../db/index';
 import { performMerge, type MergeResult } from './merge-handler';
 import { type MergeResolutionPosture } from './merge-conflict-resolver';
 import { type RunHostAuthority } from './run-host-authority';
+import { loadHostRunCloseoutReference } from './run-closeout-authority';
 import {
   getGithubRepositoryAuthority,
   githubRepoApiUrl,
@@ -75,6 +76,8 @@ interface ReleaseIntentRow {
   integration_checkout_path: string | null;
   merge_commit_sha: string | null;
   terminal_event_id: number | null;
+  host_closeout_event_id: number | null;
+  host_closeout_identity_hash: string | null;
 }
 
 export interface PrepareRunReleaseInput {
@@ -97,14 +100,19 @@ function stable(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function identityHash(identityValue: RunReleaseIdentity, input: PrepareRunReleaseInput): string {
+function identityHash(
+  identityValue: RunReleaseIdentity,
+  input: PrepareRunReleaseInput,
+  closeout: { eventId: number; identityHash: string },
+): string {
   return crypto.createHash('sha256').update(stable({
-    version: 2,
+    version: 3,
     ...identityValue,
     mergeStrategy: input.mergeStrategy,
     autoMerge: input.autoMerge,
     externalSend: input.externalSend,
     deploymentAllowed: false,
+    hostCloseout: closeout,
   })).digest('hex');
 }
 
@@ -233,6 +241,17 @@ export async function prepareRunReleaseIntent(input: PrepareRunReleaseInput): Pr
   if (!authority.releaseEligible || !isGitSha(authority.finalCommitSha)) {
     throw new Error('complete exact host authority is required before release preparation');
   }
+  const hostCloseout = await loadHostRunCloseoutReference(authority.runId);
+  if (hostCloseout.payload.status !== 'done'
+    || hostCloseout.payload.integrated_revision !== authority.finalCommitSha
+    || hostCloseout.payload.accepted_story_ids.length !== authority.expectedStoryIds.length
+    || authority.expectedStoryIds.some((storyId) => !hostCloseout.payload.accepted_story_ids.includes(storyId))) {
+    throw new Error('canonical host closeout does not bind exact successful run authority');
+  }
+  const closeoutIdentity = {
+    eventId: hostCloseout.reference.id,
+    identityHash: hostCloseout.reference.identityHash,
+  };
   const workspaceRealpath = fs.realpathSync(authority.repositoryTopLevel);
   const worktreeRealpath = fs.realpathSync(authority.checkoutPath);
   let repository: RunReleaseIdentity['repository'] = null;
@@ -307,7 +326,7 @@ export async function prepareRunReleaseIntent(input: PrepareRunReleaseInput): Pr
       exact.baseSha = providerBase;
     }
 
-    const digest = identityHash(exact, input);
+    const digest = identityHash(exact, input, closeoutIdentity);
     await transaction(async (client) => {
       await client.query(`
         INSERT INTO pipeline_run_release_intents (
@@ -317,10 +336,11 @@ export async function prepareRunReleaseIntent(input: PrepareRunReleaseInput): Pr
           repository_binding_id, repository_installation_id, repository_id,
           merge_strategy, auto_merge, external_send, deployment_allowed,
           identity_hash, status, step_state, base_branch, base_sha,
-          provider_release_ref, integration_checkout_path
+          provider_release_ref, integration_checkout_path,
+          host_closeout_event_id, host_closeout_identity_hash
         ) VALUES (
           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,FALSE,
-          $17,'pending','{}'::jsonb,$18,$19,$20,$21
+          $17,'pending','{}'::jsonb,$18,$19,$20,$21,$22,$23
         )
         ON CONFLICT (run_id) DO NOTHING
       `, [
@@ -330,6 +350,7 @@ export async function prepareRunReleaseIntent(input: PrepareRunReleaseInput): Pr
         repository?.bindingId ?? null, repository?.installationId ?? null, repository?.repositoryId ?? null,
         input.mergeStrategy, input.autoMerge, input.externalSend, digest,
         exact.baseBranch, exact.baseSha, exact.providerReleaseRef, exact.integrationCheckoutPath,
+        closeoutIdentity.eventId, closeoutIdentity.identityHash,
       ]);
       const persisted = (await client.query<{ identity_hash: string }>(
         'SELECT identity_hash FROM pipeline_run_release_intents WHERE run_id = $1 FOR SHARE', [exact.runId],
@@ -683,6 +704,8 @@ async function persistTerminalIntent(row: ReleaseIntentRow): Promise<TrustedWalR
     payload: {
       run_id: Number(row.run_id), status: 'done', source: 'host-release-closeout',
       authorized_sha: row.authorized_sha, release_identity_hash: row.identity_hash,
+      host_closeout_event_id: row.host_closeout_event_id,
+      host_closeout_identity_hash: row.host_closeout_identity_hash,
       merge_strategy: row.merge_strategy,
       completion_scope: row.merge_strategy === 'direct' && row.auto_merge ? 'base_integrated' : 'run_branch',
       base_integrated: row.merge_strategy === 'direct' && row.auto_merge,
@@ -711,14 +734,21 @@ async function commitPublicDoneAndTerminalReady(row: ReleaseIntentRow, terminal:
        WHERE id = $1 AND workspace_id = $2 AND terminal_checkout_sha = $3
        RETURNING id
     `, [Number(row.run_id), row.workspace_id, row.authorized_sha]);
+    if (!row.host_closeout_event_id || !row.host_closeout_identity_hash) {
+      throw new Error('release intent lacks immutable host closeout identity');
+    }
     const ready = await client.query(`
       UPDATE wal_events SET outbox_ready_at = COALESCE(outbox_ready_at, NOW())
-       WHERE id = $1 AND ingest_key = $2 AND event_identity_hash = $3
+       WHERE (
+         (id = $1 AND ingest_key = $2 AND event_identity_hash = $3)
+         OR (id = $6 AND event_identity_hash = $7 AND event_type = 'run_closeout')
+       )
          AND canonical_run_id = $4 AND workspace_id = $5
          AND trust_provenance = 'host' AND trusted_source = 'worker'
        RETURNING id
-    `, [terminal.id, terminal.ingestKey, terminal.identityHash, terminal.runId, terminal.workspaceId]);
-    if (run.rowCount !== 1 || ready.rowCount !== 1) throw new Error('public done and exact terminal readiness did not commit atomically');
+    `, [terminal.id, terminal.ingestKey, terminal.identityHash, terminal.runId, terminal.workspaceId,
+      row.host_closeout_event_id, row.host_closeout_identity_hash]);
+    if (run.rowCount !== 1 || ready.rowCount !== 2) throw new Error('public done, closeout, and exact terminal readiness did not commit atomically');
   });
 }
 
@@ -753,16 +783,13 @@ export async function reconcileRunReleaseIntent(
 
     if (shouldActuateReleaseStep(state.release_closeout)) {
       await setStep(runId, 'release_closeout', 'processing');
-      await execute(`
-        INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload, ingest_key)
-        VALUES ('run_closeout', $1, $2, 'rorca-host', $3::jsonb, $4)
-        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
-      `, [row.workspace_id, row.spec_id, JSON.stringify({
-        run_id: Number(row.run_id), status: 'done', authorized_sha: row.authorized_sha,
-        release_identity_hash: row.identity_hash, merge_strategy: row.merge_strategy,
-        completion_scope: row.merge_strategy === 'direct' && row.auto_merge ? 'base_integrated' : 'run_branch',
-        base_integrated: row.merge_strategy === 'direct' && row.auto_merge, deployment_allowed: false,
-      }), `run-release-closeout:v1:${row.identity_hash}`]);
+      const closeout = await loadHostRunCloseoutReference(runId);
+      if (closeout.reference.id !== row.host_closeout_event_id
+        || closeout.reference.identityHash !== row.host_closeout_identity_hash
+        || closeout.payload.status !== 'done'
+        || closeout.payload.integrated_revision !== row.authorized_sha) {
+        throw new Error('canonical host closeout differs from immutable release intent');
+      }
       await setStep(runId, 'release_closeout', 'completed');
     }
 

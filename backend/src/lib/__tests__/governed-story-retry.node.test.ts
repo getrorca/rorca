@@ -40,7 +40,7 @@ const closeouts: RetryRunCloseoutEvidence[] = [{
 }];
 
 test('authoritative retry scope carries finalized siblings and executes only rejected work', () => {
-  const scope = deriveAuthoritativeRetryScope({ originalRunLineage: [100], completions, integrations, closeouts });
+  const scope = deriveAuthoritativeRetryScope({ originalRunLineage: [100], targetRunId: 100, completions, integrations, closeouts });
   assert.deepEqual(scope.executableStoryIds, ['WPE-002']);
   assert.equal(scope.targetRevision, D);
   assert.deepEqual(scope.carriedForward, [{
@@ -52,13 +52,13 @@ test('authoritative retry scope carries finalized siblings and executes only rej
 
 test('accepted completion without matching finalized ledger and run_closeout ancestry fails closed', () => {
   assert.throws(() => deriveAuthoritativeRetryScope({
-    originalRunLineage: [100], completions,
+    originalRunLineage: [100], targetRunId: 100, completions,
     integrations: integrations.map((row) => row.storyId === 'WPE-001' ? { ...row, state: 'integrated' as const } : row),
     closeouts,
   }), /lacks matching finalized integration/);
-  assert.throws(() => deriveAuthoritativeRetryScope({ originalRunLineage: [100], completions, integrations, closeouts: [] }), /run_closeout evidence is required/);
+  assert.throws(() => deriveAuthoritativeRetryScope({ originalRunLineage: [100], targetRunId: 100, completions, integrations, closeouts: [] }), /run_closeout evidence is required/);
   assert.throws(() => deriveAuthoritativeRetryScope({
-    originalRunLineage: [100], completions, integrations, closeouts, requestedStoryIds: ['WPE-001'],
+    originalRunLineage: [100], targetRunId: 100, completions, integrations, closeouts, requestedStoryIds: ['WPE-001'],
   }), /not failed or unresolved/);
 });
 
@@ -67,7 +67,7 @@ test('a second failure appends a new attempt and cannot overwrite prior evidence
     runId: 101, storyId: 'WPE-002', attempt: 2, resultIdentity: 'result-failed-again', outcome: 'failed', sourceCommit: null,
   };
   const scope = deriveAuthoritativeRetryScope({
-    originalRunLineage: [100, 101], completions: [...completions, retryFailure], integrations, closeouts: [
+    originalRunLineage: [100, 101], targetRunId: 101, completions: [...completions, retryFailure], integrations, closeouts: [
       ...closeouts,
       { runId: 101, status: 'failed', integratedRevision: D, integrationAncestry: [C, D], acceptedStoryIds: ['WPE-001'], evidenceIdentity: 'wal:run_closeout:901' },
     ],
@@ -75,7 +75,7 @@ test('a second failure appends a new attempt and cannot overwrite prior evidence
   assert.deepEqual(scope.executableStoryIds, ['WPE-002']);
   assert.equal(scope.carriedForward[0].resultIdentity, 'result-accepted');
   assert.throws(() => deriveAuthoritativeRetryScope({
-    originalRunLineage: [100],
+    originalRunLineage: [100], targetRunId: 100,
     completions: [...completions, { ...completions[1], outcome: 'failed' }],
     integrations,
     closeouts,
@@ -83,7 +83,7 @@ test('a second failure appends a new attempt and cannot overwrite prior evidence
 });
 
 test('dispatch binds every restart-sensitive identity and rejects stale target or tampering', () => {
-  const scope = deriveAuthoritativeRetryScope({ originalRunLineage: [100], completions, integrations, closeouts });
+  const scope = deriveAuthoritativeRetryScope({ originalRunLineage: [100], targetRunId: 100, completions, integrations, closeouts });
   const identity = createGovernedRetryDispatchIdentity({
     workspaceId: 'synthetic-workspace', specId: 'synthetic-spec', specRevision: 'sha256:spec',
     originalRunId: 100, originalRunLineage: [100], retryRunId: 101,
@@ -93,6 +93,7 @@ test('dispatch binds every restart-sensitive identity and rejects stale target o
     queueName: 'pipeline:retry', queuePayloadHash: `sha256:${'2'.repeat(64)}`,
     executionManifestHash: `sha256:${'3'.repeat(64)}`, approvedPreviewHash: `sha256:${'4'.repeat(64)}`,
     scopeHash: `sha256:${'5'.repeat(64)}`, evidenceHash: scope.evidenceHash,
+    taskManifestLineageHash: null,
     storyAttempts: [{ storyId: 'WPE-002', attempt: 2, previousAttempt: 1, sourceRunId: 100, idempotencyKey: 'synthetic-retry-key:WPE-002:2' }],
     carriedForward: scope.carriedForward,
   });

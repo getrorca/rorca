@@ -132,6 +132,10 @@ export interface RunHostAuthority {
   stories: HostStoryAuthority[];
   authoritativePassedStoryIds: string[];
   finalCommitSha: string | null;
+  closeoutEligible: boolean;
+  terminalRevision: string | null;
+  integrationAncestry: string[];
+  acceptedStoryIds: string[];
   complete: boolean;
   releaseEligible: boolean;
   invalidReason: string | null;
@@ -155,6 +159,10 @@ function emptyInvalid(run: RunAuthorityRow, reason: string): RunHostAuthority {
     stories: [],
     authoritativePassedStoryIds: [],
     finalCommitSha: null,
+    closeoutEligible: false,
+    terminalRevision: null,
+    integrationAncestry: [],
+    acceptedStoryIds: [],
     complete: false,
     releaseEligible: false,
     invalidReason: reason,
@@ -464,26 +472,32 @@ export async function inspectRunHostAuthority(
   const complete = !invalidReason && expected.every(storyId => byStory.has(storyId));
   const allExpectedPassed = complete && expected.every(storyId => byStory.get(storyId)?.status === 'pass');
   let finalCommitSha: string | null = null;
-  if (!invalidReason && passing.length > 0) {
-    const ordered = [...passing].sort((left, right) => Number(left.id) - Number(right.id));
+  let terminalRevision: string | null = null;
+  let integrationAncestry: string[] = [];
+  const orderedPasses = [...passing].sort((left, right) => Number(left.id) - Number(right.id));
+  const orderedAuthorityCommits = [
+    ...predecessorCommitShas,
+    ...orderedPasses.map(row => String(row.commit_sha).toLowerCase()),
+  ];
+  if (!invalidReason) {
     try {
-      finalCommitSha = ordered.at(-1)?.commit_sha?.toLowerCase() ?? null;
       const checkout = assertCanonicalRunCheckout({
         cwd: run.execution_worktree_path ?? run.worktree_path ?? run.workspace_path,
         repositoryTopLevel: run.execution_workspace_path ?? run.workspace_path,
         branchName: run.branch_name,
-        ...(allExpectedPassed && finalCommitSha ? { expectedHead: finalCommitSha } : {}),
       });
-      assertOrderedCommitAncestry(
-        checkout.cwd,
-        [...predecessorCommitShas, ...ordered.map(row => String(row.commit_sha))],
-        checkout.headSha,
-      );
-      if (allExpectedPassed && finalCommitSha !== checkout.headSha) {
-        invalidReason = 'latest integrated pass is not the exact canonical run-branch HEAD';
+      assertOrderedCommitAncestry(checkout.cwd, orderedAuthorityCommits, checkout.headSha);
+      terminalRevision = checkout.headSha;
+      integrationAncestry = [...orderedAuthorityCommits];
+      if (integrationAncestry.at(-1) !== terminalRevision) integrationAncestry.push(terminalRevision);
+      if (allExpectedPassed) {
+        finalCommitSha = orderedPasses.at(-1)?.commit_sha?.toLowerCase() ?? null;
+        if (!finalCommitSha || finalCommitSha !== terminalRevision) {
+          invalidReason = 'latest integrated pass is not the exact canonical run-branch HEAD';
+        }
       }
     } catch (error) {
-      finalCommitSha = ordered.at(-1)?.commit_sha?.toLowerCase() ?? null;
+      finalCommitSha = orderedPasses.at(-1)?.commit_sha?.toLowerCase() ?? null;
       const immutableTerminal = Boolean(allExpectedPassed && finalCommitSha
         && run.terminal_checkout_attested_at
         && run.terminal_checkout_sha?.toLowerCase() === finalCommitSha
@@ -491,7 +505,11 @@ export async function inspectRunHostAuthority(
         && run.release_execution_workspace_path === run.execution_workspace_path
         && run.release_execution_worktree_path === run.execution_worktree_path
         && /^[0-9a-f]{64}$/.test(run.release_identity_hash ?? ''));
-      if (!immutableTerminal) {
+      if (immutableTerminal && finalCommitSha) {
+        terminalRevision = finalCommitSha;
+        integrationAncestry = [...orderedAuthorityCommits];
+        if (integrationAncestry.at(-1) !== terminalRevision) integrationAncestry.push(terminalRevision);
+      } else {
         invalidReason = error instanceof Error ? error.message : String(error);
       }
     }
@@ -515,6 +533,10 @@ export async function inspectRunHostAuthority(
     stories,
     authoritativePassedStoryIds,
     finalCommitSha,
+    closeoutEligible: complete && !invalidReason && Boolean(terminalRevision),
+    terminalRevision,
+    integrationAncestry,
+    acceptedStoryIds: [...authoritativePassedStoryIds].sort((left, right) => left.localeCompare(right)),
     complete: complete && !invalidReason,
     releaseEligible: allExpectedPassed && !invalidReason && Boolean(finalCommitSha),
     invalidReason,

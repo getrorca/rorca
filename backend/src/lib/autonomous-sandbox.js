@@ -1,0 +1,410 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+/** Linux capability boundary for every autonomous/model-controlled subprocess. */
+import * as crypto from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { ensureAutonomousModelEgress } from './autonomous-model-egress';
+const SAFE_PRODUCTION_ENV_KEYS = new Set([
+    'PATH', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM',
+    'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ',
+    'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
+    'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_COUNT',
+    'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1',
+    'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GIT_SSH_COMMAND', 'GCM_INTERACTIVE', 'GH_CONFIG_DIR',
+    'RORCA_AUTONOMOUS_COMMAND_GUARD', 'RORCA_AUTONOMOUS_WORKSPACE_ROOT',
+    'RORCA_EVENT', 'RORCA_HOOK_TYPE', 'RORCA_RUN_ID', 'RORCA_STORY_ID',
+    'RORCA_ALLOW_BACKEND_JEST', 'RORCA_AUTONOMOUS_BACKEND_JEST_DATABASE_URL',
+    'RORCA_AUTONOMOUS_BACKEND_JEST_PGHOST', 'RORCA_AUTONOMOUS_BACKEND_JEST_PGPORT',
+    'RORCA_AUTONOMOUS_BACKEND_JEST_PGUSER', 'RORCA_AUTONOMOUS_BACKEND_JEST_PGPASSWORD',
+    'RORCA_AUTONOMOUS_BACKEND_JEST_PGDATABASE',
+]);
+const MODEL_ENV_KEYS = new Set([
+    'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GOOGLE_API_KEY',
+]);
+const DEFAULT_TOOL_ROOTS = ['/usr', '/bin', '/lib', '/lib64'];
+const SANDBOX_EGRESS_SOCKET = '/run/rorca-egress/proxy.sock';
+const SANDBOX_PROXY_URL = 'http://127.0.0.1:3128';
+const EGRESS_RELAY_SCRIPT = String.raw `
+const net=require('net'),cp=require('child_process');
+const socket=process.argv[1],command=process.argv[2],args=JSON.parse(process.argv[3]);
+const relay=net.createServer(client=>{const upstream=net.connect({path:socket});client.pipe(upstream);upstream.pipe(client);upstream.on('error',()=>client.destroy());client.on('error',()=>upstream.destroy())});
+relay.listen(3128,'127.0.0.1',()=>{const child=cp.spawn(command,args,{stdio:'inherit',env:process.env});for(const signal of ['SIGTERM','SIGINT','SIGHUP'])process.on(signal,()=>child.kill(signal));child.on('error',()=>process.exit(127));child.on('exit',(code,signal)=>{relay.close();if(signal)process.kill(process.pid,signal);else process.exit(code??1)})});`;
+const BOUNDARY_PROBE_SUPERVISOR = String.raw `
+const cp=require('child_process');
+let input='';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data',chunk=>{input+=chunk});
+process.stdin.on('end',()=>{let launch;try{launch=JSON.parse(input)}catch{process.exit(126)}const child=cp.spawnSync(launch.command,launch.args,{cwd:launch.cwd,env:launch.env,stdio:['ignore','pipe','pipe'],encoding:'utf8',timeout:15000});if(child.error)process.exit(125);if(child.signal)process.exit(124);process.exit(child.status??123)});`;
+const FORBIDDEN_TOOL_ROOTS = ['/', '/root', '/home', '/etc', '/proc', '/sys', '/dev', '/run', '/var/run'];
+let successfulProbeKey = null;
+function configuredPosture(env = process.env) {
+    const value = String(env.RORCA_AUTONOMOUS_ISOLATION ?? '').trim();
+    if (value === 'linux-bwrap')
+        return value;
+    throw new Error('RORCA_AUTONOMOUS_ISOLATION must explicitly be linux-bwrap; raw local-dev autonomous execution is forbidden');
+}
+function bwrapBinary(env = process.env) {
+    const configured = String(env.RORCA_BWRAP_BIN ?? '/usr/bin/bwrap').trim();
+    if (!path.isAbsolute(configured))
+        throw new Error('RORCA_BWRAP_BIN must be an absolute path');
+    return configured;
+}
+function realExisting(value) {
+    try {
+        return fs.realpathSync(value);
+    }
+    catch {
+        return null;
+    }
+}
+function assertSafeToolRoot(root) {
+    const real = realExisting(root);
+    if (!real || !path.isAbsolute(real))
+        throw new Error(`Autonomous tool root is unavailable: ${root}`);
+    if (FORBIDDEN_TOOL_ROOTS.includes(real))
+        throw new Error(`Autonomous tool root is over-broad: ${real}`);
+    const stat = fs.statSync(real);
+    if (!stat.isDirectory() || (stat.mode & 0o022) !== 0 || stat.uid !== 0) {
+        throw new Error(`Autonomous tool root must be root-owned and not group/world writable: ${real}`);
+    }
+    return real;
+}
+function toolRoots(env = process.env) {
+    const configured = String(env.RORCA_AUTONOMOUS_TOOL_ROOTS ?? '').trim();
+    const roots = configured
+        ? configured.split(':').filter(Boolean)
+        : DEFAULT_TOOL_ROOTS.filter(root => realExisting(root) !== null);
+    return [...new Set(roots.map(assertSafeToolRoot))];
+}
+function within(candidate, root) {
+    return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+function resolveExecutable(command, env, roots) {
+    const candidates = path.isAbsolute(command)
+        ? [command]
+        : String(env.PATH ?? process.env.PATH ?? '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, command));
+    for (const candidate of candidates) {
+        const real = realExisting(candidate);
+        if (!real || !roots.some(root => within(real, root)))
+            continue;
+        try {
+            fs.accessSync(real, fs.constants.X_OK);
+            return real;
+        }
+        catch { /* continue */ }
+    }
+    throw new Error(`Autonomous executable is unavailable outside approved tool roots: ${command}`);
+}
+function safeProductionEnv(input, modelCredentials = false) {
+    const selected = {};
+    for (const [key, value] of Object.entries(input)) {
+        if ((SAFE_PRODUCTION_ENV_KEYS.has(key) || (modelCredentials && MODEL_ENV_KEYS.has(key))) && value !== undefined) {
+            selected[key] = value;
+        }
+    }
+    selected.PATH = '/usr/local/bin:/usr/bin:/bin';
+    selected.HOME = '/home/rorca-agent';
+    selected.TMPDIR = '/tmp';
+    selected.XDG_CONFIG_HOME = '/home/rorca-agent/.config';
+    selected.XDG_CACHE_HOME = '/home/rorca-agent/.cache';
+    selected.GIT_CONFIG_NOSYSTEM = '1';
+    selected.GIT_CONFIG_GLOBAL = '/dev/null';
+    selected.GIT_TERMINAL_PROMPT = '0';
+    selected.GIT_ASKPASS = '/bin/false';
+    selected.GIT_SSH_COMMAND = '/bin/false';
+    selected.GCM_INTERACTIVE = 'Never';
+    selected.GH_CONFIG_DIR = '/home/rorca-agent/.config/gh';
+    if (modelCredentials && input.RORCA_AUTONOMOUS_EGRESS_SOCKET) {
+        selected.HTTP_PROXY = SANDBOX_PROXY_URL;
+        selected.HTTPS_PROXY = SANDBOX_PROXY_URL;
+        selected.ALL_PROXY = SANDBOX_PROXY_URL;
+        selected.NO_PROXY = '';
+        selected.RORCA_AUTONOMOUS_EGRESS_SOCKET = SANDBOX_EGRESS_SOCKET;
+    }
+    return selected;
+}
+function absoluteGitPath(cwd, flag) {
+    try {
+        const value = execFileSync('git', ['-C', cwd, 'rev-parse', flag], {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000,
+            env: { PATH: process.env.PATH ?? '', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull },
+        }).trim();
+        return fs.realpathSync(path.isAbsolute(value) ? value : path.resolve(cwd, value));
+    }
+    catch {
+        return null;
+    }
+}
+function assertRepositoryConfigHasNoEmbeddedCredential(gitRoot) {
+    const config = path.join(gitRoot, 'config');
+    if (!fs.existsSync(config))
+        return;
+    const content = fs.readFileSync(config, 'utf8');
+    if (/https?:\/\/[^\s/@:]+:[^\s/@]+@/i.test(content)
+        || /(?:gh[pousr]_|github_pat_|x-access-token)[A-Za-z0-9_.-]{8,}/i.test(content)) {
+        throw new Error('Repository Git config contains an embedded credential and cannot enter autonomous isolation');
+    }
+}
+function mountParentDirs(args, destination, coveredRoots) {
+    let current = path.dirname(destination);
+    const pending = [];
+    while (current !== path.dirname(current) && !coveredRoots.some(root => within(current, root))) {
+        pending.push(current);
+        current = path.dirname(current);
+    }
+    for (const dir of pending.reverse())
+        args.push('--dir', dir);
+}
+function addBind(args, source, destination, readOnly, coveredRoots) {
+    if (coveredRoots.some(root => within(destination, root)))
+        return;
+    mountParentDirs(args, destination, coveredRoots);
+    args.push(readOnly ? '--ro-bind' : '--bind', source, destination);
+    coveredRoots.push(destination);
+}
+function maskWorkspaceCredentialFiles(args, cwd) {
+    const candidates = [];
+    const stack = [cwd];
+    let visited = 0;
+    const sensitiveDirectoryNames = new Set(['.ssh', '.aws']);
+    const sensitiveFileNames = new Set(['.npmrc', '.netrc', '.pypirc']);
+    const sensitiveSuffixes = [
+        '.config/gh', '.config/gcloud',
+        '.claude/.credentials.json', '.claude/settings.local.json',
+        '.codex/auth.json', '.pi/agent/auth.json',
+    ];
+    while (stack.length > 0) {
+        const directory = stack.pop();
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+            visited += 1;
+            if (visited > 250_000)
+                throw new Error('Autonomous credential scan exceeded its bounded workspace inventory');
+            const candidate = path.join(directory, entry.name);
+            const relative = path.relative(cwd, candidate).split(path.sep).join('/');
+            const envFile = /^\.env(?:\..+)?$/.test(entry.name)
+                && !/\.(?:example|sample|template)$/.test(entry.name);
+            const sensitive = envFile || sensitiveFileNames.has(entry.name)
+                || sensitiveDirectoryNames.has(entry.name)
+                || sensitiveSuffixes.some(suffix => relative === suffix || relative.endsWith(`/${suffix}`));
+            if (sensitive) {
+                candidates.push(candidate);
+                continue;
+            }
+            // Git metadata is separately excluded by the sandbox mount plan. Every
+            // other subtree is inventoried; credential-shaped files in build output
+            // or dependencies are not trusted merely because of their directory name.
+            if (entry.isDirectory() && entry.name !== '.git')
+                stack.push(candidate);
+        }
+    }
+    for (const candidate of [...new Set(candidates)]) {
+        const stat = fs.lstatSync(candidate);
+        if (stat.isSymbolicLink())
+            throw new Error('Autonomous workspace credential/archive path cannot be a symbolic link');
+        if (stat.isDirectory())
+            args.push('--tmpfs', candidate);
+        else
+            args.push('--ro-bind', os.devNull, candidate);
+    }
+}
+function assertWorkspaceSeparatedFromTrustedRuntime(cwd, roots) {
+    if (roots.some(root => within(cwd, root))) {
+        throw new Error('Autonomous worktree overlaps a read-only tool root');
+    }
+    // In source this module is backend/src/lib; in the image it is
+    // backend/dist/lib. In both cases two parents identify the trusted backend
+    // installation, which must never be writable through the worktree bind.
+    const trustedBackend = fs.realpathSync(path.resolve(__dirname, '..', '..'));
+    if (within(cwd, trustedBackend) || within(trustedBackend, cwd)) {
+        throw new Error('Autonomous worktree overlaps the trusted engine installation');
+    }
+}
+function buildBwrapArgs(options, executable, roots) {
+    const cwd = fs.realpathSync(options.cwd);
+    assertWorkspaceSeparatedFromTrustedRuntime(cwd, roots);
+    const args = [
+        '--die-with-parent', '--new-session', '--unshare-all', '--cap-drop', 'ALL',
+        '--hostname', 'rorca-autonomous',
+        '--clearenv',
+        '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
+        '--dir', '/home', '--dir', '/home/rorca-agent',
+    ];
+    const covered = [];
+    for (const root of roots)
+        addBind(args, root, root, true, covered);
+    addBind(args, cwd, cwd, false, covered);
+    for (const gitPath of new Set([
+        absoluteGitPath(cwd, '--absolute-git-dir'), absoluteGitPath(cwd, '--git-common-dir'),
+    ].filter((value) => value !== null))) {
+        assertRepositoryConfigHasNoEmbeddedCredential(gitPath);
+        addBind(args, gitPath, gitPath, false, covered);
+        const config = path.join(gitPath, 'config');
+        if (fs.existsSync(config))
+            args.push('--ro-bind', config, config);
+    }
+    maskWorkspaceCredentialFiles(args, cwd);
+    const innerEnv = safeProductionEnv(options.env, options.modelCredentials === true);
+    const egressSocket = options.modelCredentials ? options.env.RORCA_AUTONOMOUS_EGRESS_SOCKET : undefined;
+    if (options.modelCredentials && !egressSocket) {
+        throw new Error('Autonomous model credentials require the confined egress broker');
+    }
+    if (egressSocket) {
+        const realSocket = fs.realpathSync(egressSocket);
+        if (!fs.statSync(realSocket).isSocket())
+            throw new Error('Autonomous model egress endpoint is not a Unix socket');
+        addBind(args, realSocket, SANDBOX_EGRESS_SOCKET, true, covered);
+    }
+    for (const [key, value] of Object.entries(innerEnv).sort(([a], [b]) => a.localeCompare(b))) {
+        args.push('--setenv', key, value);
+    }
+    if (egressSocket) {
+        const node = ['/usr/local/bin/node', '/usr/bin/node'].map(realExisting)
+            .find((value) => value !== null && roots.some(root => within(value, root)));
+        if (!node)
+            throw new Error('Autonomous egress relay requires an approved absolute Node executable');
+        args.push('--chdir', cwd, '--', node, '-e', EGRESS_RELAY_SCRIPT, SANDBOX_EGRESS_SOCKET, executable, JSON.stringify(options.args));
+    }
+    else {
+        args.push('--chdir', cwd, '--', executable, ...options.args);
+    }
+    return args;
+}
+export function buildLinuxSandboxArgumentsForTests(options, executable, roots) {
+    return buildBwrapArgs(options, executable, roots);
+}
+export function sanitizeAutonomousSandboxEnvForTests(input, modelCredentials = false) {
+    return safeProductionEnv(input, modelCredentials);
+}
+/** Build one launch that cannot see the trusted ancestor namespace/filesystem/network. */
+export function prepareAutonomousSandboxLaunch(options) {
+    configuredPosture();
+    const cwd = fs.realpathSync(options.cwd);
+    if (process.platform !== 'linux')
+        throw new Error('linux-bwrap autonomous isolation requires Linux');
+    const roots = toolRoots();
+    const executable = resolveExecutable(options.command, options.env, roots);
+    const env = safeProductionEnv(options.env, options.modelCredentials === true);
+    return {
+        command: bwrapBinary(),
+        args: buildBwrapArgs(options, executable, roots),
+        cwd,
+        // The launcher itself receives no worker/engine secret either. `--clearenv`
+        // independently reconstructs the still smaller environment inside.
+        env,
+        isolated: true,
+    };
+}
+function runBoundaryProbe(cwd, env) {
+    const sentinelRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sandbox-credential-'));
+    const sentinel = path.join(sentinelRoot, 'credentials');
+    const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sandbox-worktree-'));
+    const workspaceCredential = path.join(probeRoot, '.env');
+    const nestedCredential = path.join(probeRoot, 'node_modules', 'fixture', '.env.local');
+    fs.mkdirSync(path.dirname(nestedCredential), { recursive: true });
+    fs.writeFileSync(sentinel, 'must-not-be-readable', { mode: 0o600 });
+    fs.writeFileSync(workspaceCredential, 'must-not-be-readable', { mode: 0o600 });
+    fs.writeFileSync(nestedCredential, 'must-not-be-readable', { mode: 0o600 });
+    const script = String.raw `
+const fs=require('fs'),net=require('net'),cp=require('child_process');
+const sentinel=process.argv[1],workspaceCredential=process.argv[2],nestedCredential=process.argv[3],tools=JSON.parse(process.argv[4]);
+const ancestorMarker=Buffer.from('RORCA_ANCESTOR_SECRET_PROBE=');
+for(const pid of fs.readdirSync('/proc').filter(v=>/^\d+$/.test(v))){try{if(fs.readFileSync('/proc/'+pid+'/environ').includes(ancestorMarker))process.exit(41)}catch{}}
+try{fs.readFileSync(sentinel);process.exit(42)}catch{}
+try{fs.readFileSync(workspaceCredential);process.exit(45)}catch{}
+try{fs.readFileSync(nestedCredential);process.exit(46)}catch{}
+for(const tool of tools){const r=cp.spawnSync(tool,['--version'],{encoding:'utf8'});if(r.status!==0)process.exit(43)}
+function denied(host,port){return new Promise((resolve,reject)=>{const s=net.connect({host,port});const t=setTimeout(()=>{s.destroy();reject(new Error('socket timeout'))},500);s.once('connect',()=>{clearTimeout(t);s.destroy();reject(new Error('socket connected'))});s.once('error',()=>{clearTimeout(t);resolve()})})}
+Promise.all([denied('127.0.0.1',3030),denied('198.51.100.1',443)]).then(()=>process.exit(0),()=>process.exit(44));`;
+    try {
+        const roots = toolRoots(env);
+        const requiredCandidates = {
+            node: ['/usr/local/bin/node', '/usr/bin/node'],
+            python3: ['/usr/local/bin/python3', '/usr/bin/python3'],
+            git: ['/usr/local/bin/git', '/usr/bin/git'],
+            gh: ['/usr/local/bin/gh', '/usr/bin/gh'],
+            npm: ['/usr/local/bin/npm', '/usr/bin/npm'],
+            npx: ['/usr/local/bin/npx', '/usr/bin/npx'],
+        };
+        const tools = Object.entries(requiredCandidates).map(([name, candidates]) => {
+            const tool = candidates.map(realExisting).find((value) => value !== null
+                && roots.some(root => within(value, root)));
+            if (!tool)
+                throw new Error(`sandbox probe requires approved absolute ${name}`);
+            return tool;
+        });
+        const node = tools[0];
+        const probeArgs = ['-e', script, sentinel, workspaceCredential, nestedCredential, JSON.stringify(tools)];
+        const launch = prepareAutonomousSandboxLaunch({
+            command: node,
+            args: probeArgs,
+            cwd: probeRoot,
+            env: { PATH: '/usr/local/bin:/usr/bin:/bin' },
+        });
+        const runThroughMarkedSupervisor = (candidate) => {
+            const marker = `rorca-ancestor-secret-${crypto.randomBytes(24).toString('hex')}`;
+            return spawnSync(process.execPath, ['-e', BOUNDARY_PROBE_SUPERVISOR], {
+                env: { ...launch.env, RORCA_ANCESTOR_SECRET_PROBE: marker },
+                input: JSON.stringify(candidate),
+                encoding: 'utf8', timeout: 20_000,
+            });
+        };
+        // Sensitivity deliberately has neither PID nor user isolation. The exact
+        // child probe and sanitized environment must see its marked supervisor;
+        // only after that proves exit 41 do we trust the canonical bwrap result.
+        const sensitivity = runThroughMarkedSupervisor({
+            command: node, args: probeArgs, cwd: probeRoot, env: launch.env, isolated: false,
+        });
+        if (sensitivity.status !== 41) {
+            throw new Error(`autonomous sandbox PID-isolation sensitivity probe expected ancestor visibility exit 41, got ${sensitivity.status ?? sensitivity.signal ?? 'unknown'}`);
+        }
+        const result = runThroughMarkedSupervisor(launch);
+        if (result.status !== 0) {
+            throw new Error(`autonomous sandbox capability probe failed (${result.status ?? result.signal ?? 'unknown'})`);
+        }
+    }
+    finally {
+        fs.rmSync(sentinelRoot, { recursive: true, force: true });
+        fs.rmSync(probeRoot, { recursive: true, force: true });
+    }
+}
+/** Fail before a run becomes running or gains any release-eligible result. */
+export function assertAutonomousExecutionBoundary(options) {
+    const env = options.env ?? process.env;
+    configuredPosture(env);
+    if ((options.platform ?? process.platform) !== 'linux')
+        throw new Error('linux-bwrap autonomous isolation requires Linux');
+    const binary = bwrapBinary(env);
+    fs.accessSync(binary, fs.constants.X_OK);
+    assertWorkspaceSeparatedFromTrustedRuntime(fs.realpathSync(options.cwd), toolRoots(env));
+    const key = `${binary}\0${fs.realpathSync(options.cwd)}\0${String(env.RORCA_AUTONOMOUS_TOOL_ROOTS ?? '')}`;
+    if (options.runProbe !== false && successfulProbeKey !== key) {
+        runBoundaryProbe(options.cwd, env);
+        successfulProbeKey = key;
+    }
+}
+/**
+ * Prepare a model/tool launcher only after the same namespace probe and exact-host
+ * CONNECT broker used by the canonical worker. The broker is trusted transport,
+ * not an orchestrator, and exposes no DB/vault/provider/control-plane operation.
+ */
+export async function prepareAutonomousModelSandboxLaunch(options) {
+    assertAutonomousExecutionBoundary({ cwd: options.cwd, providerCapable: true });
+    const egressSocket = await ensureAutonomousModelEgress();
+    if (!egressSocket)
+        throw new Error('Autonomous model egress broker is unavailable');
+    return prepareAutonomousSandboxLaunch({
+        ...options,
+        modelCredentials: true,
+        env: { ...options.env, RORCA_AUTONOMOUS_EGRESS_SOCKET: egressSocket },
+    });
+}
+export function resetAutonomousSandboxProbeForTests() {
+    successfulProbeKey = null;
+}

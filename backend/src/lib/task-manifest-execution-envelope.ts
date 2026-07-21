@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -99,6 +100,7 @@ export interface WriteTaskManifestExecutionEnvelopeResult {
   manifestPath: string;
   tasksMdPath: string;
   manifestHash: string;
+  syntheticSpecHash: string;
   artifactReused: boolean;
 }
 
@@ -325,6 +327,10 @@ function storyFiles(manifest: TaskManifest, task: TaskManifestTask): string[] {
   ]);
 }
 
+export function computeSyntheticTaskManifestSpecHash(spec: SyntheticTaskManifestSpec): string {
+  return `sha256:${crypto.createHash('sha256').update(`${JSON.stringify(spec, null, 2)}\n`, 'utf8').digest('hex')}`;
+}
+
 export function createTaskManifestExecutionEnvelope(manifest: TaskManifest): SyntheticTaskManifestSpec {
   assertTaskManifestDirectExecutionAllowed(manifest);
 
@@ -349,7 +355,7 @@ export function createTaskManifestExecutionEnvelope(manifest: TaskManifest): Syn
     id: specId,
     title: `Hermes Task Manifest ${manifest.manifestId}`,
     brief: manifest.objective,
-    generatedAt: new Date().toISOString(),
+    generatedAt: manifest.createdAt,
     internal: true,
     source: HERMES_TASK_MANIFEST_SOURCE,
     manifestId: manifest.manifestId,
@@ -402,6 +408,7 @@ export async function writeTaskManifestExecutionEnvelope(
     manifestPath: paths.manifestPath,
     tasksMdPath: paths.tasksMdPath,
     manifestHash: artifact.manifestHash,
+    syntheticSpecHash: computeSyntheticTaskManifestSpecHash(spec),
     artifactReused: artifact.reused,
   };
 }

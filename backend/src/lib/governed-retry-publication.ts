@@ -284,6 +284,112 @@ export async function advanceGovernedRetryPreparation(input: {
   }
 }
 
+export type GovernedRetryRunCancellationResult =
+  | { outcome: 'not_governed_retry' }
+  | { outcome: 'cancelled_before_claim'; previewHash: string; bossJobId: string | null }
+  | { outcome: 'termination_required'; previewHash: string; bossJobId: string | null }
+  | { outcome: 'already_terminal'; previewHash: string; bossJobId: string | null };
+
+/** Canonical generic-run cancellation bridge for a governed retry run. */
+export async function requestGovernedRetryRunCancellation(input: {
+  runId: number;
+  workspaceId: string;
+  requestedBy: string;
+  reason: string;
+}): Promise<GovernedRetryRunCancellationResult> {
+  return transaction(async (client) => {
+    const previewResult = await client.query<{
+      preview_hash: string; status: string; preparation_state: RetryPreparationState;
+      original_run_id: number | string; boss_job_id: string | null;
+    }>(
+      `SELECT preview_hash, status, preparation_state, original_run_id, boss_job_id::text
+       FROM pipeline_retry_previews
+       WHERE retry_run_id = $1 AND workspace_id = $2
+       FOR UPDATE`,
+      [input.runId, input.workspaceId],
+    );
+    const preview = previewResult.rows[0];
+    if (!preview) return { outcome: 'not_governed_retry' };
+    const dispatchResult = await client.query<{
+      identity_hash: string; state: string; boss_job_id: string | null;
+    }>(
+      `SELECT identity_hash, state, boss_job_id::text
+       FROM governed_retry_dispatches WHERE retry_run_id = $1 FOR UPDATE`,
+      [input.runId],
+    );
+    const dispatch = dispatchResult.rows[0];
+    const run = (await client.query<{ status: string }>(
+      'SELECT status FROM pipeline_runs WHERE id = $1 AND workspace_id = $2 FOR UPDATE',
+      [input.runId, input.workspaceId],
+    )).rows[0];
+    if (!run) throw new GovernedRetryStateConflictError('Governed retry run disappeared during cancellation');
+    const bossJobId = dispatch?.boss_job_id ?? preview.boss_job_id ?? null;
+    if (['cancelled', 'refused'].includes(preview.status)
+      || ['finalized', 'failed', 'manual_review_required', 'cancelled'].includes(dispatch?.state ?? '')
+      || !['queued', 'running', 'paused'].includes(run.status)) {
+      return { outcome: 'already_terminal', previewHash: preview.preview_hash, bossJobId };
+    }
+    if (dispatch && ['committed', 'integrating', 'integrated_validated'].includes(dispatch.state)) {
+      throw new GovernedRetryStateConflictError('Post-Git governed retry cannot be cancelled; exact reconciliation is required');
+    }
+    const evidence = JSON.stringify({
+      schemaVersion: 'rorca.governed-retry-cancellation.v1',
+      reason: input.reason.slice(0, 512),
+      requestedBy: input.requestedBy.slice(0, 256),
+      previewHash: preview.preview_hash,
+      retryRunId: input.runId,
+      priorPreviewStatus: preview.status,
+      priorPreparationState: preview.preparation_state,
+      priorDispatchState: dispatch?.state ?? null,
+      priorRunStatus: run.status,
+    });
+    const running = dispatch && ['claimed', 'executing'].includes(dispatch.state);
+    if (running) {
+      const requested = await client.query(
+        `UPDATE governed_retry_dispatches
+         SET cancellation_requested_at = COALESCE(cancellation_requested_at, NOW()),
+             cancellation_request = COALESCE(cancellation_request, $2::jsonb)
+         WHERE identity_hash = $1 AND state IN ('claimed', 'executing')
+         RETURNING identity_hash`,
+        [dispatch.identity_hash, evidence],
+      );
+      if (requested.rowCount !== 1) throw new GovernedRetryStateConflictError('Governed retry cancellation lost its claim race');
+      return { outcome: 'termination_required', previewHash: preview.preview_hash, bossJobId };
+    }
+    if (dispatch) {
+      await client.query(
+        `UPDATE governed_retry_story_attempts
+         SET state = 'cancelled', cancellation_evidence = $2::jsonb, cancelled_at = NOW()
+         WHERE dispatch_identity_hash = $1 AND state = 'pending'`,
+        [dispatch.identity_hash, evidence],
+      );
+      await client.query(
+        `UPDATE governed_retry_dispatches
+         SET state = 'cancelled', cancellation_evidence = $2::jsonb, cancelled_at = NOW(),
+             lease_owner = NULL, lease_expires_at = NULL
+         WHERE identity_hash = $1 AND state IN ('prepared', 'dispatched')`,
+        [dispatch.identity_hash, evidence],
+      );
+    }
+    await client.query(
+      `UPDATE pipeline_runs
+       SET status = 'cancelled', finished_at = COALESCE(finished_at, NOW()),
+           queue_position = NULL, lifecycle_status = 'cancelled', lifecycle_updated_at = NOW()
+       WHERE id = $1 AND status = 'queued'`,
+      [input.runId],
+    );
+    await client.query(
+      `UPDATE pipeline_retry_previews
+       SET status = 'cancelled', preparation_state = 'cancelled', cancelled_at = NOW(),
+           cancellation_evidence = $2::jsonb, preparation_owner = NULL,
+           preparation_lease_expires_at = NULL
+       WHERE preview_hash = $1 AND status IN ('previewed', 'approved', 'dispatched')`,
+      [preview.preview_hash, evidence],
+    );
+    return { outcome: 'cancelled_before_claim', previewHash: preview.preview_hash, bossJobId };
+  });
+}
+
 export interface CancelGovernedRetryResult {
   cancelled: boolean;
   duplicate: boolean;

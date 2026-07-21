@@ -69,7 +69,7 @@ describe('wave-parallel control-plane policy', () => {
     });
   });
 
-  test('production refuses parallel execution despite the experimental opt-in', () => {
+  test('production legacy policy validates shape without competing with governed WPE authority', () => {
     const decision = evaluateWaveParallelPolicy({
       source: 'api-trigger',
       requestedMode: 'wave-parallel',
@@ -79,11 +79,10 @@ describe('wave-parallel control-plane policy', () => {
       experimentalOptIn: 'true',
     });
 
-    expect(decision).toEqual(expect.objectContaining({
-      allowed: false,
-      reason: 'production_forbidden',
-      details: expect.objectContaining({ experimentalOptInIgnored: true }),
-    }));
+    expect(decision).toEqual({ allowed: true, effective: {
+      mode: 'wave-parallel', parallelism: 2, experimental: false,
+      optInIgnored: true, source: 'api-trigger',
+    } });
   });
 
   test('production ignores an idle opt-in while preserving safe sequential defaults', () => {
@@ -113,10 +112,10 @@ describe('wave-parallel control-plane policy', () => {
       payloadMode: 'wave-parallel',
       payloadParallelism: 2,
       rowParallelism: 2,
-      triggerOptions: { orchestrationMode: 'wave-parallel', parallelism: 2 },
+      triggerOptions: { orchestrationMode: 'sequential', parallelism: 1 },
       environment: { nodeEnv: 'production' },
     })).toThrow(expect.objectContaining({
-      details: expect.objectContaining({ reason: 'production_forbidden' }),
+      details: expect.objectContaining({ reason: 'conflicting_request' }),
     }));
   });
 

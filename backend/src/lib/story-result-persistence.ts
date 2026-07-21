@@ -7,10 +7,11 @@
 
 /** Canonical atomic persistence for execution-engine story-result projections. */
 
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { PoolClient } from 'pg';
-import { transaction } from '../db/index';
+import { query, transaction } from '../db/index';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
 import { assertCanonicalRunCheckout } from './run-git-authority';
 import {
@@ -83,6 +84,7 @@ export interface StoryResultAtomicFinalizationOptions {
   integrationFinalization?: {
     attempt: number;
     resultingHead: string;
+    validationIdentity?: Record<string, unknown>;
     finalizationIdentity: {
       idempotencyKey: string;
       revision: string;
@@ -690,6 +692,79 @@ async function persistTrustedPassOutbox(
   return trustedWalReference(event.row);
 }
 
+export const WAVE_INTEGRATED_PASS_RECOVERY_VERSION = 'rorca.wave-integrated-pass-recovery.v1' as const;
+
+function stableRecoveryJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableRecoveryJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableRecoveryJson(child)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function recoveryPacketHash(packet: Record<string, unknown>): string {
+  return createHash('sha256').update(stableRecoveryJson(packet), 'utf8').digest('hex');
+}
+
+/** Freeze exact engine-authored pass inputs while crossing integrated -> validated. */
+export async function stageIntegratedPassRecoveryPacket(
+  input: CanonicalStoryResultInput,
+  options: StoryResultAtomicFinalizationOptions,
+): Promise<{ packetHash: string; replayed: boolean }> {
+  validateInput(input, EXECUTION_ENGINE_RESULT_AUTHORITY);
+  const finalization = options.integrationFinalization;
+  if (!finalization?.validationIdentity
+    || finalization.finalizationIdentity.idempotencyKey !== input.idempotencyKey
+    || finalization.resultingHead !== input.commitSha) {
+    throw new ValidationError('Integrated pass recovery staging requires exact validation/finalization authority');
+  }
+  const packet = {
+    schemaVersion: WAVE_INTEGRATED_PASS_RECOVERY_VERSION,
+    storyResult: input,
+    integrationFinalization: finalization,
+  };
+  const packetHash = recoveryPacketHash(packet);
+  return transaction(async (client) => {
+    const locked = rows(await client.query<{
+      state: string; resulting_head: string | null; validation_identity: Record<string, unknown> | null;
+      recovery_packet: Record<string, unknown> | null; recovery_packet_hash: string | null;
+    }>(
+      `SELECT state, resulting_head, validation_identity, recovery_packet, recovery_packet_hash
+       FROM story_integration_ledger
+       WHERE run_id = $1 AND story_id = $2 AND attempt = $3
+       FOR UPDATE`,
+      [input.runId, input.storyId, finalization.attempt],
+    ))[0];
+    if (!locked || !['integrated', 'integrated_validated'].includes(locked.state)
+      || locked.resulting_head?.trim().toLowerCase() !== finalization.resultingHead.toLowerCase()) {
+      throw new ConflictError('Wave integration is not ready for exact recovery packet staging');
+    }
+    if (locked.state === 'integrated_validated') {
+      if (!locked.recovery_packet || locked.recovery_packet_hash !== packetHash
+        || stableRecoveryJson(locked.recovery_packet) !== stableRecoveryJson(packet)
+        || stableRecoveryJson(locked.validation_identity) !== stableRecoveryJson(finalization.validationIdentity)) {
+        throw new ConflictError('Wave recovery packet changed during replay');
+      }
+      return { packetHash, replayed: true };
+    }
+    const updated = await client.query(
+      `UPDATE story_integration_ledger
+       SET state = 'integrated_validated',
+           validation_identity = $4::jsonb,
+           recovery_packet = $5::jsonb,
+           recovery_packet_hash = $6
+       WHERE run_id = $1 AND story_id = $2 AND attempt = $3 AND state = 'integrated'`,
+      [input.runId, input.storyId, finalization.attempt,
+        JSON.stringify(finalization.validationIdentity), JSON.stringify(packet), packetHash],
+    );
+    if (updated.rowCount !== 1) throw new ConflictError('Wave recovery packet staging lost its state fence');
+    return { packetHash, replayed: false };
+  });
+}
+
 async function lockWaveIntegrationFinalization(
   client: PoolClient,
   input: CanonicalStoryResultInput,
@@ -751,12 +826,13 @@ async function finalizeWaveIntegration(
  * A duplicate is acknowledged only after every immutable input and keyed
  * dependent projection succeeds under the same transaction snapshot.
  */
-export async function persistCanonicalStoryResult(
+async function persistCanonicalStoryResultInternal(
   input: CanonicalStoryResultInput,
-  authority: StoryResultPersistenceAuthority = COMPATIBILITY_RESULT_AUTHORITY,
-  options: StoryResultAtomicFinalizationOptions = {},
+  authority: StoryResultPersistenceAuthority,
+  options: StoryResultAtomicFinalizationOptions,
+  requireWriteRole: boolean,
 ): Promise<CanonicalStoryResultOutcome> {
-  validateInput(input, authority);
+  validateInput(input, authority, { requireWriteRole });
   return transaction(async (client) => {
     const integrationState = await lockWaveIntegrationFinalization(client, input, options);
     const projection = await loadRunProjection(client, input);
@@ -912,6 +988,87 @@ export async function persistCanonicalStoryResult(
     await finalizeWaveIntegration(client, input, options, integrationState);
     return { id: inserted.id, duplicate: false, ...(trustedWal ? { trustedWal } : {}) };
   });
+}
+
+export async function persistCanonicalStoryResult(
+  input: CanonicalStoryResultInput,
+  authority: StoryResultPersistenceAuthority = COMPATIBILITY_RESULT_AUTHORITY,
+  options: StoryResultAtomicFinalizationOptions = {},
+): Promise<CanonicalStoryResultOutcome> {
+  return persistCanonicalStoryResultInternal(input, authority, options, true);
+}
+
+export interface IntegratedValidatedPassRecoveryResult {
+  scanned: number;
+  finalized: number;
+  duplicates: number;
+  blocked: number;
+  truncated: boolean;
+  finalizedStoryIds: string[];
+}
+
+/**
+ * Worker-only host re-finalization. Caller supplies scope only; every result,
+ * commit, accounting, outbox, checkout, decision, and finalization input is
+ * revalidated from the locked application ledger and canonical run tables.
+ */
+export async function recoverIntegratedValidatedStoryFinalizations(
+  input: { runId?: number; limit?: number } = {},
+): Promise<IntegratedValidatedPassRecoveryResult> {
+  if (process.env.NODE_ENV !== 'test' && process.env.RORCA_PROCESS_ROLE !== 'worker') {
+    throw new ValidationError('Integrated pass re-finalization requires worker process authority');
+  }
+  const limit = Math.min(100, Math.max(1, input.limit ?? 25));
+  const candidates = await query<{
+    run_id: number | string; story_id: string; attempt: number;
+    resulting_head: string | null; recovery_packet: Record<string, unknown> | null;
+    recovery_packet_hash: string | null;
+  }>(
+    `SELECT run_id, story_id, attempt, resulting_head, recovery_packet, recovery_packet_hash
+     FROM story_integration_ledger
+     WHERE state = 'integrated_validated'
+       AND ($1::bigint IS NULL OR run_id = $1)
+     ORDER BY run_id, integration_order, story_id
+     LIMIT $2`,
+    [input.runId ?? null, limit + 1],
+  );
+  const truncated = candidates.length > limit;
+  const result: IntegratedValidatedPassRecoveryResult = {
+    scanned: Math.min(candidates.length, limit), finalized: 0, duplicates: 0,
+    blocked: 0, truncated, finalizedStoryIds: [],
+  };
+  for (const candidate of candidates.slice(0, limit)) {
+    try {
+      const packet = candidate.recovery_packet;
+      if (!packet || packet.schemaVersion !== WAVE_INTEGRATED_PASS_RECOVERY_VERSION
+        || candidate.recovery_packet_hash !== recoveryPacketHash(packet)) {
+        throw new ConflictError('Integrated pass recovery packet is absent or has an invalid hash');
+      }
+      const storyResult = packet.storyResult as CanonicalStoryResultInput | undefined;
+      const integrationFinalization = packet.integrationFinalization as StoryResultAtomicFinalizationOptions['integrationFinalization'];
+      if (!storyResult || !integrationFinalization
+        || Number(candidate.run_id) !== storyResult.runId
+        || candidate.story_id !== storyResult.storyId
+        || candidate.attempt !== integrationFinalization.attempt
+        || candidate.resulting_head?.trim().toLowerCase() !== integrationFinalization.resultingHead.toLowerCase()
+        || storyResult.commitSha?.toLowerCase() !== integrationFinalization.resultingHead.toLowerCase()
+        || storyResult.integrated !== true || storyResult.status !== 'pass') {
+        throw new ConflictError('Integrated pass recovery packet differs from locked ledger identity');
+      }
+      const outcome = await persistCanonicalStoryResultInternal(
+        storyResult,
+        EXECUTION_ENGINE_RESULT_AUTHORITY,
+        { integrationFinalization },
+        false,
+      );
+      result[outcome.duplicate ? 'duplicates' : 'finalized']++;
+      result.finalizedStoryIds.push(candidate.story_id);
+    } catch {
+      result.blocked++;
+    }
+  }
+  result.finalizedStoryIds.sort((left, right) => left.localeCompare(right));
+  return result;
 }
 
 /**

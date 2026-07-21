@@ -8,7 +8,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { isUtf8 } from 'buffer';
 import { randomUUID } from 'node:crypto';
-import { execFileSync, execSync, spawn } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -128,6 +128,8 @@ import {
   inspectRunHostAuthority,
   linkedPredecessorAuthorityHash,
 } from '../lib/run-host-authority';
+import { loadHostRunCloseoutEvidence } from '../lib/run-closeout-authority';
+import { assertCanonicalRunCheckout, assertOrderedCommitAncestry } from '../lib/run-git-authority';
 import {
   buildGovernedRetrySpec,
   compareRetryPlanToPreview,
@@ -144,19 +146,26 @@ import {
   type RetryPreviewPacket,
 } from '../lib/retry-governance';
 import {
+  assertHumanRetryApprover,
+  consumeGovernedRetryHumanApproval,
+  issueGovernedRetryHumanApproval,
+} from '../lib/governed-retry-approval';
+import { dispatchOutcome, replayDispositionForRunStatus } from '../lib/hermes-dispatch-outcome';
+import { assertProviderTenantWorkspaceBinding } from '../lib/provider-human-authority';
+import {
   createGovernedRetryDispatchIdentity,
   deriveAuthoritativeRetryScope,
   governedRetryQueuePayloadHash,
   type AuthoritativeRetryScope,
   type RetryCompletionEvidence,
   type RetryIntegrationEvidence,
-  type RetryRunCloseoutEvidence,
 } from '../lib/governed-story-retry';
 import {
   advanceGovernedRetryPreparation,
   cancelGovernedRetryPreview,
   GovernedRetryStateConflictError,
   publishGovernedRetryDispatch,
+  requestGovernedRetryRunCancellation,
   refuseAbandonedGovernedRetryPreparation,
   refuseGovernedRetryPreparation,
   type RetryPreparationState,
@@ -169,6 +178,12 @@ import {
 import { safeParseTaskManifest, type TaskManifest } from '../lib/task-manifest';
 import { computeTaskManifestHash, resolveTaskManifestArtifactPaths } from '../lib/task-manifest-artifacts';
 import {
+  createTaskManifestRunLineage,
+  insertTaskManifestRunLineage,
+  loadAndVerifyTaskManifestRunLineage,
+} from '../lib/task-manifest-run-lineage';
+import {
+  computeSyntheticTaskManifestSpecHash,
   createTaskManifestExecutionEnvelope,
   writeTaskManifestExecutionEnvelope,
   type WriteTaskManifestExecutionEnvelopeResult,
@@ -293,30 +308,23 @@ function resolveTriggerWavePolicy(input: {
   orchestration: ReturnType<typeof autoSelectOrchestration>;
 } {
   const analysis = autoSelectOrchestration(input.stories);
-  let workspaceParallelRequested = false;
-  try {
-    const configPath = path.join(input.workspacePath, '.rorca', 'config.json');
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { execution?: { waveParallelism?: boolean } };
-      workspaceParallelRequested = config.execution?.waveParallelism === true;
-    }
-  } catch {
-    // Invalid/missing config is never authority to broaden execution.
+  const explicitWaveMode = input.requestedMode === 'wave-parallel';
+  const explicitParallelism = input.requestedParallelism !== undefined;
+  if (explicitWaveMode && (!explicitParallelism || input.requestedParallelism! <= 1)) {
+    throw new ValidationError('incomplete_wave_request: wave-parallel requires explicit parallelism between 2 and 4');
   }
-
-  const explicitlyParallel = input.requestedMode === 'wave-parallel'
-    || (input.requestedParallelism ?? 1) > 1;
+  if (!explicitWaveMode && explicitParallelism && input.requestedParallelism! > 1) {
+    throw new ValidationError('conflicting_wave_request: parallelism greater than one requires explicit wave-parallel mode');
+  }
+  const explicitlyParallel = explicitWaveMode && input.requestedParallelism! > 1;
   const forcedSequential = input.forceSequential === true
     || isPtyTerminalMode(input.terminalMode)
     || Boolean(input.specificStory);
-  const parallelRequested = explicitlyParallel
-    || (workspaceParallelRequested && !forcedSequential);
+  const parallelRequested = explicitlyParallel;
   const policy = enforceWaveParallelPolicy({
     source: 'pipeline-trigger',
-    requestedMode: input.requestedMode ?? (parallelRequested ? 'wave-parallel' : 'sequential'),
-    requestedParallelism: parallelRequested
-      ? (input.requestedParallelism ?? Math.max(2, analysis.parallelism))
-      : 1,
+    requestedMode: input.requestedMode ?? 'sequential',
+    requestedParallelism: parallelRequested ? input.requestedParallelism! : 1,
     forceSequential: forcedSequential,
   }, currentWaveParallelPolicyEnvironment());
 
@@ -979,6 +987,7 @@ interface PipelineRunRow {
   idempotency_key?: string | null;
   task_manifest_id?: string | null;
   task_manifest_artifacts?: Record<string, unknown> | string | null;
+  task_manifest_authority_version?: number | null;
   trigger_options?: Record<string, unknown> | string | null;
   lifecycle_status?: string | null;
   lifecycle_updated_at?: string | null;
@@ -1220,7 +1229,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
  *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated." }
- *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Requested effective story parallelism. Values above 1 require the non-production experimental gate." }
+ *               parallelism: { type: integer, minimum: 1, maximum: 4, default: 1, description: "Explicit wave parallelism. Production values 2-4 require the complete governed receipt/review/activation/cohort envelope; omitted fields remain sequential." }
  *               forceSequential: { type: boolean, default: false, description: "Force effective sequential execution." }
  *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity for governed wave qualification metadata" }
  *               rolloutCohort: { type: string, description: "Explicit governed rollout cohort metadata; it cannot override the non-production wave policy" }
@@ -1276,7 +1285,7 @@ const PipelineTriggerSchema = z.object({
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional(),
-  parallelism: z.number().int().min(1).max(10).optional(),
+  parallelism: z.number().int().min(1).max(4).optional(),
   forceSequential: z.boolean().optional(),
   qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]).optional(),
   rolloutCohort: z.string().min(1).max(128).optional(),
@@ -1568,6 +1577,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoMerge: Boolean(autoWorktree) && autoMerge === true,
       mergeStrategy: mergeStrategy ?? 'direct',
     });
+    if ((req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution) {
+      // TaskManifest v1 freezes no-deploy authority independently of whether
+      // branch/PR publication is later permitted by the release seam.
+      autonomousSafety = { ...autonomousSafety, deploy: false };
+    }
     let frozenQueuedOptions: EffectiveRunOptions | null = null;
     if (queuedRunId !== undefined) {
       const queuedId = normalizeWorkerRunId(queuedRunId);
@@ -2318,6 +2332,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       orchestration,
     };
 
+    const taskManifestAuthorityRequested =
+      (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true
+      || Boolean(existingRunId && existingRunMetadata?.task_manifest_id);
+    if (taskManifestAuthorityRequested && existingRunId) {
+      await loadAndVerifyTaskManifestRunLineage(existingRunId, workspace.path);
+    }
     const serializedTaskManifestArtifacts = effectiveTaskManifestArtifacts
       ? JSON.stringify(effectiveTaskManifestArtifacts)
       : null;
@@ -2383,13 +2403,15 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
               wave_qualification_receipt_id = $7,
               wave_source_revision = $8,
               wave_rollout_cohort = $9,
-              trigger_options = $10::jsonb
+              trigger_options = $10::jsonb,
+              task_manifest_authority_version = CASE WHEN $11 THEN 1 ELSE task_manifest_authority_version END
         WHERE id = $2`,
       [
         JSON.stringify(persistedDispatchOptions), runId, parallelism,
         waveExecutionPolicy.mode, JSON.stringify(wavePolicy), wavePolicy.fence,
         wavePolicy.receipt?.id ?? null, wavePolicy.receipt?.sourceRevision ?? null,
         wavePolicy.requested.rolloutCohort, JSON.stringify(effectiveTriggerOptions),
+        taskManifestAuthorityRequested,
       ],
     );
     if (explicitWaveRequested) {
@@ -2661,6 +2683,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ok: true,
       runId,
       queued: true,
+      ...((req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true ? {
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'queued',
+          runId,
+          runStatus: 'queued',
+          reasonCode: 'task_manifest_queued',
+        }),
+      } : {}),
       specId: path.basename(specPath, '.json'),
       queuePosition: parseInt(queuePos, 10) + 1,
       worktreePath,
@@ -2729,6 +2759,7 @@ type TaskManifestArtifactsResponse = {
   tasksMdPath: string;
   specPath: string;
   manifestHash: string;
+  syntheticSpecHash: string;
   reused: boolean;
   absolute: {
     artifactDir: string;
@@ -2869,6 +2900,14 @@ function assertTaskManifestSourceAuthority(
     );
   }
 
+  const slackSource = manifest.source.slack;
+  if (slackSource) {
+    if (!slackSource.teamId) {
+      throw validationErrorWithCode('Invalid source authority: Slack task manifests require source.slack.teamId', 'TASK_MANIFEST_SLACK_TEAM_REQUIRED');
+    }
+    assertProviderTenantWorkspaceBinding({ provider: 'slack', providerTenantId: slackSource.teamId, workspaceId: requestWorkspaceId });
+  }
+
   const sourceSpecPath = manifest.source.rorca?.specPath;
   if (sourceSpecPath && !sourceSpecPath.startsWith('forge/specs/')) {
     throw validationErrorWithCode(
@@ -2898,6 +2937,7 @@ function buildTaskManifestArtifactsResponse(
     tasksMdPath,
     specPath: envelope.relativeSpecPath,
     manifestHash: envelope.manifestHash,
+    syntheticSpecHash: envelope.syntheticSpecHash,
     reused: envelope.artifactReused,
     absolute: {
       artifactDir: envelope.artifactDir,
@@ -2926,7 +2966,7 @@ function buildTaskManifestArtifactRefs(artifacts: TaskManifestArtifactsResponse)
       kind: 'task-manifest',
       role: 'synthetic-spec',
       path: artifacts.specPath,
-      digest: artifacts.manifestHash,
+      digest: artifacts.syntheticSpecHash,
     },
   ];
 }
@@ -3053,6 +3093,7 @@ function buildPlannedTaskManifestEnvelope(workspacePath: string, manifest: TaskM
     manifestPath: paths.manifestPath,
     tasksMdPath: paths.tasksMdPath,
     manifestHash: computeTaskManifestHash(manifest),
+    syntheticSpecHash: computeSyntheticTaskManifestSpecHash(spec),
     artifactReused: false,
   };
 }
@@ -3084,6 +3125,7 @@ function buildTaskManifestTriggerOptions(input: {
     manifestId: input.manifest.manifestId,
     idempotencyKey: input.manifest.idempotencyKey,
     manifestHash: input.manifestHash,
+    syntheticSpecHash: input.artifacts.syntheticSpecHash,
     sourceRefs: {
       ...input.manifest.source,
       sourceStoryIds: input.sourceStoryIds,
@@ -3174,13 +3216,22 @@ function buildTaskManifestReplayResponse(input: {
 }): JsonRecord {
   const artifacts = parseJsonRecordLike(input.row.task_manifest_artifacts) ?? input.fallbackArtifacts;
   const artifactRefs = getStoredArtifactRefsFromTriggerOptions(input.row.trigger_options) ?? input.fallbackArtifactRefs;
+  const runId = Number(input.row.id);
+  const disposition = replayDispositionForRunStatus(input.row.status);
   return {
     ok: true,
     idempotent: true,
     reused: true,
     queued: input.row.status === 'queued',
-    runId: Number(input.row.id),
+    runId,
     status: input.row.status,
+    dispatchOutcome: dispatchOutcome({
+      disposition,
+      runId,
+      runStatus: input.row.status,
+      replayed: true,
+      reasonCode: `task_manifest_replay_${disposition}`,
+    }),
     queuePosition: input.row.queue_position,
     manifestId: input.row.task_manifest_id ?? input.manifest.manifestId,
     idempotencyKey: input.row.idempotency_key ?? input.manifest.idempotencyKey,
@@ -3313,7 +3364,21 @@ async function reserveTaskManifestRun(input: {
 
     const inserted = insertResult.rows[0];
     if (inserted) {
-      return { kind: 'created', runId: Number(inserted.id), queuePosition: inserted.queue_position };
+      const runId = Number(inserted.id);
+      await insertTaskManifestRunLineage(client, createTaskManifestRunLineage({
+        runId,
+        workspaceId: input.workspaceId,
+        rootRunId: runId,
+        parentRunId: null,
+        lineageDepth: 0,
+        manifestId: input.manifestId,
+        sourceIdempotencyKey: input.idempotencyKey,
+        manifestHash: input.manifestHash,
+        syntheticSpecHash: input.artifacts.syntheticSpecHash,
+        manifestPath: input.artifacts.manifestPath,
+        syntheticSpecPath: input.artifacts.specPath,
+      }));
+      return { kind: 'created', runId, queuePosition: inserted.queue_position };
     }
 
     const racedResult = await client.query<TaskManifestRunLookupRow>(
@@ -3333,16 +3398,6 @@ async function reserveTaskManifestRun(input: {
     assertExistingTaskManifestRunMatchesHash(raced, input.manifestHash, input.idempotencyKey);
     return { kind: 'existing', row: raced };
   });
-}
-
-async function deleteTaskManifestReservation(runId: number, idempotencyKey: string): Promise<void> {
-  await execute(
-    `DELETE FROM pipeline_runs
-      WHERE id = $1
-        AND idempotency_key = $2
-        AND status = 'queued'`,
-    [runId, idempotencyKey],
-  ).catch(() => undefined);
 }
 
 /**
@@ -3487,24 +3542,6 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       log: logger,
     });
 
-    const plannedTriggerOptions = buildTaskManifestTriggerOptions({
-      manifest,
-      manifestHash: plannedEnvelope.manifestHash,
-      artifacts: plannedArtifacts,
-      artifactRefs: plannedArtifactRefs,
-      autoWorktree: resolvedAutoWorktree,
-      mergeStrategy: resolvedMergeStrategy,
-      agentOverride: resolvedAgentOverride,
-      modelOverride: resolvedModelOverride,
-      effortLevel: resolvedEffortLevel,
-      terminalMode: resolvedTerminalMode,
-      executionEnvironment: resolvedExecutionEnvironment,
-      executionEnvironmentId: resolvedExecutionEnvironmentId,
-      executionEnvironmentSupported: executionEnvironmentResolution.supported,
-      executionOptions: taskManifestExecutionOptions,
-      sourceStoryIds: plannedEnvelope.spec.sourceStoryIds,
-    });
-
     if (resolvedDryRun) {
       const dryRunEnvelope = await writeTaskManifestExecutionEnvelope({
         workspacePath: workspace.path,
@@ -3540,6 +3577,12 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
         ok: true,
         dryRun: true,
         queued: false,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'pending_publication',
+          replayed: false,
+          retryable: false,
+          reasonCode: 'task_manifest_dry_run_preview',
+        }),
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
         manifestHash: dryRunEnvelope.manifestHash,
@@ -3574,6 +3617,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     const existingIdempotentRun = await findTaskManifestRunByIdempotencyKey(requestWorkspaceId, requestIdempotencyKey);
     if (existingIdempotentRun) {
       assertExistingTaskManifestRunMatchesHash(existingIdempotentRun, plannedEnvelope.manifestHash, requestIdempotencyKey);
+      await loadAndVerifyTaskManifestRunLineage(Number(existingIdempotentRun.id), workspace.path);
       res.status(200).json(buildTaskManifestReplayResponse({
         row: existingIdempotentRun,
         manifest,
@@ -3589,6 +3633,13 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       res.status(200).json({
         ok: false,
         conflict: true,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'conflict',
+          runId: activeConflict.activeRunId ?? null,
+          runStatus: activeConflict.activeRunId ? 'active' : null,
+          retryable: true,
+          reasonCode: 'task_manifest_active_workspace_conflict',
+        }),
         activeRunId: activeConflict.activeRunId,
         reason: activeConflict.reason,
         manifestId: manifest.manifestId,
@@ -3598,14 +3649,41 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       return;
     }
 
+    // Materialize and hash immutable artifacts before reserving lineage. A crash
+    // may leave deterministic proposal files, but can never leave a lineage row
+    // that points at bytes which were not independently verified first.
+    const envelope = await writeTaskManifestExecutionEnvelope({
+      workspacePath: workspace.path,
+      manifest,
+    });
+    const artifacts = buildTaskManifestArtifactsResponse(envelope);
+    const artifactRefs = buildTaskManifestArtifactRefs(artifacts);
+    const triggerOptions = buildTaskManifestTriggerOptions({
+      manifest,
+      manifestHash: envelope.manifestHash,
+      artifacts,
+      artifactRefs,
+      autoWorktree: resolvedAutoWorktree,
+      mergeStrategy: resolvedMergeStrategy,
+      agentOverride: resolvedAgentOverride,
+      modelOverride: resolvedModelOverride,
+      effortLevel: resolvedEffortLevel,
+      terminalMode: resolvedTerminalMode,
+      executionEnvironment: resolvedExecutionEnvironment,
+      executionEnvironmentId: resolvedExecutionEnvironmentId,
+      executionEnvironmentSupported: executionEnvironmentResolution.supported,
+      executionOptions: taskManifestExecutionOptions,
+      sourceStoryIds: envelope.spec.sourceStoryIds,
+    });
+
     const reservation = await reserveTaskManifestRun({
       workspaceId: requestWorkspaceId,
-      specPath: plannedEnvelope.relativeSpecPath,
+      specPath: envelope.relativeSpecPath,
       idempotencyKey: requestIdempotencyKey,
       manifestId: manifest.manifestId,
-      manifestHash: plannedEnvelope.manifestHash,
-      artifacts: plannedArtifacts,
-      triggerOptions: plannedTriggerOptions,
+      manifestHash: envelope.manifestHash,
+      artifacts,
+      triggerOptions,
       queue: requestBody.queue === true,
       autoWorktree: resolvedAutoWorktree,
       mergeStrategy: resolvedMergeStrategy,
@@ -3616,60 +3694,29 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     });
 
     if (reservation.kind === 'existing') {
+      await loadAndVerifyTaskManifestRunLineage(Number(reservation.row.id), workspace.path);
       res.status(200).json(buildTaskManifestReplayResponse({
         row: reservation.row,
         manifest,
-        manifestHash: plannedEnvelope.manifestHash,
-        fallbackArtifacts: plannedArtifacts,
-        fallbackArtifactRefs: plannedArtifactRefs,
+        manifestHash: envelope.manifestHash,
+        fallbackArtifacts: artifacts,
+        fallbackArtifactRefs: artifactRefs,
       }));
       return;
     }
 
-    let envelope = plannedEnvelope;
-    let artifacts = plannedArtifacts;
-    let artifactRefs = plannedArtifactRefs;
-    let triggerOptions = plannedTriggerOptions;
-    try {
-      envelope = await writeTaskManifestExecutionEnvelope({
-        workspacePath: workspace.path,
-        manifest,
-      });
-      artifacts = buildTaskManifestArtifactsResponse(envelope);
-      artifactRefs = buildTaskManifestArtifactRefs(artifacts);
-      triggerOptions = buildTaskManifestTriggerOptions({
-        manifest,
-        manifestHash: envelope.manifestHash,
-        artifacts,
-        artifactRefs,
-        autoWorktree: resolvedAutoWorktree,
-        mergeStrategy: resolvedMergeStrategy,
-        agentOverride: resolvedAgentOverride,
-        modelOverride: resolvedModelOverride,
-        effortLevel: resolvedEffortLevel,
-        terminalMode: resolvedTerminalMode,
-        executionEnvironment: resolvedExecutionEnvironment,
-        executionEnvironmentId: resolvedExecutionEnvironmentId,
-        executionEnvironmentSupported: executionEnvironmentResolution.supported,
-        executionOptions: taskManifestExecutionOptions,
-        sourceStoryIds: envelope.spec.sourceStoryIds,
-      });
-      await execute(
-        `UPDATE pipeline_runs
-            SET task_manifest_artifacts = $1::jsonb,
-                trigger_options = $2::jsonb
-          WHERE id = $3`,
-        [JSON.stringify(artifacts), JSON.stringify(triggerOptions), reservation.runId],
-      );
-    } catch (artifactError) {
-      await deleteTaskManifestReservation(reservation.runId, requestIdempotencyKey);
-      throw artifactError;
-    }
+    await loadAndVerifyTaskManifestRunLineage(reservation.runId, workspace.path);
 
     if (requestBody.queue === true) {
       res.status(202).json({
         ok: true,
         queued: true,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'queued',
+          runId: reservation.runId,
+          runStatus: 'queued',
+          reasonCode: 'task_manifest_queued',
+        }),
         runId: reservation.runId,
         queuePosition: reservation.queuePosition,
         manifestId: manifest.manifestId,
@@ -5376,7 +5423,7 @@ const PipelineRetrySchema = z.object({
   storyIds: z.array(z.string().trim().min(1).max(256)).max(100).optional(),
   forceSequential: z.boolean().optional(),
   previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
-  approvalToken: z.string().trim().min(8).max(512).optional(),
+  approvalReceipt: z.string().trim().min(64).max(4096).optional(),
   cancelPreview: z.boolean().optional(),
   safeMode: z.boolean().optional(),
   approvedPreview: z.record(z.string(), z.unknown()).optional(),
@@ -5430,9 +5477,9 @@ const PipelineRetrySchema = z.object({
  *               previewIdentity:
  *                 type: object
  *                 description: Unexpired self-verifying identity returned with the packet
- *               approvalToken:
+ *               approvalReceipt:
  *                 type: string
- *                 description: Existing explicit operator approval token required when the preview marks requiresApproval
+ *                 description: One-time expiring Rorca-issued human approval receipt required when the preview marks requiresApproval
  *               cancelPreview:
  *                 type: boolean
  *                 description: Cancel this preview before dispatch
@@ -5442,6 +5489,97 @@ const PipelineRetrySchema = z.object({
  *       404: { description: "Run not found" }
  *       409: { description: "Retry job already queued for this run" }
  */
+const RetryHumanApprovalSchema = z.object({
+  approvedPreview: z.record(z.string(), z.unknown()),
+  previewIdentity: z.object({
+    schemaVersion: z.literal('retry-preview-identity.v1'),
+    previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    originalRunId: z.number().int().positive(),
+    expiresAt: z.string().datetime(),
+    signature: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  }).strict(),
+  rationale: z.string().trim().min(10).max(2000),
+}).strict();
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/retry-approval:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Issue exact human authority for a destructive governed retry
+ *     operationId: issuePipelineRetryHumanApproval
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Only an authenticated workspace owner or admin may issue a one-time packet-bound retry receipt; service identities and Hermes cannot self-approve."
+ *     x-rorca-mcp: false
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [approvedPreview, previewIdentity, rationale]
+ *             additionalProperties: false
+ *             properties:
+ *               approvedPreview: { type: object }
+ *               previewIdentity: { type: object }
+ *               rationale: { type: string, minLength: 10, maxLength: 2000 }
+ *     responses:
+ *       201: { description: One-time expiring approval receipt }
+ *       401: { description: Authentication required }
+ *       403: { description: Human workspace approval authority required }
+ *       409: { description: Preview or idempotency binding conflict }
+ */
+export async function issueRetryHumanApprovalHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const originalRunId = Number(req.params.runId);
+    if (!Number.isSafeInteger(originalRunId) || originalRunId <= 0) throw new ValidationError('Invalid runId');
+    const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [originalRunId]);
+    if (!run) throw new NotFoundError('Run not found');
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
+    const principal = await assertHumanRetryApprover(req.user, run.workspace_id);
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    if (!idempotencyKey) throw new ValidationError('Idempotency-Key header is required');
+
+    const packet = req.body.approvedPreview as unknown as RetryPreviewPacket;
+    const identity = req.body.previewIdentity as RetryPreviewIdentity;
+    if (!verifyRetryPreview(packet) || packet.originalRunId !== originalRunId) {
+      throw new ConflictError('Approval requires the exact self-verifying retry preview packet');
+    }
+    const identityCheck = verifyRetryPreviewIdentity(identity, packet);
+    if (!identityCheck.valid) throw new ConflictError('Retry preview identity is expired, invalid, or mismatched');
+    if (!packet.requiresApproval) throw new ConflictError('Retry preview does not require human approval');
+
+    const issued = await issueGovernedRetryHumanApproval({
+      principal,
+      workspaceId: run.workspace_id,
+      originalRunId,
+      packet,
+      previewIdentity: identity,
+      rationale: req.body.rationale,
+      idempotencyKey,
+    });
+    res.status(201).json({
+      ok: true,
+      approvalReceipt: issued.receipt,
+      approvalId: issued.approvalId,
+      expiresAt: issued.expiresAt,
+      replayed: issued.replayed,
+    });
+  } catch (error) {
+    handleRouteError(res, error, '[Pipeline] Issue retry human approval');
+  }
+}
+
+router.post('/runs/:runId/retry-approval', validateBody(RetryHumanApprovalSchema), issueRetryHumanApprovalHandler);
 router.post('/runs/:runId/retry', validateBody(PipelineRetrySchema), retryPipelineRunHandler);
 
 export async function retryPipelineRunHandler(req: Request, res: Response): Promise<void> {
@@ -5454,11 +5592,11 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       return;
     }
 
-    const { storyIds, forceSequential, previewHash, approvalToken, cancelPreview, safeMode, approvedPreview: approvedPreviewRaw, previewIdentity } = req.body as {
+    const { storyIds, forceSequential: _forceSequential, previewHash, approvalReceipt, cancelPreview, safeMode, approvedPreview: approvedPreviewRaw, previewIdentity } = req.body as {
       storyIds?: string[];
       forceSequential?: boolean;
       previewHash?: string;
-      approvalToken?: string;
+      approvalReceipt?: string;
       cancelPreview?: boolean;
       approvedPreview?: RetryPreviewPacket;
       previewIdentity?: RetryPreviewIdentity;
@@ -5474,6 +5612,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       return;
     }
     const originalRun = normalizePipelineRun(originalRunRow);
+    await assertPipelineWorkspaceAccess(req, originalRun.workspace_id);
 
     // Only retry runs that have terminal failure states
     if (!['failed', 'done', 'completed', 'partial_failure'].includes(originalRun.status)) {
@@ -5522,7 +5661,10 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       }
     }
 
-    const taskManifestSynthetic = typeof originalRun.task_manifest_id === 'string' && originalRun.task_manifest_id.length > 0;
+    const verifiedTaskManifestLineage = typeof originalRun.task_manifest_id === 'string' && originalRun.task_manifest_id.length > 0
+      ? await loadAndVerifyTaskManifestRunLineage(originalRunId, workspace.path)
+      : null;
+    const taskManifestSynthetic = verifiedTaskManifestLineage !== null;
     const passReconciliation: PassReconciliationReport = taskManifestSynthetic ? {
       workspaceId: originalRun.workspace_id,
       specId: path.basename(originalRun.spec_path, '.json'),
@@ -5549,7 +5691,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     }
 
     // Fallback: if story_results is empty (subprocess HTTP calls failed), derive from spec JSON
-    if (latestByStory.size === 0 && originalRun.spec_path) {
+    if (latestByStory.size === 0 && originalRun.spec_path && !taskManifestSynthetic) {
       try {
         const wsRow = await queryOne('SELECT path FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as { path: string } | undefined;
         if (wsRow) {
@@ -5745,33 +5887,23 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
           sourceCommit: null,
         });
       }
-      const closeoutRows = await query<{ id: number; runId: string; status: string }>(
-        `SELECT id, payload->>'run_id' AS "runId", payload->>'status' AS status
-         FROM wal_events
-         WHERE event_type = 'run_closeout' AND (payload->>'run_id')::bigint = ANY($1::bigint[])
-         ORDER BY id`,
-        [originalRunLineage],
-      );
-      const retryTargetCwd = originalRun.worktree_path ?? workspace.path;
-      const integratedRevision = execSync('git rev-parse HEAD', { cwd: retryTargetCwd, encoding: 'utf8' }).trim();
-      const integrationAncestry = integrationRows.map((row) => row.resultingHead).filter((head): head is string => Boolean(head));
-      const acceptedByRun = new Map<number, string[]>();
-      for (const decision of decisions.filter((row) => row.status === 'accepted')) {
-        acceptedByRun.set(Number(decision.runId), [...(acceptedByRun.get(Number(decision.runId)) ?? []), decision.storyId]);
+      const closeoutEvidence = await loadHostRunCloseoutEvidence(originalRunLineage);
+      const targetCloseout = closeoutEvidence.find((row) => row.runId === originalRunId);
+      if (!targetCloseout || !originalRun.branch_name) {
+        throw new ConflictError('Canonical host closeout is unavailable for the retry target');
       }
-      const closeoutEvidence: RetryRunCloseoutEvidence[] = closeoutRows.map((row) => ({
-        runId: Number(row.runId),
-        status: ['done', 'completed', 'failed', 'partial_failure'].includes(row.status)
-          ? row.status as RetryRunCloseoutEvidence['status']
-          : 'failed',
-        integratedRevision,
-        integrationAncestry: [...integrationAncestry, integratedRevision],
-        acceptedStoryIds: acceptedByRun.get(Number(row.runId)) ?? [],
-        evidenceIdentity: `wal:run_closeout:${row.id}`,
-      }));
+      const retryTargetCwd = originalRun.worktree_path ?? workspace.path;
+      const checkout = assertCanonicalRunCheckout({
+        cwd: retryTargetCwd,
+        repositoryTopLevel: workspace.path,
+        branchName: originalRun.branch_name,
+        expectedHead: targetCloseout.integratedRevision,
+      });
+      assertOrderedCommitAncestry(checkout.cwd, targetCloseout.integrationAncestry, targetCloseout.integratedRevision);
       try {
         authoritativeScope = deriveAuthoritativeRetryScope({
           originalRunLineage,
+          targetRunId: originalRunId,
           completions: completionEvidence,
           integrations: integrationRows,
           closeouts: closeoutEvidence,
@@ -5804,7 +5936,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         ? { strategy: 'branch-only', autoMerge: false }
         : { strategy: retrySafety.mergeStrategy, autoMerge: retrySafety.autoMerge },
       safety: {
-        deploy: enforceSafeRetry ? false : retrySafety.deploy,
+        deploy: taskManifestSynthetic || enforceSafeRetry ? false : retrySafety.deploy,
         externalSend: enforceSafeRetry ? false : retrySafety.externalSend,
         policyLocked: retrySafety.policyLocked,
         allowBackendJest: false,
@@ -5816,13 +5948,14 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       || replayedOptions.merge.strategy === 'direct'
       || replayedOptions.safety.deploy
       || replayedOptions.safety.externalSend;
-    const highRisk = destructiveReplay || Boolean(worktreePreflight && worktreePreflight.classification !== 'fresh');
-    const retryParallelRequested = forceSequential === false && (originalRun.parallelism ?? 1) > 1;
+    // Governed retry has no independent production-wave receipt/envelope in
+    // this contract version. Never inherit wave authority from the source run
+    // or from forceSequential=false; retries remain explicitly sequential.
     const retryWavePolicy = enforceWaveParallelPolicy({
       source: 'pipeline-retry',
-      requestedMode: retryParallelRequested ? 'wave-parallel' : 'sequential',
-      requestedParallelism: retryParallelRequested ? (originalRun.parallelism ?? 1) : 1,
-      forceSequential: forceSequential !== false || highRisk || approvedPreviewRaw?.forceSequential === true || isPtyTerminalMode(originalRun.terminal_mode),
+      requestedMode: 'sequential',
+      requestedParallelism: 1,
+      forceSequential: true,
     }, currentWaveParallelPolicyEnvironment());
     const retryOrchestration = {
       mode: retryWavePolicy.mode,
@@ -5901,8 +6034,8 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new ConflictError('Retry scope differs from the approved preview; generate a new preview');
     }
     const approvedPreview = approvedPreviewRaw;
-    if (approvedPreview.requiresApproval && !approvalToken) {
-      throw new ForbiddenError('Retry preview requires the existing explicit operator approval path before destructive options may be replayed');
+    if (approvedPreview.requiresApproval && !approvalReceipt) {
+      throw new ForbiddenError('Retry preview requires an exact Rorca-issued human approval receipt');
     }
     if (unsafeWorktree) {
       await refuseAbandonedGovernedRetryPreparation({
@@ -5928,7 +6061,18 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const sequenceOffset = seqRow?.max_seq ?? 0;
     const retryTerminalMode = normalizeTerminalMode(approvedPreview.options.terminalMode);
     const retryParallelism = retryWavePolicy.parallelism;
+    const originalTaskTriggerOptions = taskManifestSynthetic
+      ? parseJsonRecordLike(originalRun.trigger_options)
+      : null;
     const retryTriggerOptions = {
+      ...(taskManifestSynthetic ? {
+        manifestHash: verifiedTaskManifestLineage!.lineage.manifestHash,
+        syntheticSpecHash: verifiedTaskManifestLineage!.lineage.syntheticSpecHash,
+        policySummary: {
+          ...(parseJsonRecordLike(originalTaskTriggerOptions?.policySummary) ?? {}),
+          deploysAllowed: false,
+        },
+      } : {}),
       orchestrationMode: retryWavePolicy.mode,
       parallelism: retryWavePolicy.parallelism,
       orchestration: retryOrchestration,
@@ -5966,13 +6110,13 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         preparation_owner: string | null; preparation_lease_expires_at: Date | string | null;
         preparation_lease_live: boolean;
         retry_run_id: number | string | null; workspace_id: string; original_run_id: number | string;
-        idempotency_key: string | null; packet: RetryPreviewPacket;
+        idempotency_key: string | null; packet: RetryPreviewPacket; human_approval_id: string | null;
       }>(
         `SELECT preview_hash, status, preparation_state, preparation_owner,
                 preparation_lease_expires_at,
                 (preparation_owner IS NOT NULL AND preparation_lease_expires_at > NOW()) AS preparation_lease_live,
                 retry_run_id, workspace_id,
-                original_run_id, idempotency_key, packet
+                original_run_id, idempotency_key, packet, human_approval_id
          FROM pipeline_retry_previews
          WHERE preview_hash = $1 OR (workspace_id = $2 AND idempotency_key = $3)
          ORDER BY (preview_hash = $1) DESC
@@ -5991,7 +6135,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
                      'preparing',$10,NOW() + INTERVAL '5 minutes',1)`,
           [
             previewHash, originalRunId, originalRun.workspace_id, scopeHash,
-            JSON.stringify(approvedPreview), approvalToken ? retryHash({ approvalToken }) : null,
+            JSON.stringify(approvedPreview), null,
             retryHash(previewIdentity), previewIdentity.expiresAt, dispatchIdempotencyKey,
             preparationOwner,
           ],
@@ -6003,9 +6147,10 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
              auto_worktree, auto_merge, include_graph, merge_strategy, effective_options,
              trigger_options, orchestration_mode, expected_story_ids, excluded_story_ids,
              execution_workspace_path, execution_worktree_path,
-             predecessor_pass_story_ids, predecessor_authority_hash)
+             predecessor_pass_story_ids, predecessor_authority_hash,
+             task_manifest_id, task_manifest_artifacts, task_manifest_authority_version)
            VALUES ($1,$2,'queued','retry',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-                   $15::jsonb,$16::jsonb,$17,$18::text[],'{}'::text[],$19,$20,$21::text[],$22)
+                   $15::jsonb,$16::jsonb,$17,$18::text[],'{}'::text[],$19,$20,$21::text[],$22,$23,$24::jsonb,$25)
            RETURNING id`,
           [
             originalRun.spec_path, originalRun.workspace_id, originalRun.branch_name,
@@ -6025,13 +6170,50 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
                 commitSha: story.commitSha!,
               })))
               : null,
+            originalRun.task_manifest_id ?? null,
+            originalRun.task_manifest_artifacts == null
+              ? null
+              : JSON.stringify(originalRun.task_manifest_artifacts),
+            taskManifestSynthetic ? 1 : null,
           ],
         );
         const runId = normalizeWorkerRunId(runResult.rows[0].id);
+        if (verifiedTaskManifestLineage) {
+          const parent = verifiedTaskManifestLineage.lineage;
+          await insertTaskManifestRunLineage(client, createTaskManifestRunLineage({
+            runId,
+            workspaceId: originalRun.workspace_id,
+            rootRunId: parent.rootRunId,
+            parentRunId: originalRunId,
+            lineageDepth: parent.lineageDepth + 1,
+            manifestId: parent.manifestId,
+            sourceIdempotencyKey: parent.sourceIdempotencyKey,
+            manifestHash: parent.manifestHash,
+            syntheticSpecHash: parent.syntheticSpecHash,
+            manifestPath: parent.manifestPath,
+            syntheticSpecPath: parent.syntheticSpecPath,
+          }));
+        }
+        let humanApprovalId: string | null = null;
+        if (approvedPreview.requiresApproval) {
+          const consumed = await consumeGovernedRetryHumanApproval(client, {
+            receipt: approvalReceipt!,
+            workspaceId: originalRun.workspace_id,
+            originalRunId,
+            previewHash,
+            packetHash: retryHash(approvedPreview),
+            previewIdentityHash: retryHash(previewIdentity),
+            scopeHash,
+            dispatchIdempotencyKey,
+            retryRunId: runId,
+          });
+          humanApprovalId = consumed.approvalId;
+        }
         await client.query(
-          `UPDATE pipeline_retry_previews SET retry_run_id = $2
+          `UPDATE pipeline_retry_previews
+           SET retry_run_id = $2, human_approval_id = $4
            WHERE preview_hash = $1 AND status = 'approved' AND preparation_owner = $3`,
-          [previewHash, runId, preparationOwner],
+          [previewHash, runId, preparationOwner, humanApprovalId],
         );
         return { action: 'prepare', runId, state: 'preparing' };
       }
@@ -6044,6 +6226,23 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       ) throw new ConflictError('Retry dispatch Idempotency-Key was reused with a different preview');
 
       const runId = existing.retry_run_id == null ? null : normalizeWorkerRunId(existing.retry_run_id);
+      if (approvedPreview.requiresApproval && runId !== null) {
+        if (!approvalReceipt) throw new ForbiddenError('Exact approval receipt is required to replay this destructive retry');
+        const consumed = await consumeGovernedRetryHumanApproval(client, {
+          receipt: approvalReceipt,
+          workspaceId: originalRun.workspace_id,
+          originalRunId,
+          previewHash,
+          packetHash: retryHash(approvedPreview),
+          previewIdentityHash: retryHash(previewIdentity),
+          scopeHash,
+          dispatchIdempotencyKey,
+          retryRunId: runId,
+        });
+        if (existing.human_approval_id !== consumed.approvalId) {
+          throw new ConflictError('Retry preview is bound to a different human approval receipt');
+        }
+      }
       if (existing.status === 'dispatched' && runId !== null) return { action: 'duplicate', runId };
       if (existing.status === 'cancelled' || existing.status === 'refused') {
         return { action: 'terminal', terminal: existing.status, runId };
@@ -6117,14 +6316,33 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         runId: reservation.runId,
         changeKind: 'retry_dispatched',
       });
-      res.status(200).json({ ok: true, queued: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+      res.status(200).json({
+        ok: true, queued: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({ disposition: 'already_queued', runId: reservation.runId, runStatus: 'queued', replayed: true, reasonCode: 'retry_already_queued' }),
+      });
       return;
     }
     if (reservation.action === 'terminal') {
-      throw new ConflictError(`Retry preview is ${reservation.terminal} and no longer dispatchable`);
+      const refused = reservation.terminal === 'refused';
+      res.status(200).json({
+        ok: !refused, queued: false, terminal: reservation.terminal, duplicate: true,
+        runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({
+          disposition: refused ? 'refused' : 'terminal_failure',
+          runId: reservation.runId,
+          runStatus: reservation.terminal,
+          replayed: true,
+          retryable: false,
+          reasonCode: `retry_terminal_${reservation.terminal}`,
+        }),
+      });
+      return;
     }
     if (reservation.action === 'pending') {
-      res.status(200).json({ ok: true, queued: false, pending: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+      res.status(200).json({
+        ok: true, queued: false, pending: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({ disposition: 'pending_publication', runId: reservation.runId, runStatus: 'queued', replayed: true, reasonCode: 'retry_publication_pending' }),
+      });
       return;
     }
 
@@ -6158,7 +6376,18 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       });
       if (publication.outcome === 'cancelled' || publication.outcome === 'refused') {
         ownedRetryPreparation = null;
-        res.status(200).json({ ok: true, queued: false, terminal: publication.outcome, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+        res.status(200).json({
+          ok: publication.outcome !== 'refused', queued: false, terminal: publication.outcome, duplicate: true,
+          runId: reservation.runId, originalRunId, previewHash,
+          dispatchOutcome: dispatchOutcome({
+            disposition: publication.outcome === 'refused' ? 'refused' : 'terminal_failure',
+            runId: reservation.runId,
+            runStatus: publication.outcome,
+            replayed: true,
+            retryable: false,
+            reasonCode: `retry_terminal_${publication.outcome}`,
+          }),
+        });
         return;
       }
       if (publication.outcome !== 'published') {
@@ -6171,7 +6400,10 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         runId: reservation.runId,
         changeKind: 'retry_dispatched',
       });
-      res.status(200).json({ ok: true, queued: true, duplicate: true, recovered: true, runId: reservation.runId, originalRunId, previewHash });
+      res.status(200).json({
+        ok: true, queued: true, duplicate: true, recovered: true, runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({ disposition: 'already_queued', runId: reservation.runId, runStatus: 'queued', replayed: true, reasonCode: 'retry_publication_recovered' }),
+      });
       return;
     }
     const newRunId = reservation.runId;
@@ -6361,6 +6593,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       newRunId,
     ]);
 
+    const verifiedRetryTaskLineage = taskManifestSynthetic
+      ? await loadAndVerifyTaskManifestRunLineage(Number(newRunId), workspace.path)
+      : null;
     const queuePayloadAuthority = {
       runId: Number(newRunId),
       originalRunId,
@@ -6369,6 +6604,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       previewHash,
       approvedPreview: approvedPreview as unknown as Record<string, unknown>,
       generatedPlanHash: planComparison.scopeHash,
+      taskManifestLineageHash: verifiedRetryTaskLineage?.lineage.lineageIdentityHash ?? null,
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
       runSpecPath: retrySpecPath,
@@ -6424,6 +6660,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       approvedPreviewHash: previewHash,
       scopeHash,
       evidenceHash: effectiveAuthority.evidenceHash,
+      taskManifestLineageHash: verifiedRetryTaskLineage?.lineage.lineageIdentityHash ?? null,
       storyAttempts: retriedStoryInfo.map((story) => ({
         ...story,
         sourceRunId: originalRunId,
@@ -6523,8 +6760,15 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     if (publication.outcome === 'cancelled' || publication.outcome === 'refused') {
       ownedRetryPreparation = null;
       res.status(200).json({
-        ok: true, queued: false, terminal: publication.outcome, runId: newRunId,
+        ok: publication.outcome !== 'refused', queued: false, terminal: publication.outcome, runId: newRunId,
         originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({
+          disposition: publication.outcome === 'refused' ? 'refused' : 'terminal_failure',
+          runId: newRunId,
+          runStatus: publication.outcome,
+          retryable: false,
+          reasonCode: `retry_terminal_${publication.outcome}`,
+        }),
       });
       return;
     }
@@ -6544,6 +6788,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     res.status(201).json({
       ok: true,
       queued: true,
+      dispatchOutcome: dispatchOutcome({ disposition: 'queued', runId: newRunId, runStatus: 'queued', reasonCode: 'retry_queued' }),
       runId: newRunId,
       originalRunId,
       queuePosition: 1,
@@ -6893,6 +7138,29 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     }
 
     await assertPipelineWorkspaceAccess(req, run.workspace_id);
+    const governedCancellation = await requestGovernedRetryRunCancellation({
+      runId,
+      workspaceId: run.workspace_id,
+      requestedBy: req.user?.id ?? 'unknown',
+      reason: 'operator_cancelled_run',
+    });
+    if (governedCancellation.outcome !== 'not_governed_retry') {
+      if (governedCancellation.outcome === 'cancelled_before_claim') {
+        if (governedCancellation.bossJobId) {
+          await getBoss().cancel('pipeline:retry', governedCancellation.bossJobId);
+        }
+        res.json({ ok: true, runId, status: 'cancelled', governedRetry: true });
+        return;
+      }
+      if (governedCancellation.outcome === 'termination_required') {
+        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
+        res.json({ ok: true, runId, status: 'cancelling', governedRetry: true });
+        return;
+      }
+      res.json({ ok: true, runId, status: 'terminal', governedRetry: true });
+      return;
+    }
+
     const { status } = run;
 
     // Already done — conflict
@@ -7021,6 +7289,22 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
     }
 
     await assertPipelineWorkspaceAccess(req, run.workspace_id);
+    const governedCancellation = await requestGovernedRetryRunCancellation({
+      runId,
+      workspaceId: run.workspace_id,
+      requestedBy: req.user?.id ?? 'unknown',
+      reason: 'operator_deleted_queued_run',
+    });
+    if (governedCancellation.outcome !== 'not_governed_retry') {
+      if (governedCancellation.outcome !== 'cancelled_before_claim') {
+        throw new ConflictError(`Governed retry cancellation is ${governedCancellation.outcome}`);
+      }
+      if (governedCancellation.bossJobId) {
+        await getBoss().cancel('pipeline:retry', governedCancellation.bossJobId);
+      }
+      res.json({ ok: true, runId, governedRetry: true });
+      return;
+    }
     if (run.status !== 'queued') {
       throw new ConflictError(`Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE`);
       return;

@@ -100,17 +100,18 @@ export function evaluateWaveParallelPolicy(
     };
   }
 
+  // This module validates the legacy execution shape only. Production wave
+  // authority is resolved by wave-production-governance and its persisted,
+  // fenced envelope at API, worker, engine, and local-runner boundaries.
   if (production) {
     return {
-      allowed: false,
-      reason: 'production_forbidden',
-      message: 'Wave-parallel execution is not permitted in production; request sequential execution instead.',
-      details: {
+      allowed: true,
+      effective: {
+        mode: 'wave-parallel',
+        parallelism: Math.max(2, Math.trunc(requestedParallelism)),
+        experimental: false,
+        optInIgnored: optedIn,
         source: request.source,
-        requestedMode: request.requestedMode ?? 'wave-parallel',
-        requestedParallelism,
-        experimentalOptInIgnored: optedIn,
-        action: 'Set orchestrationMode="sequential" and parallelism=1. The experimental opt-in is ignored in production.',
       },
     };
   }

@@ -111,7 +111,6 @@ import {
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
-  recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
 import { SpecReadinessReasonCode } from '../reason-codes';
 import {
@@ -137,6 +136,15 @@ import {
   type PersistAuthoringBinding,
 } from '../lib/ssdlc-forge-authoring';
 import { planAuthoring } from '../lib/ssdlc-authoring-planner';
+import {
+  claimAuthoringMutation,
+  completeAuthoringMutation,
+} from '../lib/authoring-mutations';
+import {
+  ProviderHumanEventSchema,
+  providerHumanActionHash,
+  verifyAndPersistProviderHumanAuthority,
+} from '../lib/provider-human-authority';
 import {
   backfillWorkspacePlans,
   compileSpecPlan,
@@ -1740,7 +1748,11 @@ interface ForgePersistResult {
 async function persistExplicitDraftInternal(
   req: Request | undefined,
   body: z.infer<typeof PersistSpecDraftSchema>,
-  options?: { sourceMode?: string; invocationSurface?: string },
+  options?: {
+    sourceMode?: string;
+    invocationSurface?: string;
+    mutationReceipt?: { receiptId: string; requestHash: string; idempotencyKey: string };
+  },
 ): Promise<ForgePersistResult> {
   const workspaceId = String(body.workspaceId);
   const workspace = await getWorkspace(workspaceId, req);
@@ -1783,11 +1795,25 @@ async function persistExplicitDraftInternal(
     await assertAuthoritativePreflightReceipt(workspaceId, authoringBinding);
     await assertAuthoringConfirmation(workspaceId, authoringBinding);
   }
-  const persistedAuthoring = buildPersistedAuthoringMetadata({
-    binding: authoringBinding,
-    spec: authoringSpec,
-    stories: normalizedStories,
-  });
+  const confirmedRequester = authoringBinding?.confirmationReceiptId
+    ? await queryOne<{ actor: string; payload: Record<string, unknown> | string }>(
+      `SELECT actor, payload FROM wal_events
+       WHERE id = $1 AND workspace_id = $2 AND event_type = 'spec_authoring_plan_confirmed'`,
+      [authoringBinding.confirmationReceiptId, workspaceId],
+    )
+    : undefined;
+  const confirmationPayload = confirmedRequester
+    ? (typeof confirmedRequester.payload === 'string' ? JSON.parse(confirmedRequester.payload) : confirmedRequester.payload)
+    : undefined;
+  const persistedAuthoring = {
+    ...buildPersistedAuthoringMetadata({
+      binding: authoringBinding,
+      spec: authoringSpec,
+      stories: normalizedStories,
+    }),
+    ...(typeof confirmationPayload?.actorIdentity === 'string' ? { requesterActorId: confirmationPayload.actorIdentity } : {}),
+    ...(options?.mutationReceipt ? { mutationReceipt: options.mutationReceipt } : {}),
+  };
   const telemetry = authoringTelemetry(authoringBinding, 'persisting');
 
   const catalogs = await buildCatalogContext(workspace.path, workspaceId);
@@ -3040,7 +3066,16 @@ router.post('/authoring/preflight', validateBody(AuthoringPreflightRequestSchema
       [String(parsed.workspaceId), JSON.stringify(payload)],
     );
     if (walEvent) broadcastAll(walEvent);
-    res.json({ ...result, preflightReceiptId: walEvent!.id, telemetry: payload });
+    const confirmationTargetHash = result.state === 'accepted' && result.confirmationRequired
+      ? providerHumanActionHash({
+        purpose: 'authoring_plan_confirmation',
+        workspaceId: String(parsed.workspaceId),
+        acceptedPlanHash: result.acceptedPlanHash,
+        acceptedPreflightHash: result.acceptedPreflightHash,
+        preflightReceiptId: walEvent!.id,
+      })
+      : null;
+    res.json({ ...result, preflightReceiptId: walEvent!.id, confirmationTargetHash, telemetry: payload });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Authoring preflight');
   }
@@ -3062,14 +3097,14 @@ router.post('/authoring/preflight', validateBody(AuthoringPreflightRequestSchema
  *         application/json:
  *           schema:
  *             type: object
- *             required: [workspaceId, acceptedPlanHash, acceptedPreflightHash, confirmed, actor]
+ *             required: [workspaceId, acceptedPlanHash, acceptedPreflightHash, confirmed]
  *             additionalProperties: false
  *             properties:
  *               workspaceId: { type: string }
  *               acceptedPlanHash: { type: string }
  *               acceptedPreflightHash: { type: string }
  *               confirmed: { type: boolean, enum: [true] }
- *               actor: { type: object, additionalProperties: false }
+ *               attestation: { type: object, additionalProperties: false, description: "Required when a service principal relays an authenticated provider-human event." }
  *     responses:
  *       200: { description: Auditable confirmation receipt }
  *       404: { description: Accepted preflight identity not found }
@@ -3078,8 +3113,20 @@ router.post('/authoring/preflight/confirm', validateBody(AuthoringConfirmationRe
   try {
     const input = AuthoringConfirmationRequestSchema.parse(req.body);
     const workspaceId = String(input.workspaceId);
-    const preflightEvent = await queryOne<{ id: number }>(
-      `SELECT id FROM wal_events
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    if (!idempotencyKey) throw new ValidationError('Idempotency-Key header is required for authoring confirmation');
+    const claim = await claimAuthoringMutation({
+      workspaceId,
+      operation: 'confirm',
+      idempotencyKey,
+      request: input,
+    });
+    if (claim.completed && claim.responseBody) {
+      res.status(claim.responseStatus ?? 200).json(claim.responseBody);
+      return;
+    }
+    const preflightEvent = await queryOne<{ id: number; payload: Record<string, unknown> | string }>(
+      `SELECT id, payload FROM wal_events
        WHERE workspace_id = $1
          AND event_type = 'spec_authoring_preflight'
          AND payload::jsonb->>'state' = 'accepted'
@@ -3091,27 +3138,70 @@ router.post('/authoring/preflight/confirm', validateBody(AuthoringConfirmationRe
     if (!preflightEvent) {
       throw new NotFoundError('Accepted authoring preflight');
     }
+    const targetHash = providerHumanActionHash({
+      purpose: 'authoring_plan_confirmation',
+      workspaceId,
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      preflightReceiptId: preflightEvent.id,
+    });
+    const servicePrincipal = !req.user || req.user.email.toLowerCase().endsWith('@rorca.internal');
+    let actorIdentity: string;
+    let providerReceiptId: string | null = null;
+    if (input.attestation) {
+      const verified = await verifyAndPersistProviderHumanAuthority({
+        workspaceId,
+        purpose: 'authoring_plan_confirmation',
+        targetHash,
+        event: input.attestation,
+      });
+      actorIdentity = verified.actorId;
+      providerReceiptId = verified.receiptId;
+    } else {
+      if (servicePrincipal) throw new ForbiddenError('Service principals must relay exact provider-human confirmation authority');
+      actorIdentity = req.user!.id;
+    }
     const payload = {
       acceptedPlanHash: input.acceptedPlanHash,
       acceptedPreflightHash: input.acceptedPreflightHash,
-      actorType: input.actor.type,
-      actorIdentity: input.actor.identity,
+      actorType: 'human',
+      actorIdentity,
+      providerReceiptId,
+      targetHash,
       preflightWalEventId: preflightEvent.id,
       inferredFromModelOutput: false,
       grantsDownstreamApproval: false,
     };
     const receipt = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
-       VALUES ('spec_authoring_plan_confirmed', $1, $2, $3) RETURNING *`,
-      [workspaceId, input.actor.identity, JSON.stringify(payload)],
+      `WITH inserted AS (
+         INSERT INTO wal_events (event_type, workspace_id, actor, payload, ingest_key)
+         VALUES ('spec_authoring_plan_confirmed', $1, $2, $3, $4)
+         ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+         RETURNING *
+       )
+       SELECT * FROM inserted
+       UNION ALL
+       SELECT * FROM wal_events WHERE ingest_key = $4
+       LIMIT 1`,
+      [workspaceId, actorIdentity, JSON.stringify(payload), `authoring-confirm:v1:${claim.receiptId}`],
     );
     if (receipt) broadcastAll(receipt);
-    res.json({
+    const response = {
       confirmationReceiptId: receipt!.id,
+      providerReceiptId,
+      targetHash,
       acceptedPlanHash: input.acceptedPlanHash,
       acceptedPreflightHash: input.acceptedPreflightHash,
       grantsDownstreamApproval: false,
+      mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
+    };
+    await completeAuthoringMutation({
+      receiptId: claim.receiptId,
+      requestHash: claim.requestHash,
+      responseStatus: 200,
+      responseBody: response,
     });
+    res.json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Authoring confirmation');
   }
@@ -5065,11 +5155,44 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
   try {
     const parsedBody = PersistSpecDraftSchema.parse(req.body);
     resolvePostSavePolicy(resolvePersistPostSavePolicyInput(parsedBody));
-    const result = await persistExplicitDraftInternal(req, parsedBody);
-    res.json({
+    const workspaceId = String(parsedBody.workspaceId);
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    const claim = parsedBody.authoringPreflight
+      ? await claimAuthoringMutation({
+        workspaceId,
+        operation: 'persist',
+        idempotencyKey: idempotencyKey ?? '',
+        request: parsedBody,
+        specId: parsedBody.slug ?? parsedBody.title,
+      })
+      : null;
+    if (claim?.completed && claim.responseBody) {
+      res.status(claim.responseStatus ?? 200).json(claim.responseBody);
+      return;
+    }
+    const result = await persistExplicitDraftInternal(req, parsedBody, claim ? {
+      sourceMode: 'skill-first-explicit',
+      invocationSurface: 'api.specs.persist',
+      mutationReceipt: {
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        idempotencyKey: idempotencyKey!,
+      },
+    } : undefined);
+    const response = {
       ...result,
       requestedPolicy: resolvePersistPostSavePolicyInput(parsedBody) ?? null,
-    });
+      ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
+    };
+    if (claim) {
+      await completeAuthoringMutation({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        responseStatus: 200,
+        responseBody: response,
+      });
+    }
+    res.json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Persist explicit draft');
   }
@@ -9474,6 +9597,95 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
   }
 });
 
+const SpecHumanApprovalSchema = z.object({
+  acceptedPlanHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  acceptedPreflightHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  persistReceiptId: z.string().uuid(),
+  persistRequestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  attestation: ProviderHumanEventSchema,
+}).strict();
+
+const ApproveSpecRequestSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  readinessOverride: z.literal(false).optional(),
+  humanApproval: SpecHumanApprovalSchema.optional(),
+}).strict();
+
+const SpecApprovalTargetRequestSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  acceptedPlanHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  acceptedPreflightHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  persistReceiptId: z.string().uuid(),
+  persistRequestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+}).strict();
+
+/**
+ * @swagger
+ * /api/specs/{specId}/approval-target:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Resolve the exact provider-human spec approval target
+ *     operationId: resolveSpecApprovalTarget
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Provider adapters need a read-only canonical target hash before collecting a separately signed human approval action."
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Exact approval target and readiness fingerprint }
+ *       409: { description: Persisted authoring identity mismatch }
+ */
+router.post('/:specId/approval-target', validateBody(SpecApprovalTargetRequestSchema), async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const input = SpecApprovalTargetRequestSchema.parse(req.body);
+    const workspaceId = String(input.workspaceId);
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) throw new NotFoundError('Workspace not found');
+    const { pendingDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    if (!fs.existsSync(pendingFile)) throw new NotFoundError(`Spec '${specId}' not found in pending`);
+    const pendingContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8')) as Record<string, unknown>;
+    const authoring = pendingContent.authoring as Record<string, unknown> | undefined;
+    if (!authoring || authoring.state !== 'validated') throw new UnprocessableError('Spec approval target requires validated authoring state', 'AUTHORING_PREFLIGHT_REQUIRED');
+    const parentPlan = authoring.parentAuthoringPlan as Record<string, unknown> | undefined;
+    const mutationReceipt = authoring.mutationReceipt as Record<string, unknown> | undefined;
+    if (parentPlan?.acceptedPlanHash !== input.acceptedPlanHash
+      || parentPlan?.acceptedPreflightHash !== input.acceptedPreflightHash
+      || mutationReceipt?.receiptId !== input.persistReceiptId
+      || mutationReceipt?.requestHash !== input.persistRequestHash) {
+      throw new ConflictError('Spec approval target differs from persisted authoring authority');
+    }
+    const readiness = await getSpecReadiness({
+      workspaceId, workspacePath: workspace.path, specId,
+      specPath: `forge/specs/pending/${specId}.json`,
+    });
+    assertSpecReadinessAllowsMutation(readiness, false);
+    const materialHash = providerHumanActionHash(pendingContent);
+    const readinessFingerprint = providerHumanActionHash(readiness);
+    const targetHash = providerHumanActionHash({
+      purpose: 'spec_set_approval', workspaceId,
+      specs: [{ specId, materialHash, persistReceiptId: input.persistReceiptId }],
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      readinessFingerprint,
+    });
+    res.json({
+      schemaVersion: 'rorca.spec-approval-target.v1', targetHash, workspaceId, specId,
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      persistReceiptId: input.persistReceiptId,
+      persistRequestHash: input.persistRequestHash,
+      materialHash, readinessFingerprint,
+      requesterActorId: typeof authoring.requesterActorId === 'string' ? authoring.requesterActorId : null,
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Approval target');
+  }
+});
+
 /**
  * @swagger
  * /api/specs/{specId}/approve:
@@ -9514,14 +9726,28 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
  *                 specPath: { type: string }
  *       404: { description: "Spec not found in pending/" }
  */
-router.post('/:specId/approve', async (req: Request, res: Response) => {
+router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (req: Request, res: Response) => {
   try {
     const specId = String(req.params.specId);
-    const { workspaceId, readinessOverride, runAnywayOverride, overrideReadinessGate } = req.body;
-    const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
-
-    if (!workspaceId) {
-      throw new ValidationError('Missing required field: workspaceId');
+    const input = ApproveSpecRequestSchema.parse(req.body);
+    const workspaceId = String(input.workspaceId);
+    const readinessOverrideRequested = false;
+    const servicePrincipal = !req.user || req.user.email.toLowerCase().endsWith('@rorca.internal');
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    if ((input.humanApproval || servicePrincipal) && !idempotencyKey) {
+      throw new ValidationError('Idempotency-Key header is required for governed spec approval');
+    }
+    const claim = idempotencyKey
+      ? await claimAuthoringMutation({
+        workspaceId,
+        operation: 'approve',
+        idempotencyKey,
+        request: { specId, ...input },
+        specId,
+      })
+      : null;
+    if (claim?.completed && claim.responseBody) {
+      res.status(claim.responseStatus ?? 200).json(claim.responseBody);
       return;
     }
 
@@ -9564,23 +9790,97 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
       specPath: `forge/specs/pending/${specId}.json`,
     });
     assertSpecReadinessAllowsMutation(readiness, readinessOverrideRequested);
-    if (readiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
-      await recordSpecReadinessOverride({ workspaceId, specId, action: 'approve', readiness });
+
+    let providerApproval: { receiptId: string; actorId: string; targetHash: string } | null = null;
+    if (input.humanApproval) {
+      const authoringRecord = authoring as Record<string, unknown>;
+      const parentPlan = authoringRecord.parentAuthoringPlan as Record<string, unknown> | undefined;
+      const mutationReceipt = authoringRecord.mutationReceipt as Record<string, unknown> | undefined;
+      if (parentPlan?.acceptedPlanHash !== input.humanApproval.acceptedPlanHash
+        || parentPlan?.acceptedPreflightHash !== input.humanApproval.acceptedPreflightHash
+        || mutationReceipt?.receiptId !== input.humanApproval.persistReceiptId
+        || mutationReceipt?.requestHash !== input.humanApproval.persistRequestHash) {
+        throw new ConflictError('Spec approval target differs from persisted authoring authority');
+      }
+      const targetHash = providerHumanActionHash({
+        purpose: 'spec_set_approval',
+        workspaceId,
+        specs: [{
+          specId,
+          materialHash: providerHumanActionHash(pendingContent),
+          persistReceiptId: input.humanApproval.persistReceiptId,
+        }],
+        acceptedPlanHash: input.humanApproval.acceptedPlanHash,
+        acceptedPreflightHash: input.humanApproval.acceptedPreflightHash,
+        readinessFingerprint: providerHumanActionHash(readiness),
+      });
+      const receipt = await verifyAndPersistProviderHumanAuthority({
+        workspaceId,
+        purpose: 'spec_set_approval',
+        targetHash,
+        event: input.humanApproval.attestation,
+        requesterActorId: typeof authoringRecord.requesterActorId === 'string' ? authoringRecord.requesterActorId : null,
+        requireDistinctActor: ['high', 'critical'].includes(String(
+          (authoringRecord.lifecycleCompiler as Record<string, unknown> | undefined)?.riskLevel ?? '',
+        ).toLowerCase()),
+      });
+      providerApproval = { receiptId: receipt.receiptId, actorId: receipt.actorId, targetHash };
+      authoringRecord.providerApproval = {
+        schemaVersion: 'provider-human-event.v1',
+        receiptId: receipt.receiptId,
+        actorId: receipt.actorId,
+        provider: input.humanApproval.attestation.provider,
+        providerTenantId: input.humanApproval.attestation.providerTenantId,
+        conversationId: input.humanApproval.attestation.conversationId,
+        threadId: input.humanApproval.attestation.threadId,
+        messageId: input.humanApproval.attestation.messageId,
+        targetHash,
+        acceptedPlanHash: input.humanApproval.acceptedPlanHash,
+        acceptedPreflightHash: input.humanApproval.acceptedPreflightHash,
+        persistReceiptId: input.humanApproval.persistReceiptId,
+      };
+      fs.writeFileSync(pendingFile, `${JSON.stringify(pendingContent, null, 2)}\n`, 'utf8');
+      const fileDescriptor = fs.openSync(pendingFile, 'r');
+      try { fs.fsyncSync(fileDescriptor); } finally { fs.closeSync(fileDescriptor); }
+    } else if (servicePrincipal) {
+      throw new ForbiddenError('Service principals must relay exact provider-human approval authority');
     }
 
     // Create approved/ if needed and move the file
     fs.mkdirSync(approvedDir, { recursive: true });
     const approvedFile = path.join(approvedDir, `${specId}.json`);
     fs.renameSync(pendingFile, approvedFile);
+    const approvedDirFd = fs.openSync(approvedDir, fs.constants.O_RDONLY);
+    try { fs.fsyncSync(approvedDirFd); } finally { fs.closeSync(approvedDirFd); }
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_approved', $1, $2, 'user', $3) RETURNING *`,
-      [specId, workspaceId, JSON.stringify({ workspaceId })],
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload, ingest_key)
+       VALUES ('spec_approved', $1, $2, $3, $4, $5)
+       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+       RETURNING *`,
+      [specId, workspaceId, providerApproval?.actorId ?? req.user!.id,
+        JSON.stringify({ workspaceId, providerApproval }),
+        claim ? `authoring-approve:v1:${claim.receiptId}` : null],
     );
     if (walEvent) broadcastAll(walEvent);
 
-    res.json({ ok: true, approvedPath: approvedFile, readiness });
+    const response = {
+      ok: true,
+      approvedPath: approvedFile,
+      readiness,
+      ...(providerApproval ? { providerApproval } : {}),
+      ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
+    };
+    if (claim) {
+      await completeAuthoringMutation({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        responseStatus: 200,
+        responseBody: response,
+      });
+    }
+    res.json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Approve');
   }

@@ -12,6 +12,7 @@ import { AppError } from './errors';
 import {
   EXECUTION_ENGINE_RESULT_AUTHORITY,
   persistCanonicalStoryResult,
+  stageIntegratedPassRecoveryPacket,
   type CanonicalStoryResultInput,
   type CanonicalStoryResultOutcome,
   type StoryResultAtomicFinalizationOptions,
@@ -84,6 +85,11 @@ export async function deliverEngineStoryResult(
 
   try {
     const finalizationOptions = { integrationFinalization };
+    if (integrationFinalization && !dependencies.persist) {
+      // Freeze recovery authority in the application ledger before the result
+      // transaction. A later journal is only a proposal to trigger this scan.
+      await stageIntegratedPassRecoveryPacket(canonicalInput, finalizationOptions);
+    }
     return dependencies.persist
       ? await dependencies.persist(canonicalInput, finalizationOptions)
       : await persistCanonicalStoryResult(canonicalInput, EXECUTION_ENGINE_RESULT_AUTHORITY, finalizationOptions);

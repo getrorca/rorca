@@ -188,19 +188,16 @@ async function runJob(job: any): Promise<void> {
       throw new Error('wave_parallel_denied:local_runner_missing_policy');
     }
 
-    // Keep the legacy non-production experiment gate. Governed production wave
-    // dispatches instead require the stronger persisted envelope and server-side
-    // revalidation below; the legacy gate intentionally cannot authorize them.
-    if (!(process.env.NODE_ENV === 'production' && payloadParallelism > 1)) {
-      enforceWaveDispatchConsistency({
-        source: 'local-runner-job',
-        payloadMode,
-        payloadParallelism,
-        rowParallelism: payloadParallelism,
-        triggerOptions: payload.triggerOptions,
-        environment: currentWaveParallelPolicyEnvironment(),
-      });
-    }
+    // Legacy policy validates shape only. Production authority comes solely
+    // from the strict embedded envelope and server revalidation below.
+    enforceWaveDispatchConsistency({
+      source: 'local-runner-job',
+      payloadMode,
+      payloadParallelism,
+      rowParallelism: payloadParallelism,
+      triggerOptions: payload.triggerOptions,
+      environment: currentWaveParallelPolicyEnvironment(),
+    });
 
     const currentPolicy = await api<{
       allowed: boolean;

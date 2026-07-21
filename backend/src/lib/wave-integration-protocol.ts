@@ -228,7 +228,7 @@ function conflictFileIdentities(cwd: string, stages: readonly UnmergedStage[]): 
   return { files, truncated: paths.length > files.length };
 }
 
-class WaveConflictAbort extends Error {
+export class WaveConflictAbort extends Error {
   constructor(readonly ledgerKey: string) {
     super('merge conflict was durably attributed and aborted');
   }
@@ -267,6 +267,22 @@ function assertConflictEvidence(record: WaveIntegrationRecord): void {
       || !Array.isArray(file.modes)
       || file.modes.some(mode => !/^\d{6}$/.test(mode))
     ) throw new Error('[wave-integration] conflicting file identity is malformed');
+  }
+}
+
+export function assertWaveConflictEvidence(input: {
+  state: 'conflicted' | 'resolution_pending' | 'aborted';
+  identity: Pick<WaveContributionIdentity, 'sourceCommit' | 'expectedParentHead'>;
+  evidence: WaveConflictEvidence;
+}): void {
+  assertConflictEvidence({
+    state: input.state,
+    sourceCommit: input.identity.sourceCommit,
+    expectedParentHead: input.identity.expectedParentHead,
+    conflictEvidence: input.evidence,
+  } as WaveIntegrationRecord);
+  if (Buffer.byteLength(JSON.stringify(input.evidence), 'utf8') > 16 * 1024) {
+    throw new Error('[wave-integration] conflict evidence exceeds the bounded database contract');
   }
 }
 

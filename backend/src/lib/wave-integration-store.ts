@@ -4,10 +4,14 @@
  */
 
 import { queryOne, transaction } from '../db/index';
+import { assertWaveConflictEvidence, type WaveConflictEvidence } from './wave-integration-protocol';
 
 export type DurableWaveIntegrationState =
   | 'prepared'
   | 'integrating'
+  | 'conflicted'
+  | 'resolution_pending'
+  | 'aborted'
   | 'integrated'
   | 'integrated_validated'
   | 'finalized'
@@ -30,6 +34,9 @@ export interface DurableWaveIntegrationRecord extends DurableWaveIntegrationIden
   resultingHead: string | null;
   validationIdentity: Record<string, unknown> | null;
   finalizationIdentity: Record<string, unknown> | null;
+  conflictEvidence: WaveConflictEvidence | null;
+  failureReason: string | null;
+  stateVersion: number;
 }
 
 interface Row {
@@ -46,6 +53,9 @@ interface Row {
   frozen_manifest_hash: string;
   validation_identity: Record<string, unknown> | null;
   finalization_identity: Record<string, unknown> | null;
+  conflict_evidence: WaveConflictEvidence | null;
+  failure_reason: string | null;
+  state_version: number | string;
 }
 
 function record(row: Row): DurableWaveIntegrationRecord {
@@ -63,6 +73,9 @@ function record(row: Row): DurableWaveIntegrationRecord {
     frozenManifestHash: row.frozen_manifest_hash.trim(),
     validationIdentity: row.validation_identity,
     finalizationIdentity: row.finalization_identity,
+    conflictEvidence: row.conflict_evidence,
+    failureReason: row.failure_reason,
+    stateVersion: Number(row.state_version),
   };
 }
 
@@ -137,7 +150,7 @@ export async function failDurableWaveIntegration(input: {
     if (!current || !sameIdentity(current, input.identity)) {
       throw new Error('[wave-integration-store] durable integration identity is missing or stale');
     }
-    if (current.state === 'failed' || current.state === 'finalized') return current;
+    if (current.state === 'failed' || current.state === 'finalized' || current.state === 'aborted') return current;
     const updated = await client.query<Row>(
       `UPDATE story_integration_ledger
           SET state = 'failed', failure_reason = $4
@@ -147,6 +160,86 @@ export async function failDurableWaveIntegration(input: {
       [input.identity.runId, input.identity.storyId, input.identity.attempt, input.reason],
     );
     if (!updated.rows[0]) throw new Error('[wave-integration-store] failure transition lost its row fence');
+    return record(updated.rows[0]);
+  });
+}
+
+export async function markDurableWaveConflicted(input: {
+  identity: DurableWaveIntegrationIdentity;
+  evidence: WaveConflictEvidence;
+  reason: string;
+}): Promise<DurableWaveIntegrationRecord> {
+  if (!input.reason || input.reason.length > 512 || input.evidence.postAbortHead !== null) {
+    throw new Error('[wave-integration-store] conflicted evidence/reason is invalid');
+  }
+  assertWaveConflictEvidence({ state: 'conflicted', identity: input.identity, evidence: input.evidence });
+  return transaction(async (client) => {
+    const locked = await client.query<Row>(
+      `SELECT * FROM story_integration_ledger
+       WHERE run_id = $1 AND story_id = $2 AND attempt = $3 FOR UPDATE`,
+      [input.identity.runId, input.identity.storyId, input.identity.attempt],
+    );
+    const current = locked.rows[0] ? record(locked.rows[0]) : undefined;
+    if (!current || !sameIdentity(current, input.identity)) throw new Error('[wave-integration-store] durable integration identity is missing or stale');
+    if (current.state === 'conflicted') {
+      if (JSON.stringify(current.conflictEvidence) !== JSON.stringify(input.evidence) || current.failureReason !== input.reason) {
+        throw new Error('[wave-integration-store] conflict evidence changed during replay');
+      }
+      return current;
+    }
+    if (current.state !== 'integrating') throw new Error(`[wave-integration-store] cannot record conflict from ${current.state}`);
+    const updated = await client.query<Row>(
+      `UPDATE story_integration_ledger
+       SET state = 'conflicted', conflict_evidence = $4::jsonb, failure_reason = $5
+       WHERE run_id = $1 AND story_id = $2 AND attempt = $3 AND state = 'integrating'
+       RETURNING *`,
+      [input.identity.runId, input.identity.storyId, input.identity.attempt,
+        JSON.stringify(input.evidence), input.reason],
+    );
+    if (!updated.rows[0]) throw new Error('[wave-integration-store] conflict transition lost its row fence');
+    return record(updated.rows[0]);
+  });
+}
+
+export async function markDurableWaveConflictAborted(input: {
+  identity: DurableWaveIntegrationIdentity;
+  priorEvidence: WaveConflictEvidence;
+  evidence: WaveConflictEvidence;
+  reason: string;
+}): Promise<DurableWaveIntegrationRecord> {
+  assertWaveConflictEvidence({ state: 'aborted', identity: input.identity, evidence: input.evidence });
+  if (input.priorEvidence.postAbortHead !== null
+    || JSON.stringify({ ...input.evidence, postAbortHead: null }) !== JSON.stringify(input.priorEvidence)) {
+    throw new Error('[wave-integration-store] aborted evidence does not extend exact conflicted evidence');
+  }
+  return transaction(async (client) => {
+    const locked = await client.query<Row>(
+      `SELECT * FROM story_integration_ledger
+       WHERE run_id = $1 AND story_id = $2 AND attempt = $3 FOR UPDATE`,
+      [input.identity.runId, input.identity.storyId, input.identity.attempt],
+    );
+    const current = locked.rows[0] ? record(locked.rows[0]) : undefined;
+    if (!current || !sameIdentity(current, input.identity)) throw new Error('[wave-integration-store] durable integration identity is missing or stale');
+    if (current.state === 'aborted') {
+      if (JSON.stringify(current.conflictEvidence) !== JSON.stringify(input.evidence)) {
+        throw new Error('[wave-integration-store] aborted conflict evidence changed during replay');
+      }
+      return current;
+    }
+    if (!['conflicted', 'resolution_pending'].includes(current.state)
+      || JSON.stringify(current.conflictEvidence) !== JSON.stringify(input.priorEvidence)) {
+      throw new Error('[wave-integration-store] conflict abort lacks exact prior evidence');
+    }
+    const updated = await client.query<Row>(
+      `UPDATE story_integration_ledger
+       SET state = 'aborted', conflict_evidence = $4::jsonb, failure_reason = $5
+       WHERE run_id = $1 AND story_id = $2 AND attempt = $3
+         AND state IN ('conflicted', 'resolution_pending')
+       RETURNING *`,
+      [input.identity.runId, input.identity.storyId, input.identity.attempt,
+        JSON.stringify(input.evidence), input.reason.slice(0, 512)],
+    );
+    if (!updated.rows[0]) throw new Error('[wave-integration-store] conflict abort transition lost its row fence');
     return record(updated.rows[0]);
   });
 }

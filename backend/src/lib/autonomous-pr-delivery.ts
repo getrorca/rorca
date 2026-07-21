@@ -27,7 +27,6 @@ import {
   bridgeGithubEvidenceToLifecycle,
   type DeliveryLifecycleBridgeResult,
 } from './autonomous-delivery-lifecycle';
-import { resolveWorkspaceGitHubToken } from './github-token-resolver';
 import { loadRunReleaseIdentity } from './release-authority';
 import { revalidateRunReleaseIdentity, withGithubReleaseActuation } from './release-identity';
 import { fetchGithubWithTimeout } from './github-app-credential-provider';

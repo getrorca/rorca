@@ -33,11 +33,6 @@ import {
   type CanonicalStoryResultStatus,
 } from './story-result-persistence';
 
-export interface FallbackReplayOptions {
-  /** Host-owned persistence seam. Omission keeps every story row proposal-only. */
-  storyResultPoster?: (payload: Record<string, unknown>) => Promise<'inserted' | 'duplicate'>;
-}
-
 export interface FallbackReplayResult {
   total: number;
   inserted: number;
@@ -232,7 +227,6 @@ function optionalStringArray(value: unknown): string[] | undefined | null {
 async function replayStoryResult(
   entry: FallbackResultEntry,
   workspaceId: string,
-  options: FallbackReplayOptions,
 ): Promise<'inserted' | 'duplicate' | 'invalid'> {
   const payload = entry.payload;
   const runId = Number(payload.runId ?? entry.runId);
@@ -306,11 +300,10 @@ async function replayStoryResult(
     expectedWorkspaceId: workspaceId,
   };
   try {
-    if (payload.integrationFinalization !== undefined) {
-      if (!options.storyResultPoster) return 'invalid';
-      return await options.storyResultPoster({ ...payload, idempotencyKey: ingestKey });
-    }
-    // Every other agent-writable result status is proposal-only. It is accepted
+    // Integration-finalization journal bytes are proposal-only too. Worker DB
+    // re-finalization must first create the exact host result/outbox from the
+    // application ledger; this path can only recognize that immutable duplicate.
+    // Every other agent-writable result status follows the same rule.
     // only as an exact reference to independently immutable host authority.
     return await verifyReleasedHostResultProposal(input) ? 'duplicate' : 'invalid';
   } catch (error) {
@@ -327,7 +320,6 @@ async function replayStoryResult(
 export async function replayFallbackResults(
   cwd: string,
   workspaceId: string,
-  options: FallbackReplayOptions = {},
 ): Promise<FallbackReplayResult> {
   await flushFallbackWrites(cwd);
   const journal = readFallbackJournal(cwd);
@@ -360,7 +352,7 @@ export async function replayFallbackResults(
       const atomicFinalization = entry.type === 'story_result' && Boolean(entry.payload.integrationFinalization);
       const outcome = entry.type === 'wal'
         ? await replayWal(entry, workspaceId, canonicalSpecId)
-        : await replayStoryResult(entry, workspaceId, options);
+        : await replayStoryResult(entry, workspaceId);
       const critical = isCriticalEntry(entry);
       result[outcome === 'inserted' ? 'inserted' : outcome === 'duplicate' ? 'duplicates' : 'invalid']++;
       if (critical && outcome !== 'invalid') result.criticalCompleted++;

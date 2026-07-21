@@ -1,0 +1,233 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import type { PoolClient } from 'pg';
+import { queryOne } from '../db/index';
+import { ConflictError } from './errors';
+import { computeTaskManifestHash } from './task-manifest-artifacts';
+import { safeParseTaskManifest, type TaskManifest } from './task-manifest';
+import { computeSyntheticTaskManifestSpecHash, type SyntheticTaskManifestSpec } from './task-manifest-execution-envelope';
+import { retryHash } from './retry-governance';
+
+export const TASK_MANIFEST_RUN_LINEAGE_VERSION = 'rorca.task-manifest-lineage.v1' as const;
+
+export interface TaskManifestRunLineage {
+  runId: number;
+  workspaceId: string;
+  rootRunId: number;
+  parentRunId: number | null;
+  lineageDepth: number;
+  schemaVersion: typeof TASK_MANIFEST_RUN_LINEAGE_VERSION;
+  manifestId: string;
+  sourceIdempotencyKey: string;
+  manifestHash: string;
+  syntheticSpecHash: string;
+  manifestPath: string;
+  syntheticSpecPath: string;
+  lineageIdentityHash: string;
+}
+
+interface LineageRow {
+  run_id: number | string;
+  workspace_id: string;
+  root_run_id: number | string;
+  parent_run_id: number | string | null;
+  lineage_depth: number;
+  schema_version: string;
+  manifest_id: string;
+  source_idempotency_key: string;
+  manifest_hash: string;
+  synthetic_spec_hash: string;
+  manifest_path: string;
+  synthetic_spec_path: string;
+  lineage_identity_hash: string;
+}
+
+interface RunRow {
+  id: number | string;
+  workspace_id: string;
+  task_manifest_id: string | null;
+  task_manifest_artifacts: Record<string, unknown> | string | null;
+  trigger_options: Record<string, unknown> | string | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value && !Array.isArray(value) && typeof value === 'object') return value as Record<string, unknown>;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && !Array.isArray(parsed) && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+  } catch { return null; }
+}
+
+function containedFile(workspacePath: string, relativePath: string): string {
+  if (!relativePath || path.isAbsolute(relativePath) || relativePath.split(/[\\/]+/).includes('..')) {
+    throw new ConflictError('TaskManifest lineage path is not workspace-relative');
+  }
+  const root = fs.realpathSync(workspacePath);
+  const absolute = path.resolve(root, relativePath);
+  const relative = path.relative(root, absolute);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new ConflictError('TaskManifest lineage path escapes workspace authority');
+  }
+  return absolute;
+}
+
+function fromRow(row: LineageRow): TaskManifestRunLineage {
+  return {
+    runId: Number(row.run_id),
+    workspaceId: row.workspace_id,
+    rootRunId: Number(row.root_run_id),
+    parentRunId: row.parent_run_id == null ? null : Number(row.parent_run_id),
+    lineageDepth: row.lineage_depth,
+    schemaVersion: TASK_MANIFEST_RUN_LINEAGE_VERSION,
+    manifestId: row.manifest_id,
+    sourceIdempotencyKey: row.source_idempotency_key,
+    manifestHash: row.manifest_hash,
+    syntheticSpecHash: row.synthetic_spec_hash,
+    manifestPath: row.manifest_path,
+    syntheticSpecPath: row.synthetic_spec_path,
+    lineageIdentityHash: row.lineage_identity_hash,
+  };
+}
+
+export function createTaskManifestRunLineage(input: Omit<TaskManifestRunLineage, 'schemaVersion' | 'lineageIdentityHash'>): TaskManifestRunLineage {
+  const base = { ...input, schemaVersion: TASK_MANIFEST_RUN_LINEAGE_VERSION };
+  return { ...base, lineageIdentityHash: retryHash(base) };
+}
+
+export async function insertTaskManifestRunLineage(
+  client: PoolClient,
+  input: TaskManifestRunLineage,
+): Promise<TaskManifestRunLineage> {
+  if (input.lineageIdentityHash !== retryHash({
+    runId: input.runId,
+    workspaceId: input.workspaceId,
+    rootRunId: input.rootRunId,
+    parentRunId: input.parentRunId,
+    lineageDepth: input.lineageDepth,
+    manifestId: input.manifestId,
+    sourceIdempotencyKey: input.sourceIdempotencyKey,
+    manifestHash: input.manifestHash,
+    syntheticSpecHash: input.syntheticSpecHash,
+    manifestPath: input.manifestPath,
+    syntheticSpecPath: input.syntheticSpecPath,
+    schemaVersion: input.schemaVersion,
+  })) throw new ConflictError('TaskManifest lineage identity hash is invalid');
+  const result = await client.query<LineageRow>(
+    `INSERT INTO task_manifest_run_lineage (
+       run_id, workspace_id, root_run_id, parent_run_id, lineage_depth,
+       schema_version, manifest_id, source_idempotency_key, manifest_hash,
+       synthetic_spec_hash, manifest_path, synthetic_spec_path, lineage_identity_hash
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+     ON CONFLICT (run_id) DO NOTHING
+     RETURNING *`,
+    [input.runId, input.workspaceId, input.rootRunId, input.parentRunId, input.lineageDepth,
+      input.schemaVersion, input.manifestId, input.sourceIdempotencyKey, input.manifestHash,
+      input.syntheticSpecHash, input.manifestPath, input.syntheticSpecPath, input.lineageIdentityHash],
+  );
+  const inserted = result.rows[0];
+  if (inserted) return fromRow(inserted);
+  const existing = (await client.query<LineageRow>(
+    'SELECT * FROM task_manifest_run_lineage WHERE run_id = $1 FOR SHARE', [input.runId],
+  )).rows[0];
+  if (!existing || existing.lineage_identity_hash !== input.lineageIdentityHash) {
+    throw new ConflictError('Run already has different immutable TaskManifest lineage');
+  }
+  return fromRow(existing);
+}
+
+async function loadVerified(
+  runId: number,
+  workspacePath: string,
+  seen: ReadonlySet<number>,
+): Promise<{ lineage: TaskManifestRunLineage; manifest: TaskManifest; syntheticSpec: SyntheticTaskManifestSpec }> {
+  if (seen.has(runId)) throw new ConflictError('TaskManifest lineage cycle detected');
+  const row = await queryOne<LineageRow & RunRow>(
+    `SELECT lineage.*, run.task_manifest_id, run.task_manifest_artifacts, run.trigger_options
+     FROM task_manifest_run_lineage lineage
+     JOIN pipeline_runs run ON run.id = lineage.run_id AND run.workspace_id = lineage.workspace_id
+     WHERE lineage.run_id = $1`,
+    [runId],
+  );
+  if (!row) throw new ConflictError('TaskManifest run lacks immutable lineage authority');
+  const lineage = fromRow(row);
+  const expected = createTaskManifestRunLineage({
+    runId: lineage.runId,
+    workspaceId: lineage.workspaceId,
+    rootRunId: lineage.rootRunId,
+    parentRunId: lineage.parentRunId,
+    lineageDepth: lineage.lineageDepth,
+    manifestId: lineage.manifestId,
+    sourceIdempotencyKey: lineage.sourceIdempotencyKey,
+    manifestHash: lineage.manifestHash,
+    syntheticSpecHash: lineage.syntheticSpecHash,
+    manifestPath: lineage.manifestPath,
+    syntheticSpecPath: lineage.syntheticSpecPath,
+  });
+  if (expected.lineageIdentityHash !== lineage.lineageIdentityHash || row.task_manifest_id !== lineage.manifestId) {
+    throw new ConflictError('TaskManifest lineage differs from canonical run authority');
+  }
+  const artifacts = asRecord(row.task_manifest_artifacts);
+  const options = asRecord(row.trigger_options);
+  if (artifacts?.manifestHash !== lineage.manifestHash
+    || artifacts?.syntheticSpecHash !== lineage.syntheticSpecHash
+    || artifacts?.manifestPath !== lineage.manifestPath
+    || artifacts?.specPath !== lineage.syntheticSpecPath
+    || options?.manifestHash !== lineage.manifestHash
+    || options?.syntheticSpecHash !== lineage.syntheticSpecHash) {
+    throw new ConflictError('TaskManifest lineage differs from frozen artifact metadata');
+  }
+  const manifestPath = containedFile(workspacePath, lineage.manifestPath);
+  const specPath = containedFile(workspacePath, lineage.syntheticSpecPath);
+  const manifestBytes = fs.readFileSync(manifestPath, 'utf8');
+  const parsedManifest = safeParseTaskManifest(JSON.parse(manifestBytes) as unknown);
+  if (!parsedManifest.success) throw new ConflictError('TaskManifest lineage manifest bytes are invalid');
+  const manifest = parsedManifest.data;
+  const syntheticBytes = fs.readFileSync(specPath, 'utf8');
+  const syntheticSpec = JSON.parse(syntheticBytes) as SyntheticTaskManifestSpec;
+  const rawSyntheticHash = `sha256:${crypto.createHash('sha256').update(syntheticBytes, 'utf8').digest('hex')}`;
+  if (computeTaskManifestHash(manifest) !== lineage.manifestHash
+    || rawSyntheticHash !== lineage.syntheticSpecHash
+    || computeSyntheticTaskManifestSpecHash(syntheticSpec) !== lineage.syntheticSpecHash
+    || manifest.manifestId !== lineage.manifestId
+    || manifest.idempotencyKey !== lineage.sourceIdempotencyKey
+    || syntheticSpec.manifestHash !== lineage.manifestHash
+    || syntheticSpec.manifestId !== lineage.manifestId
+    || syntheticSpec.idempotencyKey !== lineage.sourceIdempotencyKey) {
+    throw new ConflictError('TaskManifest lineage artifact bytes do not match immutable hashes');
+  }
+  if (lineage.lineageDepth === 0) {
+    if (lineage.parentRunId !== null || lineage.rootRunId !== lineage.runId) {
+      throw new ConflictError('TaskManifest root lineage identity is invalid');
+    }
+  } else {
+    if (lineage.parentRunId === null) throw new ConflictError('TaskManifest descendant lineage lacks a parent');
+    const parent = await loadVerified(lineage.parentRunId, workspacePath, new Set(seen).add(runId));
+    if (parent.lineage.rootRunId !== lineage.rootRunId
+      || parent.lineage.lineageDepth + 1 !== lineage.lineageDepth
+      || parent.lineage.manifestId !== lineage.manifestId
+      || parent.lineage.sourceIdempotencyKey !== lineage.sourceIdempotencyKey
+      || parent.lineage.manifestHash !== lineage.manifestHash
+      || parent.lineage.syntheticSpecHash !== lineage.syntheticSpecHash
+      || parent.lineage.manifestPath !== lineage.manifestPath
+      || parent.lineage.syntheticSpecPath !== lineage.syntheticSpecPath) {
+      throw new ConflictError('TaskManifest descendant lineage differs from its parent authority');
+    }
+  }
+  return { lineage, manifest, syntheticSpec };
+}
+
+export async function loadAndVerifyTaskManifestRunLineage(
+  runId: number,
+  workspacePath: string,
+): Promise<{ lineage: TaskManifestRunLineage; manifest: TaskManifest; syntheticSpec: SyntheticTaskManifestSpec }> {
+  return loadVerified(runId, workspacePath, new Set());
+}

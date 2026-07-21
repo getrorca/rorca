@@ -23,6 +23,10 @@ export const GITHUB_GOVERNING_WAL_EVENTS = new Set([
   'run_finished',
 ]);
 
+// Run closeout is host authority for retry/release, but deliberately remains
+// outside the GitHub projection set. Only the worker may create it.
+export const HOST_CLOSEOUT_WAL_EVENTS = new Set(['run_closeout']);
+
 export type TrustedWalSource = 'execution-engine' | 'worker' | 'story-result';
 
 export interface TrustedWalInput {
@@ -138,7 +142,7 @@ function assertSourceMayWrite(source: TrustedWalSource, eventType: string): void
     throw new Error(`Execution engine may not author trusted ${eventType} events`);
   }
   if (source === 'worker' && ![
-    'run_started', 'run_finished', 'story_failed', 'story_skipped',
+    'run_started', 'run_finished', 'story_failed', 'story_skipped', 'run_closeout',
   ].includes(eventType)) {
     throw new Error(`Worker may not author trusted ${eventType} events`);
   }
@@ -237,8 +241,12 @@ export async function insertTrustedWalEvent(
 ): Promise<{ row: TrustedWalRow; duplicate: boolean }> {
   assertHostProcess(input.source);
   assertSourceMayWrite(input.source, input.eventType);
-  if (!GITHUB_GOVERNING_WAL_EVENTS.has(input.eventType)) {
+  if (!GITHUB_GOVERNING_WAL_EVENTS.has(input.eventType)
+    && !HOST_CLOSEOUT_WAL_EVENTS.has(input.eventType)) {
     throw new Error(`Trusted WAL is not available for non-governing event ${input.eventType}`);
+  }
+  if (input.eventType === 'run_closeout' && input.source !== 'worker') {
+    throw new Error('Trusted run_closeout authority is worker-only');
   }
   if (!Number.isSafeInteger(input.runId) || input.runId <= 0) {
     throw new TypeError('Trusted WAL runId must be a positive safe integer');

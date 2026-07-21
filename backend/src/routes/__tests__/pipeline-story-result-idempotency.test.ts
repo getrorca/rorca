@@ -342,7 +342,7 @@ function integratedBody() {
   };
 }
 
-function expectCompleteProjection(body: ReturnType<typeof integratedBody>): void {
+function _expectCompleteProjection(body: ReturnType<typeof integratedBody>): void {
   expect(state.results).toHaveLength(1);
   expect(state.results[0]).toMatchObject({
     run_id: body.runId,

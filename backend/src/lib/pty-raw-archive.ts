@@ -68,6 +68,8 @@ interface ArchiveManifestRow {
   workspace_path?: string;
   generation_active?: boolean;
   generation_status?: string;
+  raw_archive_expected?: boolean;
+  raw_archive_storage_scope?: string | null;
 }
 
 interface ArchiveSegmentRow {
@@ -291,7 +293,8 @@ function mapManifest(row: ArchiveManifestRow, segments: ArchiveSegmentRow[]): Ra
 async function getManifestRow(runId: number, generationId: string): Promise<ArchiveManifestRow | undefined> {
   return queryOne<ArchiveManifestRow>(
     `SELECT m.*, w.path AS workspace_path, g.is_active AS generation_active,
-            g.status AS generation_status
+            g.status AS generation_status, g.raw_archive_expected,
+            g.raw_archive_storage_scope
      FROM pty_raw_archive_manifests m
      JOIN pty_generations g ON g.id = m.generation_id AND g.run_id = m.run_id
      JOIN workspaces w ON w.id = m.workspace_id
@@ -343,8 +346,31 @@ function readRetainedRegularFile(filePath: string, containmentRoot: string, iden
 async function relocateLegacyRawPtyArchive(manifest: ArchiveManifestRow): Promise<ArchiveManifestRow> {
   if (!manifest.workspace_path) throw new RawArchiveIntegrityError('Archive workspace path is unavailable');
   const serviceRoot = serviceArchiveRoot();
+  const destinationRoot = workspaceArchiveRoot(manifest.workspace_id);
   const currentRoot = path.resolve(manifest.archive_root_relative);
-  if (isContainedPath(serviceRoot, currentRoot)) return manifest;
+  if (currentRoot === destinationRoot) {
+    if (manifest.raw_archive_expected === true && manifest.raw_archive_storage_scope === 'service-owned') return manifest;
+    await transaction(async (client) => {
+      const stillExact = await client.query(
+        `SELECT id FROM pty_raw_archive_manifests
+         WHERE id = $1 AND archive_root_relative = $2 FOR UPDATE`,
+        [manifest.id, destinationRoot],
+      );
+      if (stillExact.rowCount !== 1) throw new ConflictError('Half-relocated raw archive manifest changed before repair');
+      const generation = await client.query(
+        `UPDATE pty_generations
+         SET raw_archive_expected = TRUE, raw_archive_storage_scope = 'service-owned'
+         WHERE id = $1 AND workspace_id = $2 AND run_id = $3
+         RETURNING id`,
+        [manifest.generation_id, manifest.workspace_id, manifest.run_id],
+      );
+      if (generation.rowCount !== 1) throw new ConflictError('Half-relocated raw archive generation authority is unavailable');
+    });
+    return { ...manifest, raw_archive_expected: true, raw_archive_storage_scope: 'service-owned' };
+  }
+  if (isContainedPath(serviceRoot, currentRoot)) {
+    throw new ConflictError('Service-owned raw archive root is not the deterministic workspace root');
+  }
 
   const workspaceRoot = fs.realpathSync(manifest.workspace_path);
   const legacyRoot = path.resolve(workspaceRoot, '.rorca', 'pty-archives');
@@ -364,7 +390,6 @@ async function relocateLegacyRawPtyArchive(manifest: ArchiveManifestRow): Promis
     throw new ForbiddenError('Legacy raw archive generation is not a contained real directory');
   }
 
-  const destinationRoot = workspaceArchiveRoot(manifest.workspace_id);
   const destinationGeneration = ensureSecureArchiveGenerationDirectory(destinationRoot, manifest.generation_id);
   const knownSegments = new Map((await listSegmentRows(manifest.id)).map(segment => [path.basename(segment.relative_path), segment]));
   const names = fs.readdirSync(sourceGeneration).filter(name => /^segment-\d{6}\.gz$/.test(name)).sort();
@@ -403,28 +428,44 @@ async function relocateLegacyRawPtyArchive(manifest: ArchiveManifestRow): Promis
     try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
   }
 
-  const migrated = await queryOne<ArchiveManifestRow>(
-    `UPDATE pty_raw_archive_manifests
-     SET archive_root_relative = $2, reconciled_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND archive_root_relative = $3 RETURNING *`,
-    [manifest.id, destinationRoot, manifest.archive_root_relative],
-  );
-  if (migrated) {
-    await execute(
-      `UPDATE pty_generations SET raw_archive_storage_scope = 'service-owned'
-       WHERE id = $1 AND workspace_id = $2`,
-      [manifest.generation_id, manifest.workspace_id],
+  const migrated = await transaction(async (client) => {
+    const result = await client.query<ArchiveManifestRow>(
+      `UPDATE pty_raw_archive_manifests
+       SET archive_root_relative = $2, reconciled_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND archive_root_relative = $3 RETURNING *`,
+      [manifest.id, destinationRoot, manifest.archive_root_relative],
     );
+    const updated = result.rows[0];
+    if (!updated) return undefined;
+    // The generation invariant requires expected=true whenever service-owned
+    // scope is present. Commit this authority change with the manifest CAS.
+    const generation = await client.query(
+      `UPDATE pty_generations
+       SET raw_archive_expected = TRUE, raw_archive_storage_scope = 'service-owned'
+       WHERE id = $1 AND workspace_id = $2 AND run_id = $3
+       RETURNING id`,
+      [manifest.generation_id, manifest.workspace_id, manifest.run_id],
+    );
+    if (generation.rowCount !== 1) {
+      throw new ConflictError('Legacy raw archive generation authority changed during relocation');
+    }
+    return updated;
+  });
+  if (migrated) {
     return { ...migrated, workspace_path: manifest.workspace_path, generation_active: manifest.generation_active,
       generation_status: manifest.generation_status };
   }
   const concurrent = await queryOne<ArchiveManifestRow>(
-    `SELECT m.*, w.path AS workspace_path, g.is_active AS generation_active, g.status AS generation_status
+    `SELECT m.*, w.path AS workspace_path, g.is_active AS generation_active, g.status AS generation_status,
+            g.raw_archive_expected, g.raw_archive_storage_scope
      FROM pty_raw_archive_manifests m JOIN workspaces w ON w.id = m.workspace_id
      JOIN pty_generations g ON g.id = m.generation_id WHERE m.id = $1`, [manifest.id],
   );
-  if (!concurrent || !isContainedPath(serviceRoot, path.resolve(concurrent.archive_root_relative))) {
-    throw new ConflictError('Legacy raw archive relocation lost its manifest compare-and-swap');
+  if (!concurrent
+    || path.resolve(concurrent.archive_root_relative) !== destinationRoot
+    || concurrent.raw_archive_expected !== true
+    || concurrent.raw_archive_storage_scope !== 'service-owned') {
+    throw new ConflictError('Legacy raw archive relocation lost its exact manifest/generation compare-and-swap');
   }
   return concurrent;
 }
@@ -559,7 +600,7 @@ export class RawPtyArchiveWriter {
         [this.manifest.id, this.rawOffset],
       );
       await execute(`UPDATE pty_generations SET raw_archive_failure_code = NULL, raw_archive_failure_at = NULL WHERE id = $1`, [this.manifest.generation_id]);
-    } catch (error) {
+    } catch (_error) {
       const failure = new RawArchiveWriteError('Raw PTY archive finalization failed', { runId: Number(this.manifest.run_id), generationId: this.manifest.generation_id });
       await this.markFailed(failure);
       throw failure;

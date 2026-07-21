@@ -22,6 +22,7 @@
  *   - Pool auto-adjust: reads max_connections, caps pool to 80% of server limit
  *   - Cloud provider detection from hostname patterns
  */
+import { AsyncLocalStorage } from 'async_hooks';
 import * as fs from 'fs';
 import { Pool } from 'pg';
 import { logger } from '../lib/logger';
@@ -158,6 +159,17 @@ function buildPoolConfig(role = 'application') {
 }
 // ── Lazy Pool ────────────────────────────────────────────────────────────
 let _pool = null;
+const advisoryLockClient = new AsyncLocalStorage();
+const advisoryTransactionOwner = new AsyncLocalStorage();
+function currentAdvisoryClient() {
+    const context = advisoryLockClient.getStore();
+    if (!context?.active)
+        return undefined;
+    if (context.transactionOwner && advisoryTransactionOwner.getStore() !== context.transactionOwner) {
+        throw new Error('Concurrent query attempted outside the active fenced transaction');
+    }
+    return context.client;
+}
 let _operationalPool = null;
 let _migrationsDone = false;
 let _migrationsRunning = null;
@@ -174,6 +186,62 @@ function getPool() {
         configurePoolEvents(_pool, 'application');
     }
     return _pool;
+}
+/**
+ * Cross-process/container cooperative authority fence. All provider actuators and
+ * authority replacement paths must use the same stable workspace-scoped key.
+ */
+export async function withPgAdvisoryLock(key, operation) {
+    await ensureMigrations();
+    if (advisoryLockClient.getStore()?.active) {
+        throw new Error('Nested PostgreSQL advisory authority fences are forbidden');
+    }
+    const client = await getPool().connect();
+    let lockAcquired = false;
+    let cleanupError;
+    try {
+        await resetSessionState(client);
+        await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [key]);
+        lockAcquired = true;
+        // Route application-table reads performed by the fenced operation through
+        // the lock-owning session. This preserves the session-level fence and also
+        // works when the configured application pool has only one connection.
+        const context = { client, active: true, key };
+        try {
+            return await advisoryLockClient.run(context, operation);
+        }
+        finally {
+            // Async descendants created by an operation may outlive it. They retain
+            // the ALS object, so invalidate it before unlocking/releasing the client.
+            context.active = false;
+        }
+    }
+    finally {
+        // ROLLBACK is harmless when idle and clears any transaction abandoned by a
+        // raw callback before reset. Never return poisoned role/claim/path state to
+        // the pool. A cleanup failure destroys, rather than reuses, the client.
+        try {
+            await client.query('ROLLBACK');
+            await resetSessionState(client);
+        }
+        catch (error) {
+            cleanupError = error instanceof Error ? error : new Error(String(error));
+        }
+        if (lockAcquired) {
+            try {
+                const unlocked = await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS unlocked', [key]);
+                if (unlocked.rows[0]?.unlocked !== true) {
+                    cleanupError ??= new Error('PostgreSQL advisory authority fence was not held at cleanup');
+                }
+            }
+            catch (error) {
+                cleanupError ??= error instanceof Error ? error : new Error(String(error));
+            }
+        }
+        client.release(cleanupError);
+        if (cleanupError)
+            throw cleanupError;
+    }
 }
 /** Reserved for WAL ingestion and readiness so application pool pressure cannot starve them. */
 function getOperationalPool() {
@@ -314,9 +382,14 @@ async function resetSessionState(client) {
  */
 export async function query(sql, params) {
     await ensureMigrations();
-    const p = getPool();
-    const client = await p.connect();
+    const fencedClient = currentAdvisoryClient();
     const start = Date.now();
+    if (fencedClient) {
+        const result = await fencedClient.query(sql, params);
+        logSlowQuery(sql, params, Date.now() - start);
+        return result.rows;
+    }
+    const client = await getPool().connect();
     try {
         await resetSessionState(client);
         const result = await client.query(sql, params);
@@ -332,9 +405,14 @@ export async function query(sql, params) {
  */
 export async function queryOne(sql, params) {
     await ensureMigrations();
-    const p = getPool();
-    const client = await p.connect();
+    const fencedClient = currentAdvisoryClient();
     const start = Date.now();
+    if (fencedClient) {
+        const result = await fencedClient.query(sql, params);
+        logSlowQuery(sql, params, Date.now() - start);
+        return result.rows[0] ?? undefined;
+    }
+    const client = await getPool().connect();
     try {
         await resetSessionState(client);
         const result = await client.query(sql, params);
@@ -360,9 +438,14 @@ export async function operationalQueryOne(config) {
 /** Execute a statement (INSERT/UPDATE/DELETE) and return affected row count. */
 export async function execute(sql, params) {
     await ensureMigrations();
-    const p = getPool();
-    const client = await p.connect();
+    const fencedClient = currentAdvisoryClient();
     const start = Date.now();
+    if (fencedClient) {
+        const result = await fencedClient.query(sql, params);
+        logSlowQuery(sql, params, Date.now() - start);
+        return { rowCount: result.rowCount ?? 0 };
+    }
+    const client = await getPool().connect();
     try {
         await resetSessionState(client);
         const result = await client.query(sql, params);
@@ -379,8 +462,33 @@ export async function execute(sql, params) {
  */
 export async function transaction(fn) {
     await ensureMigrations();
-    const p = getPool();
-    const client = await p.connect();
+    const fencedContext = advisoryLockClient.getStore();
+    if (fencedContext?.active) {
+        if (fencedContext.transactionOwner) {
+            throw new Error('Nested or concurrent transactions inside an advisory authority fence are forbidden');
+        }
+        const owner = Symbol('advisory-transaction');
+        fencedContext.transactionOwner = owner;
+        try {
+            return await advisoryTransactionOwner.run(owner, async () => {
+                try {
+                    await fencedContext.client.query('BEGIN');
+                    const result = await fn(fencedContext.client);
+                    await fencedContext.client.query('COMMIT');
+                    return result;
+                }
+                catch (err) {
+                    await fencedContext.client.query('ROLLBACK');
+                    throw err;
+                }
+            });
+        }
+        finally {
+            if (fencedContext.transactionOwner === owner)
+                fencedContext.transactionOwner = undefined;
+        }
+    }
+    const client = await getPool().connect();
     try {
         await resetSessionState(client);
         await client.query('BEGIN');

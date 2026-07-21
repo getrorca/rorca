@@ -295,11 +295,18 @@ describe('raw PTY archive', () => {
     });
     queryOneMock.mockImplementation(async (sql: string) => {
       if (sql.includes('FROM pty_raw_archive_manifests m')) return manifest;
-      if (sql.includes('UPDATE pty_raw_archive_manifests') && sql.includes('RETURNING')) return serviceManifest;
       if (sql.includes('SELECT g.workspace_id')) return { workspace_id: 'ws-legacy', story_id: 'PTY-LEGACY', workspace_path: workspace, is_active: true };
       if (sql.includes('SELECT completion_state')) return { completion_state: 'writing', gaps: [] };
       return undefined;
     });
+    const relocationQuery = jest.fn().mockImplementation(async (sql: string) => (
+      sql.includes('UPDATE pty_raw_archive_manifests')
+        ? { rows: [serviceManifest] }
+        : { rows: [], rowCount: 1 }
+    ));
+    transactionMock.mockImplementation(async (callback: (client: { query: jest.Mock }) => Promise<unknown>) => (
+      callback({ query: relocationQuery })
+    ));
 
     try {
       const verified = await verifyRawPtyArchive(77, GENERATION_ID);
@@ -307,8 +314,12 @@ describe('raw PTY archive', () => {
       expect(verified.verifiedPaths).toHaveLength(1);
       expect(gunzipSync(fs.readFileSync(verified.verifiedPaths[0]!)).toString()).toBe('legacy retained');
       expect(fs.readFileSync(legacyPath).equals(compressed)).toBe(true);
-      expect(queryOneMock).toHaveBeenCalledWith(expect.stringContaining('archive_root_relative = $2'),
+      expect(relocationQuery).toHaveBeenCalledWith(expect.stringContaining('archive_root_relative = $2'),
         [manifest.id, legacyServiceRoot, '.rorca/pty-archives']);
+      expect(relocationQuery).toHaveBeenCalledWith(
+        expect.stringContaining('raw_archive_expected = TRUE'),
+        [GENERATION_ID, 'ws-legacy', 77],
+      );
 
       const writer = await openRawPtyArchive({ generationId: GENERATION_ID, runId: 77, generationToken: 'legacy-token' });
       writer.append(Buffer.from(' resumed'));

@@ -79,7 +79,7 @@ function packet(): WaveReleaseReadinessPacket {
     })),
     platformMatrix: ([
       ['linux', 20], ['linux', 22], ['darwin', 20], ['darwin', 22],
-    ] as const).map(([platform, nodeMajor], index) => ({
+    ] as const).map(([platform, nodeMajor]) => ({
       platform, nodeMajor, postgresMajor: 16, isolatedDatabaseOwnedByTestRole: true,
       criticalChecksSkipped: false, verdict: 'passed', evidenceDigest: evidence(`platform-${platform}-${nodeMajor}`, 'ci_attestation'),
     })),

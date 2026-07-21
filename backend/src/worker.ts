@@ -77,13 +77,11 @@ import {
 import {
   assertRunSpecAuthorityProjection,
   deriveRunSpecPath,
-  durableAtomicWriteFile,
 } from './lib/run-spec-snapshot';
 import {
   persistCanonicalStoryResult,
+  recoverIntegratedValidatedStoryFinalizations,
   WORKER_RESULT_AUTHORITY,
-  type CanonicalStoryResultInput,
-  type StoryResultAtomicFinalizationOptions,
 } from './lib/story-result-persistence';
 import {
   passRecoveryBlocksCompletion,
@@ -110,7 +108,9 @@ import { transitionRunLifecycle } from './lib/run-lifecycle';
 import { redactExecutionJobPayload, resolveExecutionSecrets } from './lib/execution-secret-references';
 import { reconcilePendingCheckRunProjections } from './lib/check-run-poster';
 import { inspectRunHostAuthority, type RunHostAuthority } from './lib/run-host-authority';
+import { persistHostRunCloseout } from './lib/run-closeout-authority';
 import { assertFrozenRunExecutionIdentity } from './lib/run-git-authority';
+import { loadAndVerifyTaskManifestRunLineage } from './lib/task-manifest-run-lineage';
 import { assertAutonomousExecutionBoundary } from './lib/autonomous-sandbox';
 import { ensureAutonomousModelEgress } from './lib/autonomous-model-egress';
 import {
@@ -182,20 +182,11 @@ const activeProcesses = new Map<number, ChildProcess>();
 
 const cancellingRuns = new Set<number>();
 
-/** Worker-only recovery seam: fallback bytes remain proposals until this host
- * path validates and atomically persists the story result plus integration. */
-async function replayWorkerFallbackResults(cwd: string, workspaceId: string) {
-  return replayFallbackResults(cwd, workspaceId, {
-    storyResultPoster: async (payload) => {
-      const { integrationFinalization, expectedWorkspaceId: _ignored, ...canonical } = payload;
-      const outcome = await persistCanonicalStoryResult(
-        { ...canonical, expectedWorkspaceId: workspaceId } as unknown as CanonicalStoryResultInput,
-        WORKER_RESULT_AUTHORITY,
-        { integrationFinalization } as StoryResultAtomicFinalizationOptions,
-      );
-      return outcome.duplicate ? 'duplicate' : 'inserted';
-    },
-  });
+/** Worker-only recovery seam: DB authority re-finalizes first; fallback bytes
+ * remain proposals and can only recognize the resulting immutable duplicate. */
+async function replayWorkerFallbackResults(cwd: string, workspaceId: string, runId: number) {
+  await recoverIntegratedValidatedStoryFinalizations({ runId });
+  return replayFallbackResults(cwd, workspaceId);
 }
 
 // ── Reconciliation error counter (updated by reconcileState) ─────────────────
@@ -523,9 +514,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       worktree_path: string | null;
       execution_workspace_path: string | null;
       execution_worktree_path: string | null;
+      task_manifest_id: string | null;
     }>(
       `SELECT workspace_id, parallelism, branch_name, worktree_path,
-              execution_workspace_path, execution_worktree_path
+              execution_workspace_path, execution_worktree_path, task_manifest_id
          FROM pipeline_runs WHERE id = $1`,
       [runId],
     );
@@ -545,6 +537,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       frozenWorktreePath: runRow.execution_worktree_path,
     });
     const cwd = frozenExecution.worktreePath;
+    if (runRow.task_manifest_id) {
+      const lineage = await loadAndVerifyTaskManifestRunLineage(runId, frozenExecution.workspacePath);
+      if (payload.manifestId !== lineage.lineage.manifestId || payload.safetyOptions.deploy !== false) {
+        throw new Error('TaskManifest run payload differs from immutable lineage/no-deploy authority');
+      }
+    }
     if (!await enforceWorkerWavePolicy({
       runId,
       workspaceId,
@@ -734,7 +732,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       RORCA_PROCESS_ROLE: 'engine',
       RORCA_WORKSPACE_ID: workspaceId,
       RORCA_TERMINAL_MODE: terminalMode,
-      ...(payload.wavePolicy ? { RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(payload.wavePolicy) } : {}),
+      RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(claimedWavePolicy),
     };
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_ENTRYPOINT;
@@ -745,7 +743,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Revalidating governed mode immediately before spawn');
     try {
-      await assertCurrentWaveRunDispatch({ runId, parallelism: Number(parallelism ?? 1), payload });
+      const preSpawnWavePolicy = await assertCurrentWaveRunDispatch({ runId, parallelism: Number(parallelism ?? 1), payload });
+      env.RORCA_GOVERNED_WAVE_POLICY = JSON.stringify(preSpawnWavePolicy);
     } catch (error) {
       if (payload.wavePolicy) {
         await auditWaveProductionDecision({
@@ -883,7 +882,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           passRecoveryError = error;
           logger.error({ error, runId }, '[worker] Integrated pass refinalization failed before fallback replay');
         }
-        const fallbackReplay = await replayWorkerFallbackResults(cwd, String(workspaceId));
+        const fallbackReplay = await replayWorkerFallbackResults(cwd, String(workspaceId), runId);
         try {
           passRecovery = await recoverUnreleasedIntegratedPasses({ runId });
           passRecoveryError = undefined;
@@ -974,6 +973,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         // the semantic closeout path below and never prepare release authority.
         const hostReleaseOwned = status === 'done' && hostAuthority?.releaseEligible === true;
         if (hostReleaseOwned) {
+          await persistHostRunCloseout({
+            runId,
+            status: 'done',
+            terminalizeRun: false,
+          });
           await prepareRunReleaseIntent({
             hostAuthority: hostAuthority!,
             mergeStrategy: payload.mergeStrategy ?? 'direct',
@@ -990,21 +994,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           }, { ...resolvedSecrets, ...payload.envOverrides });
           status = release.status === 'completed' ? 'done' : 'release_pending';
         } else {
-          await execute(
-            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
-            [status, runId],
-          );
+          await persistHostRunCloseout({
+            runId,
+            status: wasCancelled ? 'cancelled' : status === 'partial_failure' ? 'partial_failure' : 'failed',
+            terminalizeRun: true,
+          });
+          semanticCloseoutCompleted = true;
         }
 
         const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
-        let mergeStatusAtCloseout: string | null = null;
-        if (worktreePath) {
-          try {
-            mergeStatusAtCloseout = (await queryOne<{ merge_status: string | null }>(
-              'SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId],
-            ))?.merge_status ?? null;
-          } catch { /* closeout evidence remains best effort */ }
-        }
 
         if (wasCancelled) {
           await emitWalEvent('run_cancelled', workspaceId, {
@@ -1032,21 +1030,8 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         // terminal outbox. Failure/cancellation still cross the same event order:
         // durable terminal row -> run_closeout -> trusted run_finished.
         if (!hostReleaseOwned) {
-          const semanticCloseoutPayload = {
-            run_id: runId,
-            status,
-            completion_scope: worktreePath ? 'run_branch' : 'base_integrated',
-            base_integrated: false,
-            branch_name: payload.branchName ?? null,
-            merge_strategy: effectiveMergeStrategy,
-            merge_status: mergeStatusAtCloseout,
-            exit_code: code,
-            exit_signal: signal,
-            source: 'worker',
-            semantic_closeout: true,
-          };
-          await emitWalEvent('run_closeout', workspaceId, semanticCloseoutPayload);
-          await emitWalEvent('run_finished', workspaceId, semanticCloseoutPayload);
+          // persistHostRunCloseout already committed the terminal run, canonical
+          // closeout, and trusted run_finished outbox in one transaction.
           semanticCloseoutCompleted = true;
         } else if (status === 'done') {
           // reconcileRunReleaseIntent atomically committed public done with the
@@ -1099,15 +1084,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               outcome: 'failed',
               reason: 'worker_closeout_failed',
             });
-            const failedCloseout = {
-              run_id: runId,
+            await persistHostRunCloseout({
+              runId,
               status: 'failed',
-              reason: 'worker_closeout_failed',
-              source: 'worker',
-              semantic_closeout: true,
-            };
-            await emitWalEvent('run_closeout', workspaceId, failedCloseout);
-            await emitWalEvent('run_finished', workspaceId, failedCloseout);
+              terminalizeRun: true,
+            });
             semanticCloseoutCompleted = true;
           } catch (closeoutErr) {
             logger.error({ err: closeoutErr, runId }, '[worker] failed to persist fail-closed semantic closeout');
@@ -1174,8 +1155,22 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
          WHERE id = $1 AND status NOT IN ('done', 'failed', 'partial_failure', 'cancelled')
          RETURNING workspace_id
       `, [id, failureReason]),
+      recordFailureAuthority: async (id, failureWorkspaceId, _failureReason) => {
+        await synthesizeInterruptedStoryFailure({
+          runId: id,
+          workspaceId: failureWorkspaceId,
+          status: 'failed',
+          exitCode: null,
+          exitSignal: null,
+          source: 'worker',
+        });
+      },
       transition: transitionRunLifecycle,
-      emit: emitWalEvent,
+      persistCloseout: (id) => persistHostRunCloseout({
+        runId: id,
+        status: 'failed',
+        terminalizeRun: true,
+      }),
       advance: advanceQueue,
     });
     logger.error({ runId, reason }, '[worker] Fresh pipeline run rejected before spawn and was terminalized');
@@ -1228,6 +1223,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       previewHash,
       approvedPreview: approvedPreviewRaw,
       generatedPlanHash,
+      taskManifestLineageHash,
       dispatchIdentity: dispatchIdentityRaw,
     } = payload;
     const approvedPreview = approvedPreviewRaw as unknown as RetryPreviewPacket;
@@ -1240,6 +1236,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       || dispatchIdentity.originalRunId !== originalRunId
       || dispatchIdentity.approvedPreviewHash !== previewHash
       || dispatchIdentity.scopeHash !== payload.scopeHash
+      || dispatchIdentity.taskManifestLineageHash !== taskManifestLineageHash
     ) {
       throw new Error('[governed-retry] queue payload identity is invalid or stale');
     }
@@ -1250,10 +1247,11 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       branch_name: string | null; status: string; spec_path: string;
       worktree_path: string | null; execution_workspace_path: string | null;
       execution_worktree_path: string | null; retried_from_run_id: number | null; pid: number | null;
+      task_manifest_id: string | null;
     }>(
       `SELECT workspace_id, parallelism, terminal_mode, branch_name, status, spec_path,
               worktree_path, execution_workspace_path, execution_worktree_path,
-              retried_from_run_id, pid FROM pipeline_runs WHERE id = $1`,
+              retried_from_run_id, pid, task_manifest_id FROM pipeline_runs WHERE id = $1`,
       [runId],
     );
     if (!runRow) {
@@ -1274,6 +1272,17 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       frozenWorktreePath: runRow.execution_worktree_path,
     });
     const cwd = frozenRetryExecution.worktreePath;
+    if (runRow.task_manifest_id) {
+      const lineage = await loadAndVerifyTaskManifestRunLineage(runId, frozenRetryExecution.workspacePath);
+      if (taskManifestLineageHash !== lineage.lineage.lineageIdentityHash) {
+        throw new Error('[governed-retry] TaskManifest lineage changed before worker claim');
+      }
+      if (approvedPreview.options.safety.deploy !== false) {
+        throw new Error('[governed-retry] TaskManifest retry cannot carry deploy authority');
+      }
+    } else if (taskManifestLineageHash !== null) {
+      throw new Error('[governed-retry] non-TaskManifest retry cannot carry synthetic lineage authority');
+    }
     const effectiveTerminalMode = terminalMode ?? payloadTerminalMode ?? 'ansi-html';
     if (runRow.status === 'release_pending') {
       await reconcileRunReleaseIntent(runId, {
@@ -1709,23 +1718,41 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         );
       });
       const recoveredStatus = anyFailed ? 'partial_failure' : allFinalized ? 'done' : 'partial_failure';
+      const recoveredAuthority = await inspectRunHostAuthority(runId);
+      if (recoveredStatus === 'done' && recoveredAuthority?.releaseEligible) {
+        await persistHostRunCloseout({
+          runId,
+          status: 'done',
+          governedRetryDispatchIdentity: dispatchIdentity.identityHash,
+          terminalizeRun: false,
+        });
+        await prepareRunReleaseIntent({
+          hostAuthority: recoveredAuthority,
+          mergeStrategy: approvedPreview.options.merge.strategy,
+          autoMerge: approvedPreview.options.merge.autoMerge,
+          externalSend: approvedPreview.options.safety.externalSend,
+        });
+        await reconcileRunReleaseIntent(runId, {
+          agent: approvedPreview.options.agent,
+          model: approvedPreview.options.model,
+          effortLevel: approvedPreview.options.effort && ['low', 'medium', 'high', 'max', 'xhigh'].includes(approvedPreview.options.effort)
+            ? approvedPreview.options.effort as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+            : undefined,
+          source: 'manual-retry',
+        }, { ...envOverrides });
+      } else {
+        await persistHostRunCloseout({
+          runId,
+          status: 'partial_failure',
+          governedRetryDispatchIdentity: dispatchIdentity.identityHash,
+          terminalizeRun: true,
+        });
+      }
       await execute(
-        `UPDATE pipeline_runs SET status = $2, finished_at = COALESCE(finished_at, NOW()),
-                summary = COALESCE(summary, 'retry_reconciled_without_duplicate_agent')
+        `UPDATE pipeline_runs SET summary = COALESCE(summary, 'retry_reconciled_without_duplicate_agent')
          WHERE id = $1`,
-        [runId, recoveredStatus],
+        [runId],
       );
-      await emitWalEvent('run_closeout', workspaceId, {
-        run_id: runId, original_run_id: originalRunId, status: recoveredStatus,
-        dispatch_identity: dispatchIdentity.identityHash, fencing_token: fencingToken,
-        restart_reconciled: true, duplicate_agent_started: false,
-        integrated_revision: execSync('git rev-parse HEAD', { cwd, encoding: 'utf8' }).trim(),
-        integration_ancestry: dispatchIdentity.priorIntegrationAncestry,
-        accepted_story_ids: [
-          ...dispatchIdentity.carriedForward.map((story) => story.storyId),
-          ...recoveredAttempts.filter((attempt) => attempt.integration_state === 'finalized').map((attempt) => attempt.story_id),
-        ].sort(),
-      });
       return;
     }
 
@@ -1959,7 +1986,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           passRecoveryError = error;
           logger.error({ error, runId }, '[worker] Integrated retry pass refinalization failed before fallback replay');
         }
-        const fallbackReplay = await replayWorkerFallbackResults(cwd, String(workspaceId));
+        const fallbackReplay = await replayWorkerFallbackResults(cwd, String(workspaceId), runId);
         try {
           passRecovery = await recoverUnreleasedIntegratedPasses({ runId });
           passRecoveryError = undefined;
@@ -1984,7 +2011,6 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         // Derive the retry run's terminal status from durable story results.
         // The temporary retry spec is run-owned; never mutate the approved source spec.
         let finalStatus: string;
-        let syncedStoryIds: string[] = [];
         let remainingStoryIds: string[] = [];
         let retrySpecSyncSucceeded = false;
         let retryHostAuthority: RunHostAuthority | null = null;
@@ -2069,23 +2095,52 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           await transaction(async (client) => {
             const terminalFailure = wasCancelled || finalStatus !== 'done';
             if (terminalFailure) {
-              const failureEvidence = JSON.stringify({ finalStatus, exitCode: code, wasCancelled, fencingToken });
-              await client.query(
-                `UPDATE governed_retry_story_attempts
-                 SET state = 'failed', failure_evidence = $2::jsonb
-                 WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
-                [dispatchIdentity.identityHash, failureEvidence],
-              );
-              const failed = await client.query(
-                `UPDATE governed_retry_dispatches
-                 SET state = 'failed', failure_evidence = $4::jsonb,
-                     lease_owner = NULL, lease_expires_at = NULL
-                 WHERE identity_hash = $1 AND state = 'executing'
-                   AND fencing_token = $2 AND lease_owner = $3
-                 RETURNING identity_hash`,
-                [dispatchIdentity.identityHash, fencingToken, leaseOwner, failureEvidence],
-              );
-              if (failed.rowCount !== 1) throw new Error('[governed-retry] failure finalization lost its fence');
+              const failureEvidence = JSON.stringify({
+                schemaVersion: wasCancelled ? 'rorca.governed-retry-cancellation.v1' : 'rorca.governed-retry-failure.v1',
+                finalStatus, exitCode: code, wasCancelled, fencingToken,
+              });
+              if (wasCancelled) {
+                await client.query(
+                  `UPDATE governed_retry_story_attempts
+                   SET state = 'cancelled', cancellation_evidence = $2::jsonb, cancelled_at = NOW()
+                   WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
+                  [dispatchIdentity.identityHash, failureEvidence],
+                );
+                const cancelled = await client.query(
+                  `UPDATE governed_retry_dispatches
+                   SET state = 'cancelled', cancellation_evidence = $4::jsonb, cancelled_at = NOW(),
+                       lease_owner = NULL, lease_expires_at = NULL
+                   WHERE identity_hash = $1 AND state = 'executing'
+                     AND fencing_token = $2 AND lease_owner = $3
+                   RETURNING identity_hash`,
+                  [dispatchIdentity.identityHash, fencingToken, leaseOwner, failureEvidence],
+                );
+                if (cancelled.rowCount !== 1) throw new Error('[governed-retry] cancellation finalization lost its fence');
+                await client.query(
+                  `UPDATE pipeline_retry_previews
+                   SET status = 'cancelled', preparation_state = 'cancelled', cancelled_at = NOW(),
+                       cancellation_evidence = $2::jsonb
+                   WHERE preview_hash = $1 AND status = 'dispatched'`,
+                  [previewHash, failureEvidence],
+                );
+              } else {
+                await client.query(
+                  `UPDATE governed_retry_story_attempts
+                   SET state = 'failed', failure_evidence = $2::jsonb
+                   WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
+                  [dispatchIdentity.identityHash, failureEvidence],
+                );
+                const failed = await client.query(
+                  `UPDATE governed_retry_dispatches
+                   SET state = 'failed', failure_evidence = $4::jsonb,
+                       lease_owner = NULL, lease_expires_at = NULL
+                   WHERE identity_hash = $1 AND state = 'executing'
+                     AND fencing_token = $2 AND lease_owner = $3
+                   RETURNING identity_hash`,
+                  [dispatchIdentity.identityHash, fencingToken, leaseOwner, failureEvidence],
+                );
+                if (failed.rowCount !== 1) throw new Error('[governed-retry] failure finalization lost its fence');
+              }
               return;
             }
 
@@ -2172,6 +2227,12 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         try {
           if (retryReleaseOwned) {
+            await persistHostRunCloseout({
+              runId,
+              status: 'done',
+              governedRetryDispatchIdentity: dispatchIdentity.identityHash,
+              terminalizeRun: false,
+            });
             await prepareRunReleaseIntent({
               hostAuthority: retryHostAuthority!,
               mergeStrategy: approvedPreview.options.merge.strategy,
@@ -2188,29 +2249,21 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
             }, { ...resolvedSecrets, ...envOverrides });
             finalStatus = release.status === 'completed' ? 'done' : 'release_pending';
           } else {
-            await execute(
-              `UPDATE pipeline_runs SET status = $1, finished_at = NOW(), summary = COALESCE($3, summary) WHERE id = $2`,
-              [finalStatus, runId, retrySummary],
-            );
+            await persistHostRunCloseout({
+              runId,
+              status: wasCancelled ? 'cancelled' : finalStatus === 'partial_failure' ? 'partial_failure' : 'failed',
+              governedRetryDispatchIdentity: dispatchIdentity.identityHash,
+              terminalizeRun: true,
+            });
+            if (retrySummary) {
+              await execute('UPDATE pipeline_runs SET summary = $2 WHERE id = $1', [runId, retrySummary]);
+            }
             await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : 'failed', {
               owner: 'worker_retry', outcome: finalStatus,
             });
             if (wasCancelled) {
               await emitWalEvent('run_cancelled', workspaceId, {
                 run_id: runId, cancelledAt: new Date().toISOString(), source: 'worker_retry',
-              });
-            } else {
-              await emitWalEvent('run_closeout', workspaceId, {
-                run_id: runId, original_run_id: originalRunId, status: finalStatus,
-                outcome: finalStatus, source: 'worker_retry',
-                dispatch_identity: dispatchIdentity.identityHash,
-              });
-              await emitWalEvent('run_finished', workspaceId, {
-                run_id: runId, original_run_id: originalRunId, status: finalStatus,
-                exit_code: code, source: 'worker_retry', retry_scope_complete: retryScopeComplete,
-                full_spec_complete: fullSpecComplete, synced_story_ids: syncedStoryIds,
-                remaining_story_ids: remainingStoryIds,
-                ...(retrySummary ? { summary: retrySummary } : {}),
               });
             }
           }
@@ -2528,6 +2581,134 @@ async function handlePipelineMerge(jobs: PgBoss.Job<Record<string, unknown>>[]):
 // We do NOT re-queue — a partially-executed run may have committed code;
 // re-running it would create duplicate commits.
 
+async function synthesizeAllMissingFrozenStoryFailures(
+  runId: number,
+  workspaceId: string,
+  reason: string,
+): Promise<void> {
+  const run = await queryOne<{ expected_story_ids: string[] | null }>(
+    'SELECT expected_story_ids FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
+    [runId, workspaceId],
+  );
+  for (const storyId of run?.expected_story_ids ?? []) {
+    const existing = await queryOne<{ id: number }>(
+      `SELECT id FROM story_results
+       WHERE run_id = $1 AND story_id = $2 AND result_provenance = 'host'
+       ORDER BY id DESC LIMIT 1`,
+      [runId, storyId],
+    );
+    if (existing) continue;
+    await persistCanonicalStoryResult({
+      runId,
+      storyId,
+      status: 'fail',
+      reason,
+      idempotencyKey: `story-result:worker-stale:v1:${runId}:${storyId}:${reason}`,
+      expectedWorkspaceId: workspaceId,
+    }, WORKER_RESULT_AUTHORITY);
+  }
+}
+
+async function reconcileStaleGovernedRetry(runId: number): Promise<'not-governed' | 'active' | 'reconciled'> {
+  const row = await queryOne<{
+    workspace_id: string; status: string; pid: number | null;
+    dispatch_state: string; dispatch_identity: string; packet: RetryPreviewPacket;
+    preview_hash: string;
+  }>(
+    `SELECT run.workspace_id, run.status, run.pid, dispatch.state AS dispatch_state,
+            dispatch.identity_hash AS dispatch_identity, preview.packet, preview.preview_hash
+     FROM governed_retry_dispatches dispatch
+     JOIN pipeline_retry_previews preview ON preview.preview_hash = dispatch.preview_hash
+     JOIN pipeline_runs run ON run.id = dispatch.retry_run_id
+     WHERE dispatch.retry_run_id = $1`,
+    [runId],
+  );
+  if (!row) return 'not-governed';
+  if (isProcessAlive(row.pid)) return 'active';
+
+  await recoverIntegratedValidatedStoryFinalizations({ runId });
+  await recoverUnreleasedIntegratedPasses({ runId });
+  const authority = await inspectRunHostAuthority(runId);
+  if (row.dispatch_state === 'finalized' && authority?.releaseEligible) {
+    await persistHostRunCloseout({
+      runId,
+      status: 'done',
+      governedRetryDispatchIdentity: row.dispatch_identity,
+      terminalizeRun: false,
+    });
+    await prepareRunReleaseIntent({
+      hostAuthority: authority,
+      mergeStrategy: row.packet.options.merge.strategy,
+      autoMerge: row.packet.options.merge.autoMerge,
+      externalSend: row.packet.options.safety.externalSend,
+    });
+    await reconcileRunReleaseIntent(runId, {
+      agent: row.packet.options.agent,
+      model: row.packet.options.model,
+      effortLevel: row.packet.options.effort && ['low', 'medium', 'high', 'max', 'xhigh'].includes(row.packet.options.effort)
+        ? row.packet.options.effort as 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+        : undefined,
+      source: 'manual-retry',
+    });
+    return 'reconciled';
+  }
+  if (['committed', 'integrating', 'integrated_validated'].includes(row.dispatch_state)) {
+    const evidence = JSON.stringify({
+      schemaVersion: 'rorca.governed-retry-reconciliation.v1',
+      reason: 'stale_post_git_authority_incomplete',
+      duplicateAgentStarted: false,
+    });
+    await execute(
+      `UPDATE governed_retry_dispatches
+       SET state = CASE WHEN state = 'integrating' THEN 'manual_review_required' ELSE state END,
+           failure_evidence = CASE WHEN state = 'integrating' THEN $2::jsonb ELSE failure_evidence END,
+           lease_owner = NULL, lease_expires_at = NULL
+       WHERE retry_run_id = $1`,
+      [runId, evidence],
+    );
+    await execute(
+      `UPDATE pipeline_runs SET summary = 'stale_post_git_manual_review_required'
+       WHERE id = $1 AND status NOT IN ('done','failed','cancelled')`,
+      [runId],
+    );
+    return 'reconciled';
+  }
+
+  await synthesizeAllMissingFrozenStoryFailures(runId, row.workspace_id, 'worker_crash_recovery');
+  const evidence = JSON.stringify({
+    schemaVersion: 'rorca.governed-retry-reconciliation.v1',
+    reason: 'stale_pre_git_worker_exit',
+    duplicateAgentStarted: false,
+  });
+  await transaction(async (client) => {
+    await client.query(
+      `UPDATE governed_retry_story_attempts SET state = 'failed', failure_evidence = $2::jsonb
+       WHERE dispatch_identity_hash = $1 AND state IN ('pending','executing','committed','integrating')`,
+      [row.dispatch_identity, evidence],
+    );
+    await client.query(
+      `UPDATE governed_retry_dispatches
+       SET state = 'failed', failure_evidence = $2::jsonb, lease_owner = NULL, lease_expires_at = NULL
+       WHERE identity_hash = $1 AND state IN ('prepared','dispatched','claimed','executing')`,
+      [row.dispatch_identity, evidence],
+    );
+    await client.query(
+      `UPDATE pipeline_retry_previews
+       SET status = 'refused', preparation_state = 'refused',
+           refusal_reason = 'stale_pre_git_worker_exit'
+       WHERE preview_hash = $1 AND status IN ('approved','dispatched')`,
+      [row.preview_hash],
+    );
+  });
+  await persistHostRunCloseout({
+    runId,
+    status: 'failed',
+    governedRetryDispatchIdentity: row.dispatch_identity,
+    terminalizeRun: true,
+  });
+  return 'reconciled';
+}
+
 export async function recoverStaleJobs(): Promise<void> {
   type StaleJobRow = {
     id: string;
@@ -2573,75 +2754,41 @@ export async function recoverStaleJobs(): Promise<void> {
 
   for (const job of staleJobs) {
     const runId = typeof job.data?.runId === 'number' ? job.data.runId : undefined;
-
-    // 1. Fail the pg-boss job so the slot is freed
-    try {
-      await execute(
-        `UPDATE pgboss.job
-         SET state = 'failed', completed_on = NOW()
-         WHERE id = $1 AND state = 'active'`,
-        [job.id],
-      );
-    } catch (err) {
-      logger.warn({ err, jobId: job.id }, '[worker] recoverStaleJobs — failed to update pgboss.job state');
-      continue;
-    }
-
     if (!runId) {
-      logger.warn({ jobId: job.id, jobName: job.name }, '[worker] recoverStaleJobs — job has no runId in data, skipping pipeline_runs update');
+      logger.warn({ jobId: job.id, jobName: job.name }, '[worker] stale dispatch has no canonical application run');
+      await getBoss().fail(job.name, job.id, { reason: 'missing_canonical_run_id' }).catch(() => undefined);
       continue;
     }
 
-    // 2. Look up workspaceId before updating the run
-    const runRow = await queryOne<{ workspace_id: number | string }>(
-      `SELECT workspace_id FROM pipeline_runs WHERE id = $1`,
-      [runId],
+    const runRow = await queryOne<{ workspace_id: string }>(
+      'SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId],
     ).catch(() => undefined);
+    if (!runRow) {
+      await getBoss().fail(job.name, job.id, { reason: 'canonical_run_missing' }).catch(() => undefined);
+      continue;
+    }
 
-    // 3. Mark pipeline_runs as failed
     try {
-      await execute(
-        `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1 AND status = 'running'`,
-        [runId],
-      );
-      await transitionRunLifecycle(runId, 'failed', {
-        owner: 'worker_crash_recovery', process: 'stale_pgboss_job', pgbossJobId: job.id,
-      });
-    } catch (err) {
-      logger.warn({ err, runId }, '[worker] recoverStaleJobs — failed to update pipeline_runs');
+      if (job.name === 'pipeline:retry') {
+        const outcome = await reconcileStaleGovernedRetry(runId);
+        if (outcome === 'active') continue;
+        if (outcome === 'not-governed') throw new Error('pipeline:retry lacks governed application state');
+      } else {
+        await synthesizeAllMissingFrozenStoryFailures(runId, runRow.workspace_id, 'worker_crash_recovery');
+        await persistHostRunCloseout({ runId, status: 'failed', terminalizeRun: true });
+        await transitionRunLifecycle(runId, 'failed', {
+          owner: 'worker_crash_recovery', process: 'stale_pgboss_job', pgbossJobId: job.id,
+        });
+      }
+      // Application tables reached an authoritative terminal/reconciliation
+      // state first. pg-boss is notified only to release dispatch capacity.
+      await getBoss().fail(job.name, job.id, { reason: 'application_state_reconciled' });
+      advanceQueue(runRow.workspace_id).catch(qErr =>
+        logger.error({ err: qErr, runId }, '[worker] advanceQueue failed after stale job recovery'));
+      logger.warn({ pgbossJobId: job.id, jobName: job.name, runId }, '[worker] stale dispatch reconciled from application authority');
+    } catch (error) {
+      logger.error({ error, pgbossJobId: job.id, jobName: job.name, runId }, '[worker] stale dispatch remains blocked; pg-boss slot not mutated');
     }
-
-    // 4. Persist the interrupted story outcome before any trusted failure or
-    // terminal event can be released.
-    if (runRow) {
-      await synthesizeInterruptedStoryFailure({
-        runId,
-        workspaceId: runRow.workspace_id,
-        status: 'failed',
-        exitCode: null,
-        exitSignal: null,
-        source: 'worker',
-      });
-      await emitWalEvent('run_finished', runRow.workspace_id, {
-        run_id: runId,
-        status: 'failed',
-        reason: 'worker_crash_recovery',
-        pgboss_job_id: job.id,
-        recovered_at: new Date().toISOString(),
-      });
-    }
-
-    // Advance queue — a queued run may have been waiting behind this stale one
-    if (runRow) {
-      advanceQueue(String(runRow.workspace_id)).catch(qErr =>
-        logger.error({ err: qErr, runId }, '[worker] advanceQueue failed after stale job recovery'),
-      );
-    }
-
-    logger.warn(
-      { pgbossJobId: job.id, jobName: job.name, runId },
-      '[worker] recoverStaleJobs — stale job failed, pipeline_runs updated',
-    );
   }
 
   logger.info({ recovered: staleJobs.length }, '[worker] recoverStaleJobs — recovery complete');
@@ -2976,35 +3123,19 @@ async function reconcileState(): Promise<void> {
     );
 
     try {
-      const passRecovery = await recoverUnreleasedIntegratedPasses({ runId: run.id });
-      if (passRecoveryBlocksCompletion(passRecovery)) {
-        logger.error({ runId: run.id, passRecovery }, '[worker] startup pass refinalization remains blocked');
+      const governed = await reconcileStaleGovernedRetry(run.id);
+      if (governed === 'active') continue;
+      if (governed === 'not-governed') {
+        const passRecovery = await recoverUnreleasedIntegratedPasses({ runId: run.id });
+        if (passRecoveryBlocksCompletion(passRecovery)) {
+          logger.error({ runId: run.id, passRecovery }, '[worker] startup pass refinalization remains blocked');
+        }
+        await synthesizeAllMissingFrozenStoryFailures(run.id, String(run.workspace_id), 'state_reconciliation');
+        await persistHostRunCloseout({ runId: run.id, status: 'failed', terminalizeRun: true });
+        await transitionRunLifecycle(run.id, 'failed', {
+          owner: 'worker_reconciliation', process: 'heartbeat_stale_or_pid_dead',
+        });
       }
-
-      await synthesizeInterruptedStoryFailure({
-        runId: run.id,
-        workspaceId: run.workspace_id,
-        status: 'failed',
-        exitCode: null,
-        exitSignal: null,
-        source: 'worker',
-      });
-      await execute(
-        `UPDATE pipeline_runs
-         SET status = 'failed', finished_at = NOW()
-         WHERE id = $1 AND status = 'running'`,
-        [run.id],
-      );
-      await transitionRunLifecycle(run.id, 'failed', {
-        owner: 'worker_reconciliation', process: 'heartbeat_stale_or_pid_dead',
-      });
-
-      await emitWalEvent('run_finished', run.workspace_id, {
-        run_id: run.id,
-        status: 'failed',
-        reason: 'state_reconciliation',
-        reconciled_at: new Date().toISOString(),
-      });
 
       logger.warn(
         { runId: run.id, workspaceId: run.workspace_id },
@@ -3057,12 +3188,11 @@ async function reconcileState(): Promise<void> {
     );
 
     try {
-      await execute(
-        `UPDATE pgboss.job
-         SET state = 'failed', completed_on = NOW()
-         WHERE id = $1 AND state = 'active'`,
-        [job.id],
-      );
+      if (job.name === 'pipeline:retry' && job.run_id) {
+        const outcome = await reconcileStaleGovernedRetry(Number(job.run_id));
+        if (outcome === 'active') continue;
+      }
+      await getBoss().fail(job.name, job.id, { reason: 'application_state_already_resolved' });
 
       logger.warn(
         { jobId: job.id, jobName: job.name, runId: job.run_id },
@@ -3494,13 +3624,15 @@ async function start(): Promise<void> {
   // references, then re-scan. Recovery proves ordered descendants before an
   // earlier pass can be released after a later story advanced canonical HEAD.
   try {
+    const integratedValidatedRecovery = await recoverIntegratedValidatedStoryFinalizations({ limit: 100 });
     const firstPassRecovery = await recoverUnreleasedIntegratedPasses();
     const journalRecovery = await replayRetainedRunJournals();
     const secondPassRecovery = await recoverUnreleasedIntegratedPasses();
-    if (firstPassRecovery.scanned > 0 || firstPassRecovery.blocked.length > 0
+    if (integratedValidatedRecovery.scanned > 0
+      || firstPassRecovery.scanned > 0 || firstPassRecovery.blocked.length > 0
       || journalRecovery.scannedRoots > 0 || secondPassRecovery.scanned > 0
       || secondPassRecovery.blocked.length > 0) {
-      logger.info({ firstPassRecovery, journalRecovery, secondPassRecovery }, '[worker] startup integrated pass/journal refinalization complete');
+      logger.info({ integratedValidatedRecovery, firstPassRecovery, journalRecovery, secondPassRecovery }, '[worker] startup integrated pass/journal refinalization complete');
     }
   } catch (error) {
     logger.error({ error }, '[worker] startup integrated pass/journal refinalization deferred');
