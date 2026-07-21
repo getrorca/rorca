@@ -927,11 +927,23 @@ interface RunViewPanelProps {
   onNavigate: (panel: PanelId) => void;
 }
 
+type RunLoadError =
+  | { kind: 'not-found'; message: string }
+  | { kind: 'workspace-mismatch'; message: string }
+  | { kind: 'temporary'; message: string };
+
+function apiErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== 'object' || !('status' in error)) return null;
+  const status = Number((error as { status?: unknown }).status);
+  return Number.isInteger(status) ? status : null;
+}
+
 export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }: RunViewPanelProps) {
   const { workspaceId } = useWorkspace();
   const isMobile = useIsMobile();
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [loading, setLoading] = useState(true);
+  const [runLoadError, setRunLoadError] = useState<RunLoadError | null>(null);
   const [activeTab, setActiveTab] = useState<RunViewTab>('terminal');
   const terminalRef = useRef<RunTerminalHandle>(null);
   const [pauseLoading, setPauseLoading] = useState(false);
@@ -1255,14 +1267,22 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
   const fetchRun = useCallback(async () => {
     if (!workspaceId) return;
+    setLoading(true);
+    setRunLoadError(null);
     try {
       const response = await apiFetch<RunApiResponse>(`/api/pipeline/runs/${runId}`);
       const data = normalizePipelineRunDetailResponse(response);
-      // Validate the run belongs to the current workspace
+      // Run IDs are globally addressable, but the view remains scoped to the
+      // selected workspace. Do not mislabel a workspace mismatch as a missing run.
       if (data.run.workspace_id && String(data.run.workspace_id) !== String(workspaceId)) {
-        setLoading(false);
+        setRun(null);
+        setRunLoadError({
+          kind: 'workspace-mismatch',
+          message: `Run #${runId} belongs to workspace ${data.run.workspace_id}, not the currently selected workspace.`,
+        });
         return;
       }
+      setRunLoadError(null);
       setRun(data.run);
       // Seed merge status from DB column or infer from worktree presence
       if (data.run.merge_status) {
@@ -1321,15 +1341,27 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         }
         setSeedStatuses(seed);
       }
-    } catch {
-      // run not found
+    } catch (error) {
+      const status = apiErrorStatus(error);
+      setRunLoadError(status === 404
+        ? { kind: 'not-found', message: `Run #${runId} was not found.` }
+        : {
+            kind: 'temporary',
+            message: status === 429
+              ? 'Run details are temporarily rate limited. Wait a moment and retry.'
+              : 'Run details could not be loaded. The run may still exist; retry when the backend is available.',
+          });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, [runId, workspaceId]);
 
   useEffect(() => {
-    fetchRun();
-  }, [fetchRun]);
+    setRun(null);
+    setRunLoadError(null);
+    setLoading(true);
+    void fetchRun();
+  }, [fetchRun, runId]);
 
   // Dismiss resume badge when first real story_started WAL event fires
   useEffect(() => {
@@ -1518,19 +1550,19 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     try {
       const result = await retryRun(runId, {
         storyIds: [...failedStoryIds],
-        workspaceId: workspaceId ?? undefined,
       });
-      // Navigate to the new retry run — reload clears stale state
+      // A retry creates a distinct run. Navigate to that run rather than
+      // reloading the failed source run and making the action appear ineffective.
       if (result.runId) {
         handleTabChange('terminal');
-        window.location.reload();
+        window.location.href = `/runs/${result.runId}`;
       }
     } catch (err) {
       console.error('[RunView] Retry failed:', err);
     } finally {
       setRetryLoading(false);
     }
-  }, [runId, failedStoryIds, failedStoryCount, workspaceId, handleTabChange]);
+  }, [runId, failedStoryIds, failedStoryCount, handleTabChange]);
 
   const handleViewErrorDetail = useCallback(() => {
     // Switch to terminal tab and scroll to the last failed story
@@ -1552,15 +1584,28 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   }
 
   if (!run) {
+    const isNotFound = runLoadError?.kind === 'not-found';
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-4">
-        <span className="text-sm text-muted">Run #{runId} not found</span>
-        <button
-          onClick={onBack}
-          className="text-sm text-accent hover:underline"
-        >
-          Back to Hub
-        </button>
+      <div className="h-full flex flex-col items-center justify-center gap-4 px-6 text-center">
+        <span className="text-sm text-muted">
+          {runLoadError?.message ?? `Run #${runId} could not be loaded.`}
+        </span>
+        <div className="flex items-center gap-3">
+          {!isNotFound && (
+            <button
+              onClick={() => void fetchRun()}
+              className="rounded border border-border px-3 py-1.5 text-sm text-accent hover:bg-panel"
+            >
+              Retry loading
+            </button>
+          )}
+          <button
+            onClick={onBack}
+            className="text-sm text-accent hover:underline"
+          >
+            Back to Hub
+          </button>
+        </div>
       </div>
     );
   }
@@ -1603,6 +1648,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                     runState={runState}
                     resumeSummary={resumeSummary}
                     onStoryClick={useMultiPane ? undefined : (storyId) => terminalRef.current?.scrollToStory(storyId)}
+                    onRetryStory={(_storyId, newRunId) => { window.location.href = `/runs/${newRunId}`; }}
                     parallelism={run.parallelism}
                     includeGraph={run.include_graph}
                     storyContext={storyContextMap}

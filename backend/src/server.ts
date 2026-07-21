@@ -249,6 +249,8 @@ const WEBHOOK_CALLBACK_PATHS = new Set([
   '/api/webhooks/vercel',
   '/api/webhooks/slack',
 ]);
+// One megabyte safely covers the bounded 512 KiB TaskManifest/context contract
+// while retaining the incoming mainline fix that removes Express's 100 KiB default.
 app.use(express.json({
   limit: '1mb',
   verify: (req, _res, buf) => {

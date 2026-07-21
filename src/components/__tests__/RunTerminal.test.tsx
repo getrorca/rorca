@@ -158,6 +158,7 @@ describe('RunTerminal PTY fallback UI', () => {
     xtermMockState.instances.length = 0;
     TestResizeObserver.instances.length = 0;
     sessionStorage.clear();
+    localStorage.removeItem('rorca:terminal-mode:77');
     vi.useRealTimers();
     vi.stubGlobal('EventSource', TestEventSource);
     vi.stubGlobal('ResizeObserver', TestResizeObserver);
@@ -626,6 +627,31 @@ describe('RunTerminal PTY fallback UI', () => {
       '/api/pipeline/runs/77/input',
       expect.anything(),
     );
+  });
+
+  it('never resizes the child from a hidden semantic tab and fits once Terminal becomes visible', async () => {
+    localStorage.setItem('rorca:terminal-mode:77', 'semantic');
+    renderTerminal('pty');
+    await waitFor(() => expect(xtermMockState.instances.length).toBe(1));
+    await waitFor(() => expect(lastEventSource).not.toBeNull());
+    vi.mocked(apiFetch).mockClear();
+
+    act(() => {
+      lastEventSource!.emit('run_meta', JSON.stringify({
+        terminalMode: 'pty', requestedTerminalMode: 'pty', isPty: true,
+        ptyGenerationId: PTY_GENERATION_ID, ptyGenerationToken: PTY_GENERATION_TOKEN,
+        ptyGenerationActive: true, ptySessionStatus: 'active', ptyProcessAlive: true,
+      }));
+      TestResizeObserver.instances[0]?.trigger();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(apiFetch).not.toHaveBeenCalledWith('/api/pipeline/runs/77/pty/resize', expect.anything());
+
+    fireEvent.click(screen.getByRole('button', { name: /Terminal/i }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      '/api/pipeline/runs/77/pty/resize',
+      expect.objectContaining({ body: JSON.stringify({ generationToken: PTY_GENERATION_TOKEN, cols: 80, rows: 24 }) }),
+    ));
   });
 
   it('retries the initial resize once when authoritative PTY health becomes active', async () => {

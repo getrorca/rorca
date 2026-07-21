@@ -104,6 +104,33 @@ describe('RunTranscript', () => {
     await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
   });
 
+  it('preserves the active cursor when a newer-events poll is empty', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(page({
+        items: [event(1, 'model_message', { text: 'current event' })],
+        nextCursor: 'cursor-seq-1',
+      }) as never)
+      .mockResolvedValueOnce(page() as never)
+      .mockResolvedValueOnce(page({
+        items: [event(2, 'host_notice', { message: 'new event' })],
+        nextCursor: 'cursor-seq-2',
+      }) as never);
+
+    render(<RunTranscript runId={77} generationId={GENERATION_ID} available archiveAvailable={false} active />);
+    expect(await screen.findByText('current event')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check for newer events' }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Check for newer events' }));
+
+    expect(await screen.findByLabelText(/Host notice transcript event 2/)).toBeInTheDocument();
+    expect(apiFetch).toHaveBeenLastCalledWith(
+      `/api/pty-evidence/runs/77/generations/${GENERATION_ID}/transcript?limit=50&cursor=cursor-seq-1`,
+      { silent: true },
+    );
+    expect(screen.queryByText(/sequence did not match/)).not.toBeInTheDocument();
+  });
+
   it('supports keyboard navigation with a visible tokenized focus outline', async () => {
     vi.mocked(apiFetch).mockResolvedValue(page({
       items: [event(1, 'model_message', { text: 'one' }), event(2, 'host_notice', { message: 'two' })],

@@ -86,6 +86,57 @@ describe('PTY transcript contract primitives', () => {
     expect(lines.every((line) => Buffer.byteLength(line) <= 8_000)).toBe(true);
   });
 
+  it('coalesces narrow full-screen repaint lines into bounded transcript blocks', async () => {
+    const appender = jest.fn(async (_generation: unknown, _input: any) => ({} as never));
+    const recorder = new PtyTranscriptRecorder({
+      runId: 77,
+      generationId: GENERATION_ID,
+      generationToken: '323e4567-e89b-42d3-a456-426614174000',
+    }, appender);
+
+    recorder.recordModelBytes(Buffer.from(`${'0123456789\r\n'.repeat(2_000)}`, 'utf8'));
+    await recorder.drain();
+
+    const modelWrites = appender.mock.calls.filter((call) => call[1].eventType === 'model_message');
+    expect(modelWrites.length).toBeGreaterThan(0);
+    expect(modelWrites.length).toBeLessThan(10);
+    expect(modelWrites.every((call) => Buffer.byteLength(call[1].payload.text, 'utf8') <= 16 * 1024)).toBe(true);
+  });
+
+  it('bounds recorder backpressure and persists an explicit gap instead of retaining an unbounded promise chain', async () => {
+    let releaseFirst!: () => void;
+    const firstWriteBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let callCount = 0;
+    const appender = jest.fn(async (_generation: unknown, _input: any) => {
+      callCount += 1;
+      if (callCount === 1) await firstWriteBlocked;
+      return {} as never;
+    });
+    const recorder = new PtyTranscriptRecorder({
+      runId: 77,
+      generationId: GENERATION_ID,
+      generationToken: '323e4567-e89b-42d3-a456-426614174000',
+    }, appender, { maxPendingEvents: 2 });
+
+    recorder.recordHostNotice('start', 'block persistence');
+    for (let index = 0; index < 25; index += 1) {
+      recorder.recordStructured({
+        eventType: 'model_message',
+        eventSource: 'terminal_normalized',
+        role: 'assistant',
+        payload: { text: `repaint ${index}` },
+        presentation: true,
+      });
+    }
+    releaseFirst();
+    await recorder.drain();
+
+    expect(appender.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(appender.mock.calls.some((call) => call[1].eventType === 'gap'
+      && call[1].payload.code === 'transcript_recorder_backpressure'
+      && call[1].payload.droppedEvents > 0)).toBe(true);
+  });
+
   it('retries with one stable event identity and records recovery explicitly', async () => {
     const appender = jest.fn()
       .mockRejectedValueOnce(new Error('transient one'))

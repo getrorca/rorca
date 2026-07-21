@@ -168,7 +168,7 @@ describe('RunViewPanel', () => {
   it('shows run not found state when run does not exist', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
-      if (path.includes('/api/pipeline/runs/999')) throw new Error('Not found');
+      if (path.includes('/api/pipeline/runs/999')) throw Object.assign(new Error('Not found'), { status: 404 });
       return {};
     });
 
@@ -182,6 +182,28 @@ describe('RunViewPanel', () => {
         screen.queryByText(/back/i);
       expect(notFound).toBeInTheDocument();
     }, { timeout: 3000 });
+  });
+
+  it('does not misreport a transient load failure as a missing run and allows retry', async () => {
+    let attempts = 0;
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes('/api/pipeline/runs/998')) {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('Too many requests'), { status: 429 });
+        return { ...MOCK_RUN_RESPONSE, run: { ...BASE_RUN, id: 998 } };
+      }
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={998} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    expect(await screen.findByText(/temporarily rate limited/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Run #998 was not found/i)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Retry loading' }));
+    expect(await screen.findByTestId('run-terminal')).toHaveTextContent('Terminal for run 998');
   });
 
   it('displays run data after fetch resolves', async () => {
