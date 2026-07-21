@@ -7517,8 +7517,8 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *             required: [generationToken, cols, rows]
  *             properties:
  *               generationToken: { type: string, format: uuid, description: Exact active PTY generation token }
- *               cols: { type: integer, minimum: 80, maximum: 500 }
- *               rows: { type: integer, minimum: 12, maximum: 200 }
+ *               cols: { type: integer, minimum: 1, maximum: 500 }
+ *               rows: { type: integer, minimum: 1, maximum: 200 }
  *     responses:
  *       200: { description: PTY resize request recorded }
  */
@@ -7533,10 +7533,14 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
       throw new ValidationError('generationToken must be a UUID');
     }
-    if (!Number.isInteger(cols) || cols < MIN_PTY_COLS || cols > MAX_PTY_COLS
-      || !Number.isInteger(rows) || rows < MIN_PTY_ROWS || rows > MAX_PTY_ROWS) {
-      throw new ValidationError(`cols must be ${MIN_PTY_COLS}-${MAX_PTY_COLS} and rows must be ${MIN_PTY_ROWS}-${MAX_PTY_ROWS}`);
+    if (!Number.isInteger(cols) || cols <= 0 || cols > MAX_PTY_COLS
+      || !Number.isInteger(rows) || rows <= 0 || rows > MAX_PTY_ROWS) {
+      throw new ValidationError(`cols must be 1-${MAX_PTY_COLS} and rows must be 1-${MAX_PTY_ROWS}`);
     }
+    // Preserve the public 1..N input contract while preventing tiny browser
+    // layout races from collapsing a full-screen TUI into a redraw storm.
+    const safeCols = Math.max(cols, MIN_PTY_COLS);
+    const safeRows = Math.max(rows, MIN_PTY_ROWS);
     if (!PTY_AVAILABLE) {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
@@ -7554,7 +7558,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
       throw new ConflictError('Run is no longer active');
     }
 
-    const generation = await requestRunPtyResize(runId, generationToken, cols, rows);
+    const generation = await requestRunPtyResize(runId, generationToken, safeCols, safeRows);
     res.json({ ok: true, runId, cols, rows, generation });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Resize PTY run');
