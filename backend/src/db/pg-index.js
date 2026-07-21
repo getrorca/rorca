@@ -180,6 +180,18 @@ export async function runPgMigrations(pool) {
                 throw error;
             }
         };
+        const persistMigrationMarker = async (version, filename, skippedInLiteMode) => {
+            const inserted = await client.query(`INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (version) DO NOTHING
+         RETURNING filename, skipped_in_lite_mode`, [version, filename, skippedInLiteMode]);
+            const marker = inserted.rows[0] ?? (await client.query(`SELECT filename, skipped_in_lite_mode
+         FROM public.schema_migrations WHERE version = $1`, [version])).rows[0];
+            if (!marker || marker.filename !== filename
+                || Boolean(marker.skipped_in_lite_mode) !== skippedInLiteMode) {
+                throw new Error(`[pg-migrate] Durable migration marker conflict for version ${version}`);
+            }
+        };
         // PG-019: Migrations that create extensions may fail on managed services
         // (e.g., Supabase pre-installs pgvector, Neon doesn't support AGE).
         // Extension migration filenames contain these keywords for detection.
@@ -229,20 +241,23 @@ export async function runPgMigrations(pool) {
                         skippedCount++;
                         continue;
                     }
-                }
-                const catalog = await client.query(`SELECT to_regclass('ag_catalog.ag_graph')::text AS graph_catalog`);
-                let legacyGraphExists = false;
-                if (catalog.rows[0]?.graph_catalog) {
-                    const graph = await client.query(`SELECT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'rorca') AS exists`);
-                    legacyGraphExists = Boolean(graph.rows[0]?.exists);
-                }
-                if (!legacyGraphExists) {
-                    await client.query('INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)', [version, `${file} [skipped: application schema collision]`]);
+                    // CREATE/LOAD failed, so graph catalog probing is neither authoritative
+                    // nor necessarily permitted. Persist the graph-lite decision under the
+                    // replacement session's reacquired lock and continue fail-closed.
+                    await persistMigrationMarker(version, `${file} [skipped: extension unavailable]`, true);
                     appliedVersions.add(version);
                     skippedCount++;
-                    console.warn('[pg-migrate] Skipping legacy rorca AGE graph: application schema owns that name; use rorca_v2 bootstrap');
                     continue;
                 }
+                // The legacy graph identifier is the application schema name. Never
+                // inspect provider-owned ag_catalog (the application role may correctly
+                // lack USAGE) and never execute create_graph('rorca') in a current
+                // installation. AGE availability and graph ownership are independent.
+                await persistMigrationMarker(version, `${file} [skipped: application schema collision]`, true);
+                appliedVersions.add(version);
+                skippedCount++;
+                console.warn('[pg-migrate] Skipping legacy rorca AGE graph: application schema owns that name; use rorca_v2 bootstrap');
+                continue;
             }
             const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
             // Wrap each migration in a transaction
@@ -252,14 +267,7 @@ export async function runPgMigrations(pool) {
                 // temporarily switch it to public and do not restore it for the session.
                 await client.query('SET LOCAL search_path TO rorca, public');
                 await client.query(sql);
-                try {
-                    await client.query('INSERT INTO public.schema_migrations (version, filename) VALUES ($1, $2)', [version, file]);
-                }
-                catch (err) {
-                    if (err.code !== '23505') {
-                        throw err;
-                    }
-                }
+                await persistMigrationMarker(version, file, false);
                 await client.query('COMMIT');
                 appliedVersions.add(version);
                 appliedCount++;
@@ -287,13 +295,9 @@ export async function runPgMigrations(pool) {
                         skippedCount++;
                         continue;
                     }
-                    // Record as applied to prevent retries
-                    try {
-                        await client.query('INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)', [version, `${file} [skipped: extension unavailable]`]);
-                    }
-                    catch {
-                        // schema_migrations insert itself may fail if version already exists
-                    }
+                    // The marker is migration authority. Any write/readback failure aborts;
+                    // graph-lite operation must never be reported from memory alone.
+                    await persistMigrationMarker(version, `${file} [skipped: extension unavailable]`, true);
                     appliedVersions.add(version);
                     skippedCount++;
                     continue;

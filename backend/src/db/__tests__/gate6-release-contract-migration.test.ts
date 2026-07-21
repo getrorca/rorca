@@ -13,7 +13,7 @@ const init = fs.readFileSync(path.join(migrations, '001_init.sql'), 'utf8');
 const releaseSource = fs.readFileSync(path.join(process.cwd(), 'src/lib/release-authority.ts'), 'utf8');
 const sql = fs.readFileSync(path.join(migrations, '20260718170000_gate6_release_contract.sql'), 'utf8');
 
-test('next unique upgrade migration truthfully replaces the historical run status contract', () => {
+test('ordered upgrade migrations truthfully preserve and extend the historical run status contract', () => {
   const files = fs.readdirSync(migrations).filter((file) => file.endsWith('.sql')).sort();
   const prefixes = files.map((file) => file.match(/^(\d+)_/)?.[1]).filter(Boolean);
   expect(new Set(prefixes).size).toBe(prefixes.length);
@@ -37,10 +37,12 @@ test('next unique upgrade migration truthfully replaces the historical run statu
     const source = fs.readFileSync(path.join(migrations, file), 'utf8');
     return source.includes('ADD CONSTRAINT pipeline_runs_status_check') ? [{ file, source }] : [];
   });
-  expect(effectiveDefinitions).toHaveLength(1);
-  expect(effectiveDefinitions[0]?.file).toBe('20260718170000_gate6_release_contract.sql');
-  expect(effectiveDefinitions[0]?.source).toContain("'release_pending'");
-  expect(effectiveDefinitions[0]?.source).toContain("'pi_native'");
+  expect(effectiveDefinitions.length).toBeGreaterThanOrEqual(1);
+  const latestDefinition = effectiveDefinitions.at(-1);
+  expect(latestDefinition?.file).toBe('20260720151000_wave_dispatch_starting_status.sql');
+  expect(latestDefinition?.source).toContain("'release_pending'");
+  expect(latestDefinition?.source).toContain("'pi_native'");
+  expect(latestDefinition?.source).toContain("'starting'");
 });
 
 test('migration freezes exact direct base, integration checkout, and unique provider release ref', () => {

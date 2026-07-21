@@ -33,13 +33,11 @@ import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
 
 // ── Connection ─────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
 
 // PgBoss alone owns this suite's schema; this also isolates real integration
 // evidence from legacy unit fixtures that created a partial `pgboss` schema.
@@ -103,6 +101,7 @@ const activeChildren: ChildProcess[] = [];
 beforeAll(async () => {
   // 1. Connect pool (used for assertions and cleanup)
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // 2. Run migrations (ensures schema parity with production)
   const { runPgMigrations } = await import('../db/pg-index');

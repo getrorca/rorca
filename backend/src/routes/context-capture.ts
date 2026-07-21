@@ -657,47 +657,53 @@ router.patch('/:workspaceId/policy', async (req, res) => {
   res.json({ ok: true, status });
 });
 
-for (const action of ['pause', 'resume'] as const) {
-  /**
-   * @swagger
-   * /api/context-capture/{workspaceId}/pause:
-   *   post:
-   *     tags: [Context Capture]
-   *     summary: Pause always-on capture
-   *     x-rorca-tier: admin
-   *     x-rorca-rationale: "Pause is an operator-only privacy control."
-   *     parameters:
-   *       - in: path
-   *         name: workspaceId
-   *         required: true
-   *         schema: { type: string }
-   *     responses:
-   *       200: { description: Capture paused }
-   */
-  /**
-   * @swagger
-   * /api/context-capture/{workspaceId}/resume:
-   *   post:
-   *     tags: [Context Capture]
-   *     summary: Resume always-on capture
-   *     x-rorca-tier: admin
-   *     x-rorca-rationale: "Resume re-enables operator-configured telemetry under explicit policy."
-   *     parameters:
-   *       - in: path
-   *         name: workspaceId
-   *         required: true
-   *         schema: { type: string }
-   *     responses:
-   *       200: { description: Capture resumed }
-   */
-  router.post(`/:workspaceId/${action}`, async (req, res) => {
-    const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
-    const status = await upsertContextCaptureControlState({ workspaceId: workspace.id, paused: action === 'pause' });
-    await appendContextCaptureAudit({ workspaceId: workspace.id, eventType: action, integrationId: 'operator' });
-    publish(workspace.id, { type: action, paused: action === 'pause' });
-    res.json({ ok: true, status });
-  });
-}
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/pause:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Pause always-on capture
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Pause is an operator-only privacy control."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture paused }
+ */
+router.post('/:workspaceId/pause', async (req, res) => {
+  const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
+  const status = await upsertContextCaptureControlState({ workspaceId: workspace.id, paused: true });
+  await appendContextCaptureAudit({ workspaceId: workspace.id, eventType: 'pause', integrationId: 'operator' });
+  publish(workspace.id, { type: 'pause', paused: true });
+  res.json({ ok: true, status });
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/resume:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Resume always-on capture
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Resume re-enables operator-configured telemetry under explicit policy."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture resumed }
+ */
+router.post('/:workspaceId/resume', async (req, res) => {
+  const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
+  const status = await upsertContextCaptureControlState({ workspaceId: workspace.id, paused: false });
+  await appendContextCaptureAudit({ workspaceId: workspace.id, eventType: 'resume', integrationId: 'operator' });
+  publish(workspace.id, { type: 'resume', paused: false });
+  res.json({ ok: true, status });
+});
 
 /**
  * @swagger

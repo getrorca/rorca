@@ -251,6 +251,7 @@ import {
   WaveConflictAbort,
   WaveIntegrationLedger,
   type WaveContributionIdentity,
+  type WaveIntegrationRecord,
 } from './wave-integration-protocol';
 import {
   WaveDeadline,
@@ -5001,6 +5002,46 @@ interface IntegratedCheckpointAttestation {
  * integrate → validate → final pass projection → finalize. No legacy merge
  * helper may manufacture a target commit or accept a dirty target here.
  */
+/** Persist the exact filesystem-ledger conflict/abort pair used by the production catch path. */
+export async function persistDurableWaveConflictAbortFromRecord(input: {
+  identity: WaveContributionIdentity;
+  durableIdentity: DurableWaveIntegrationIdentity;
+  record: WaveIntegrationRecord | null | undefined;
+}): Promise<void> {
+  const { identity, durableIdentity, record } = input;
+  if (!record?.conflictEvidence || record.state !== 'aborted'
+    || !record.failureReason || !record.conflictEvidence.postAbortHead
+    || record.runId !== identity.runId || record.storyId !== identity.storyId
+    || record.attempt !== identity.attempt || record.sourceCommit !== durableIdentity.sourceCommit
+    || record.sourceBaseCommit !== durableIdentity.sourceBaseCommit
+    || record.expectedParentHead !== durableIdentity.expectedParentHead
+    || record.frozenManifestHash !== durableIdentity.frozenManifestHash) {
+    throw new Error('[wave-integration] filesystem conflict evidence is incomplete after abort');
+  }
+  const conflictedEvidence = { ...record.conflictEvidence, postAbortHead: null };
+  const durable = await readDurableWaveIntegration({
+    runId: durableIdentity.runId,
+    storyId: durableIdentity.storyId,
+    attempt: durableIdentity.attempt,
+  });
+  if (!durable || !['integrating', 'conflicted', 'aborted'].includes(durable.state)) {
+    throw new Error('[wave-integration] durable conflict restart state is missing or invalid');
+  }
+  if (durable.state !== 'aborted') {
+    await markDurableWaveConflicted({
+      identity: durableIdentity,
+      evidence: conflictedEvidence,
+      reason: record.failureReason,
+    });
+  }
+  await markDurableWaveConflictAborted({
+    identity: durableIdentity,
+    priorEvidence: conflictedEvidence,
+    evidence: record.conflictEvidence,
+    reason: record.failureReason,
+  });
+}
+
 async function integrateAndFinalizeWaveContribution(
   config: EngineConfig,
   workspaceId: string | null,
@@ -5131,23 +5172,15 @@ async function integrateAndFinalizeWaveContribution(
   ledger.finalize(identity, () => finalizationIdentity);
   } catch (error) {
     if (error instanceof WaveConflictAbort) {
-      const fileRecord = ledger.get(identity);
-      if (!fileRecord?.conflictEvidence || fileRecord.state !== 'aborted'
-        || !fileRecord.failureReason || !fileRecord.conflictEvidence.postAbortHead) {
-        throw new Error('[wave-integration] filesystem conflict evidence is incomplete after abort', { cause: error });
+      try {
+        await persistDurableWaveConflictAbortFromRecord({
+          identity, durableIdentity, record: ledger.get(identity),
+        });
+      } catch (persistenceError) {
+        throw new Error('[wave-integration] failed to persist exact conflict abort evidence', {
+          cause: persistenceError,
+        });
       }
-      const conflictedEvidence = { ...fileRecord.conflictEvidence, postAbortHead: null };
-      await markDurableWaveConflicted({
-        identity: durableIdentity,
-        evidence: conflictedEvidence,
-        reason: fileRecord.failureReason,
-      });
-      await markDurableWaveConflictAborted({
-        identity: durableIdentity,
-        priorEvidence: conflictedEvidence,
-        evidence: fileRecord.conflictEvidence,
-        reason: fileRecord.failureReason,
-      });
       throw error;
     }
     // The atomic backend finalization packet was persisted locally for replay.

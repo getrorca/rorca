@@ -25,6 +25,12 @@ import type { PtyGenerationRef } from './run-pty-store';
 export const PTY_RAW_ARCHIVE_CONTRACT_VERSION = 1 as const;
 export const PTY_RAW_ARCHIVE_ROOT = '/data/rorca/pty-archives';
 
+function ptyArchiveFailpoint(name: string): void {
+  if (process.env.NODE_ENV === 'test' && process.env.RORCA_PTY_ARCHIVE_FAILPOINT === name) {
+    throw new Error(`[pty-archive-failpoint] ${name}`);
+  }
+}
+
 function serviceArchiveRoot(): string {
   const configured = process.env.RORCA_PTY_ARCHIVE_ROOT?.trim() || PTY_RAW_ARCHIVE_ROOT;
   if (!path.isAbsolute(configured)) throw new RawArchiveWriteError('RORCA_PTY_ARCHIVE_ROOT must be absolute service-owned storage');
@@ -437,6 +443,7 @@ async function relocateLegacyRawPtyArchive(manifest: ArchiveManifestRow): Promis
     );
     const updated = result.rows[0];
     if (!updated) return undefined;
+    ptyArchiveFailpoint('relocation_after_manifest_before_generation');
     // The generation invariant requires expected=true whenever service-owned
     // scope is present. Commit this authority change with the manifest CAS.
     const generation = await client.query(
@@ -718,13 +725,10 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
   if (!identity.is_active) throw new ConflictError('Cannot open a raw archive writer for a closed PTY generation');
 
   const archiveRoot = workspaceArchiveRoot(identity.workspace_id);
-  await execute(
-    `UPDATE pty_generations
-     SET raw_archive_expected = TRUE, raw_archive_storage_scope = 'service-owned',
-         raw_archive_failure_code = NULL, raw_archive_failure_at = NULL
-     WHERE id = $1 AND run_id = $2 AND generation_token = $3`,
-    [generation.generationId, generation.runId, generation.generationToken],
-  );
+  // Do not publish generation service-storage authority before inspecting an
+  // existing legacy manifest. relocateLegacyRawPtyArchive() commits the manifest
+  // CAS and generation scope together; a new service-root manifest is repaired
+  // through the same transaction before a writer is returned.
   try {
     ensureSecureArchiveGenerationDirectory(archiveRoot, generation.generationId);
   } catch (error) {
@@ -738,7 +742,7 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
     `INSERT INTO pty_raw_archive_manifests
       (generation_id, run_id, workspace_id, story_id, archive_root_relative,
        segment_max_raw_bytes, retention_days, retention_expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($7 * INTERVAL '1 day'))
+     VALUES ($1, $2, $3, $4, $5, $6, $7::integer, NOW() + ($7::integer * INTERVAL '1 day'))
      ON CONFLICT (generation_id) DO UPDATE SET reconciled_at = NOW(), updated_at = NOW()
      RETURNING *`,
       [generation.generationId, generation.runId, identity.workspace_id, identity.story_id,
@@ -757,6 +761,12 @@ export async function openRawPtyArchive(generation: PtyGenerationRef): Promise<R
 
   try {
     manifest = await relocateLegacyRawPtyArchive(manifest);
+    await execute(
+      `UPDATE pty_generations
+          SET raw_archive_failure_code = NULL, raw_archive_failure_at = NULL
+        WHERE id = $1 AND raw_archive_expected = TRUE`,
+      [generation.generationId],
+    );
     await reconcileRawPtyArchive(manifest);
   } catch (error) {
     await markGenerationArchiveFailure(generation.generationId, 'RAW_ARCHIVE_RECONCILIATION_FAILED');

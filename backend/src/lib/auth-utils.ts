@@ -85,6 +85,22 @@ function sameInternalToken(supplied: unknown): boolean {
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
+function internalServiceUser(req: Request): AuthUser {
+  const service = String(req.headers['x-rorca-service'] ?? '').trim().toLowerCase();
+  if (service && service !== 'hermes' && service !== 'scheduler') {
+    throw new Error('Unsupported internal service identity');
+  }
+  const hermes = service === 'hermes';
+  return {
+    id: hermes ? 'rorca-hermes-service' : INTERNAL_SERVICE_USER_ID,
+    email: hermes ? 'hermes@rorca.internal' : 'scheduler@rorca.internal',
+    supabaseId: hermes
+      ? '00000000-0000-0000-0000-000000000002'
+      : '00000000-0000-0000-0000-000000000000',
+    role: 'admin',
+  };
+}
+
 function getDeveloperSuperuserEmails(): Set<string> {
   const configured = (process.env.RORCA_SUPERUSER_EMAILS || process.env.DEV_SUPERUSER_EMAILS || '')
     .split(',')
@@ -189,35 +205,47 @@ export async function resolveAuthUserFromToken(token: string): Promise<AuthUser 
 }
 
 export async function authRequired(req: Request, res: Response, next: NextFunction): Promise<void> {
-  if (sameInternalToken(req.headers['x-rorca-internal'])) {
-    req.user = {
-      id: INTERNAL_SERVICE_USER_ID,
-      email: 'scheduler@rorca.internal',
-      supabaseId: '00000000-0000-0000-0000-000000000000',
-      role: 'admin',
-    };
-    next();
+  const internalHeader = req.headers['x-rorca-internal'];
+  const serviceHeader = req.headers['x-rorca-service'];
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const validInternalHeader = internalHeader !== undefined && sameInternalToken(internalHeader);
+  const validInternalBearer = bearerToken !== null && sameInternalToken(bearerToken);
+  const claimsServiceIdentity = serviceHeader !== undefined || internalHeader !== undefined || validInternalBearer;
+
+  // Internal service identity is resolved before the local-human fallback in every
+  // supported topology. Every supplied service credential must be valid; a service
+  // label without a credential or contradictory credentials fail closed.
+  if (claimsServiceIdentity) {
+    const invalidInternalHeader = internalHeader !== undefined && !validInternalHeader;
+    const invalidBearer = bearerToken !== null && !validInternalBearer;
+    const missingServiceCredential = serviceHeader !== undefined && !validInternalHeader && !validInternalBearer;
+    if (invalidInternalHeader || invalidBearer || missingServiceCredential) {
+      res.status(401).json({ error: 'Invalid internal service credential' });
+      return;
+    }
+    try {
+      req.user = internalServiceUser(req);
+      next();
+    } catch {
+      res.status(401).json({ error: 'Invalid internal service identity' });
+    }
     return;
   }
 
-  // Local single-user mode (AUTH_REQUIRED not set): upstream middleware already
-  // populated req.user (LOCAL_ADMIN or a validated Supabase user). Pass through.
-  if (process.env.AUTH_REQUIRED !== 'true') {
+  if (process.env.AUTH_REQUIRED !== 'true' && !bearerToken) {
     if (!req.user) req.user = LOCAL_ADMIN;
     next();
     return;
   }
 
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-
-  if (!token) {
+  if (!bearerToken) {
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
 
   try {
-    const resolvedUser = await resolveAuthUserFromToken(token);
+    const resolvedUser = await resolveAuthUserFromToken(bearerToken);
     if (!resolvedUser) {
       res.status(401).json({ error: 'Invalid token' });
       return;

@@ -42,6 +42,25 @@ jest.mock('../lib/logger', () => ({
   },
 }));
 
+jest.mock('../lib/trusted-wal', () => ({
+  GITHUB_GOVERNING_WAL_EVENTS: new Set(),
+  persistTrustedWalEvent: jest.fn(),
+  relayTrustedWalEvent: jest.fn(),
+  relayUnacknowledgedTrustedRunEvents: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../lib/story-result-persistence', () => ({
+  persistCanonicalStoryResult: jest.fn().mockResolvedValue({ duplicate: false }),
+  recoverIntegratedValidatedStoryFinalizations: jest.fn().mockResolvedValue({
+    scanned: 0, finalized: 0, duplicates: 0, blocked: 0, truncated: false, finalizedStoryIds: [],
+  }),
+  WORKER_RESULT_AUTHORITY: Symbol('worker-result-authority'),
+}));
+
+jest.mock('../lib/run-lifecycle', () => ({
+  transitionRunLifecycle: jest.fn().mockResolvedValue({}),
+}));
+
 // ── Now import after mocks are in place ───────────────────────────────────────
 
 import { sweepOrphanProcesses } from '../worker';
@@ -283,6 +302,7 @@ describe('sweepOrphanProcesses', () => {
       expect.stringContaining('worker_id'),
       expect.arrayContaining([expect.any(String)]), // WORKER_ID is a UUID string
     );
+    expect(mockQuery.mock.calls[0][0]).toContain('governed_retry_dispatches');
     // No DB updates or WAL events
     expect(mockExecute).not.toHaveBeenCalled();
   });

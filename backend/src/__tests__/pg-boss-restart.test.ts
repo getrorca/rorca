@@ -41,13 +41,11 @@ import * as http from 'http';
 import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
 
 // ── Test DB URL ────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
 const BOSS_SCHEMA = 'pgboss_restart_cert';
 
 // ── Binary / file paths ────────────────────────────────────────────────────────
@@ -333,6 +331,7 @@ async function handlePipelineRunInProcess(
 beforeAll(async () => {
   // 1. Connect pool for direct DB assertions + worker queries
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // 2. Ensure schema is current
   const { runPgMigrations } = await import('../db/pg-index');

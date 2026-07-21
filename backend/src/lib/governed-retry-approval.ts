@@ -22,11 +22,14 @@ const APPROVAL_TTL_MS = 5 * 60_000;
 const NON_PRODUCTION_SECRET = randomBytes(48).toString('base64url');
 
 export interface RetryHumanPrincipal {
-  principalType: 'authenticated_user';
+  principalType: 'authenticated_user' | 'provider_human';
   principalId: string;
   principalAuthId: string;
   principalDisplayLabel: string;
-  sourceChannel: 'api';
+  sourceChannel: 'api' | 'provider';
+  providerHumanReceiptId?: string | null;
+  provider?: string | null;
+  providerTenantId?: string | null;
 }
 
 const ClaimsSchema = z.object({
@@ -39,8 +42,11 @@ const ClaimsSchema = z.object({
   previewIdentityHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   scopeHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   rationaleHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-  principalType: z.literal('authenticated_user'),
+  principalType: z.enum(['authenticated_user', 'provider_human']),
   principalId: z.string().min(1),
+  providerHumanReceiptId: z.string().uuid().nullable(),
+  provider: z.string().min(1).max(64).nullable(),
+  providerTenantId: z.string().min(1).max(256).nullable(),
   issuedAt: z.string().datetime(),
   expiresAt: z.string().datetime(),
 }).strict();
@@ -62,6 +68,9 @@ interface ApprovalRow {
   principal_auth_id: string;
   principal_display_label: string;
   source_channel: string;
+  provider_human_receipt_id: string | null;
+  provider: string | null;
+  provider_tenant_id: string | null;
   idempotency_key: string;
   request_hash: string;
   claims: RetryHumanApprovalClaims;
@@ -122,8 +131,11 @@ function exactClaimsFromRow(row: ApprovalRow): RetryHumanApprovalClaims {
     previewIdentityHash: row.preview_identity_hash,
     scopeHash: row.scope_hash,
     rationaleHash: row.rationale_hash,
-    principalType: 'authenticated_user',
+    principalType: row.principal_type as RetryHumanApprovalClaims['principalType'],
     principalId: row.principal_id,
+    providerHumanReceiptId: row.provider_human_receipt_id,
+    provider: row.provider,
+    providerTenantId: row.provider_tenant_id,
     issuedAt: new Date(row.issued_at).toISOString(),
     expiresAt: new Date(row.expires_at).toISOString(),
   };
@@ -238,8 +250,11 @@ export async function issueGovernedRetryHumanApproval(input: {
       previewIdentityHash,
       scopeHash,
       rationaleHash,
-      principalType: 'authenticated_user',
+      principalType: input.principal.principalType,
       principalId: input.principal.principalId,
+      providerHumanReceiptId: input.principal.providerHumanReceiptId ?? null,
+      provider: input.principal.provider ?? null,
+      providerTenantId: input.principal.providerTenantId ?? null,
       issuedAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
     };
@@ -249,17 +264,19 @@ export async function issueGovernedRetryHumanApproval(input: {
          id, receipt_hash, workspace_id, original_run_id, preview_hash, packet_hash,
          preview_identity_hash, scope_hash, rationale, rationale_hash,
          principal_type, principal_id, principal_auth_id, principal_display_label,
-         source_channel, idempotency_key, request_hash, claims, issued_at, expires_at
+         source_channel, provider_human_receipt_id, provider, provider_tenant_id,
+         idempotency_key, request_hash, claims, issued_at, expires_at
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-         $11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20
+         $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22,$23
        )`,
       [approvalId, retryHash(receipt), input.workspaceId, input.originalRunId,
         input.packet.previewHash, packetHash, previewIdentityHash, scopeHash,
         rationale, rationaleHash, input.principal.principalType, input.principal.principalId,
         input.principal.principalAuthId, input.principal.principalDisplayLabel,
-        input.principal.sourceChannel, idempotencyKey, requestHash, JSON.stringify(claims),
-        claims.issuedAt, claims.expiresAt],
+        input.principal.sourceChannel, input.principal.providerHumanReceiptId ?? null,
+        input.principal.provider ?? null, input.principal.providerTenantId ?? null,
+        idempotencyKey, requestHash, JSON.stringify(claims), claims.issuedAt, claims.expiresAt],
     );
     return { receipt, approvalId, expiresAt: claims.expiresAt, replayed: false };
   });

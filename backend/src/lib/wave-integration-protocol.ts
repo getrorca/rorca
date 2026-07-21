@@ -230,7 +230,8 @@ function conflictFileIdentities(cwd: string, stages: readonly UnmergedStage[]): 
 
 export class WaveConflictAbort extends Error {
   constructor(readonly ledgerKey: string) {
-    super('merge conflict was durably attributed and aborted');
+    super(`[wave-integration] merge conflict aborted and failed closed (${ledgerKey.slice(0, 12)})`);
+    this.name = 'WaveConflictAbort';
   }
 }
 
@@ -505,7 +506,9 @@ export class WaveIntegrationLedger {
       return this.transition(record, 'integrated', resultingHead);
     } catch (error) {
       if (error instanceof WaveConflictAbort) {
-        throw new Error(`[wave-integration] merge conflict aborted and failed closed (${error.ledgerKey.slice(0, 12)})`);
+        // Preserve the typed abort so the production engine catch path persists
+        // conflicted -> aborted DB evidence instead of collapsing to failed.
+        throw error;
       }
       try { this.abortPartialMerge(git(this.repositoryPath, ['rev-parse', 'HEAD'])); } catch { /* failure remains durable below */ }
       const failed = this.transition({

@@ -196,3 +196,43 @@ Justification: reconciliation with current `main` adds optional Genesis provenan
 Migration path:
 - Existing request bodies remain valid; Genesis provenance is optional.
 - Existing clients may ignore the additive response `id`; clients that need canonical identity may adopt it instead of deriving it from the slug.
+
+<!-- contract-break-v2: 2026-07-21 GET /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId} sha256:7deaa77d1849fdbe288e5d37c9dbe3fea024b59844e7bfb011e6be5ee5e7b457 public-flag-removed -->
+## 2026-07-21 PTY checkpoint retrieval authority
+
+PTY checkpoint retrieval moved from the public API to authenticated admin/operator authority because generation-bound terminal evidence may expose restricted execution metadata. Public/MCP clients must use bounded run/output status surfaces; operator clients must authenticate and present the exact checkpoint identity.
+
+<!-- contract-break-v2: 2026-07-21 POST /api/pipeline/runs/{runId}/input sha256:2cf1e9e87e4fdf6f14a9e3d6514befe40dc24f4ffd24c392059d2d2d1a2bd5db public-flag-removed -->
+## 2026-07-21 PTY input authority
+
+Interactive terminal input moved from the public API to authenticated admin/operator authority. Autonomous MCP clients cannot inject keyboard bytes. Operator clients must use the protected endpoint with the exact active generation token and bounded base64 payload.
+
+<!-- contract-break-v2: 2026-07-21 POST /api/pipeline/runs/{runId}/pty/resize sha256:90761864a665a7e02c8a8f6a440549b94847e23996030593a68528a05e4276c0 public-flag-removed -->
+## 2026-07-21 PTY resize authority
+
+Interactive terminal resizing moved from the public API to authenticated admin/operator authority. Autonomous MCP clients must not mutate live PTY state; operator clients must authenticate and bind the request to the active generation token.
+
+<!-- contract-break-v2: 2026-07-21 POST /api/pipeline/runs/{runId}/retry sha256:38dd330b5ff3389c07cd6bf257b9965dbcd1f1ecd5b70e6525d5e5381af17d8b sha256:2c8e9e0cc134d11e7385673bdfeb50804700fe8a3dc88538218b51219f6be59d -->
+## 2026-07-21 governed retry approval receipts
+
+Destructive retry approval no longer accepts a free-form `approvalToken`. Callers first obtain the exact preview packet and, when required, a human-issued packet-bound `approvalReceipt`; dispatch rejects stale, cross-packet, service-authored, or replayed receipts. Safe-mode preview remains read-only.
+
+<!-- contract-break-v2: 2026-07-21 POST /api/pipeline/trigger sha256:08173cdf717250a248c5d3c595351e631d30e5181803ec2ef169f0faf263de1d sha256:ec5c72a1dc1337577228f115bfb4d08f14a22a25f7815fbe8f6e25bfc333b02c -->
+## 2026-07-21 governed production wave execution envelope
+
+Production `wave-parallel` requests are disabled by default and require the complete immutable qualification receipt, review/activation policy, cohort, and bounded parallelism envelope. Legacy shape-only policy fields cannot enable production execution. Existing sequential requests are unchanged; callers should omit wave fields unless presenting the governed envelope.
+
+<!-- contract-break-v2: 2026-07-21 POST /api/specs/authoring/preflight/confirm sha256:ffc941f078454dea65220aa6b01f308556764f584fad23277d8946a49b64ba5c sha256:83a61ab794984742a0ef1e138a04483e412aab4b4626834ab39dffc892a7fe52 -->
+## 2026-07-21 authoring provider-human confirmation
+
+Service-principal confirmation now requires a durable provider-human attestation bound to the accepted plan and preflight hashes. Direct authenticated humans remain supported. Callers must not synthesize actor identity from model or service context.
+
+<!-- contract-break-v2: 2026-07-21 POST /api/specs/generate sha256:20faeb7bc10b77ff74cf47c4e234ceddc0847320c459f694932480f74e7d47b9 sha256:da702fa328545d430341eb159e4d5b360aa5f9bdfaba97d4422d27d401070842 -->
+## 2026-07-21 legacy generation authoring policy
+
+Legacy spec generation now participates in canonical authoring preflight and durable post-save policy handling. Callers should handle review/confirmation-required responses and use canonical persist/forge workflows when exact drafted material is available.
+
+<!-- contract-break-v2: 2026-07-21 POST /api/specs/persist/batch sha256:cdb431274ab573ce09178cf2192b46556f30efd69dcda224958ade2e58beb27b sha256:be51439516e3ab5a2c85fe70a7b4f5d90e40a23cefdd6fc4b45b968c6c8a6e8d -->
+## 2026-07-21 resumable batch authoring identity
+
+Batch persistence now requires a caller-provided `idempotencyKey` bound to the accepted parent plan and complete draft set. Replays resume incomplete children and reject changed material instead of creating ambiguous duplicate specs.

@@ -52,16 +52,14 @@ import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import type PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
 
 // This integration suite must bypass the repository's default no-op manual mock.
 const RealPgBoss = jest.requireActual<typeof import('pg-boss')>('pg-boss');
 
 // ── DB URL ─────────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
 
 // PgBoss alone owns this suite's schema; this isolates cancellation evidence
 // from legacy unit fixtures that created a partial `pgboss` schema.
@@ -141,6 +139,7 @@ const tempSentinelPaths: string[] = [];
 beforeAll(async () => {
   // 1. Connect pool
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // 2. Run migrations
   const { runPgMigrations } = await import('../db/pg-index');

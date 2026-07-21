@@ -46,14 +46,18 @@ process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-sched', 'Sched WS', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
+  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-sched'`);
+  await execute(`DELETE FROM pipeline_schedules WHERE workspace_id = 'ws-sched'`);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-sched', 'Sched WS', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
 
   authToken = await getAuthToken(app);
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+afterEach(async () => {
+  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-sched'`);
+  await execute(`DELETE FROM pipeline_schedules WHERE workspace_id = 'ws-sched'`);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 describe('POST /api/pipeline/schedules', () => {
@@ -179,6 +183,31 @@ describe('PATCH /api/pipeline/schedules/:id', () => {
     expect(res.body.schedule.next_run_at).toBeNull();
   });
 
+  it('cancels an undispatched application occurrence when configuration changes', async () => {
+    const createRes = await request(app)
+      .post('/api/pipeline/schedules')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-sched', specId: 'spec-a', cronExpression: '0 2 * * *' });
+    const id = createRes.body.schedule.id;
+    const occurrence = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_schedule_occurrences
+         (schedule_id, workspace_id, scheduled_for, request_key, status)
+       VALUES ($1, 'ws-sched', NOW(), $2, 'claimed') RETURNING id`,
+      [id, `schedule-route-patch:${id}`],
+    );
+
+    const res = await request(app)
+      .patch(`/api/pipeline/schedules/${id}`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(await queryOne<{ status: string }>(
+      'SELECT status FROM pipeline_schedule_occurrences WHERE id = $1',
+      [occurrence!.id],
+    )).toEqual({ status: 'cancelled' });
+  });
+
   it('rejects invalid cron on update', async () => {
     const createRes = await request(app)
       .post('/api/pipeline/schedules')
@@ -217,6 +246,38 @@ describe('DELETE /api/pipeline/schedules/:id', () => {
       .get('/api/pipeline/schedules?workspaceId=ws-sched')
       .set('Authorization', `Bearer ${authToken}`);
     expect(listRes.body.items).toHaveLength(0);
+  });
+
+  it('refuses deletion while an application occurrence owns a live dispatch lease', async () => {
+    const createRes = await request(app)
+      .post('/api/pipeline/schedules')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-sched', specId: 'spec-a', cronExpression: '0 2 * * *' });
+    const id = createRes.body.schedule.id;
+    const occurrence = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_schedule_occurrences
+         (schedule_id, workspace_id, scheduled_for, request_key, status, lease_owner, lease_expires_at)
+       VALUES ($1, 'ws-sched', NOW(), $2, 'dispatching', 'route-test-worker', NOW() + INTERVAL '1 minute')
+       RETURNING id`,
+      [id, `schedule-route-delete:${id}`],
+    );
+
+    const blocked = await request(app)
+      .delete(`/api/pipeline/schedules/${id}`)
+      .set('Authorization', `Bearer ${authToken}`);
+    expect(blocked.status).toBe(422);
+
+    await execute(
+      `UPDATE pipeline_schedule_occurrences
+          SET status = 'claimed', lease_owner = NULL, lease_expires_at = NULL
+        WHERE id = $1`,
+      [occurrence!.id],
+    );
+    const deleted = await request(app)
+      .delete(`/api/pipeline/schedules/${id}`)
+      .set('Authorization', `Bearer ${authToken}`);
+    expect(deleted.status).toBe(200);
+    expect(await queryOne('SELECT id FROM pipeline_schedule_occurrences WHERE id = $1', [occurrence!.id])).toBeUndefined();
   });
 
   it('returns 404 for non-existent schedule', async () => {

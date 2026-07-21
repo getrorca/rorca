@@ -347,10 +347,10 @@ export async function claimWaveProductionDispatch(input: {
         [input.runId, row.workspace_id, currentEpoch, input.owner, input.envelope.fence, leaseSeconds],
       );
     }
-    const updated = await client.query<{ lease_expires_at: Date }>(
+    const updated = await client.query<{ dispatch_lease_expires_at: Date }>(
       `UPDATE pipeline_runs
-          SET status = 'starting', started_at = COALESCE(started_at, NOW()), worker_id = $2,
-              dispatch_owner = $2, dispatch_fence = $3,
+          SET status = 'starting', started_at = COALESCE(started_at, NOW()), worker_id = $2::uuid,
+              dispatch_owner = $2::text, dispatch_fence = $3,
               dispatch_lease_expires_at = NOW() + ($4 * INTERVAL '1 second'),
               lifecycle_status = 'starting', lifecycle_diagnostics = lifecycle_diagnostics || $5::jsonb,
               lifecycle_updated_at = NOW()
@@ -359,7 +359,7 @@ export async function claimWaveProductionDispatch(input: {
       [input.runId, input.owner, input.envelope.fence, leaseSeconds, JSON.stringify({ owner: input.owner, process: 'atomic_dispatch_claim' })],
     );
     return updated.rows[0]
-      ? { claimed: true, leaseExpiresAt: updated.rows[0].lease_expires_at.toISOString() }
+      ? { claimed: true, leaseExpiresAt: updated.rows[0].dispatch_lease_expires_at.toISOString() }
       : { claimed: false, reason: 'claim_raced' };
   });
 }

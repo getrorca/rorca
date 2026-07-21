@@ -50,10 +50,15 @@ export async function initBoss(): Promise<void> {
       throw new Error('[pg-boss] DATABASE_URL is not set — cannot initialise pg-boss');
     }
 
+    const configuredSchema = process.env.RORCA_PGBOSS_SCHEMA?.trim() || 'pgboss';
+    if (!/^pgboss(?:_[a-z0-9_]{1,48})?$/.test(configuredSchema)) {
+      throw new Error('[pg-boss] RORCA_PGBOSS_SCHEMA must be pgboss or a bounded pgboss_* identifier');
+    }
     const boss = new PgBoss({
       connectionString,
-      // Keep pg-boss internal tables in their own schema (pgboss.*)
-      schema: 'pgboss',
+      // pg-boss alone creates/migrates this schema. The override exists for
+      // isolated real-runtime certification and parallel service instances.
+      schema: configuredSchema,
       // Data retention and archiving settings (US-001)
       // - Move completed jobs from pgboss.job → pgboss.archive after 1 hour
       archiveCompletedAfterSeconds: 3600,

@@ -63,6 +63,11 @@ describe('mcp-http transport compatibility', () => {
     expect(toolNames).toContain('rorca_get_context');
     expect(toolNames).toContain('rorca_pipeline_task_manifests_trigger');
     expect(toolNames).toContain('rorca_trigger_task_manifest');
+    expect(toolNames).not.toContain('rorca_receive_linear_webhook');
+    expect(toolNames).not.toContain('rorca_receive_vercel_webhook');
+    expect(toolNames).not.toContain('rorca_receive_slack_webhook');
+    expect(toolNames).not.toContain('rorca_get_pipeline_run_context_inspector_events');
+    expect(toolNames).not.toContain('rorca_synthesize_workspace_memory');
   });
 
   it('serves tools/call over stateless POST without mcp-session-id', async () => {
@@ -114,6 +119,25 @@ describe('mcp-http transport compatibility', () => {
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.result?.tools)).toBe(true);
     expect(res.body.result.tools.some((tool: { name: string }) => tool.name === 'rorca_list_workspaces')).toBe(true);
+  });
+
+  it('rejects an unknown MCP tool without forwarding any HTTP request', async () => {
+    const { app, tokens } = buildApp();
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${tokens.publicToken}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'rorca_unknown_protected_route', arguments: {} },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBeDefined();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('resolves friendly alias tools to the same tier as their underlying routes', () => {

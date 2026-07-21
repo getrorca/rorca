@@ -11,6 +11,7 @@ import request from 'supertest';
 const mockRecord = jest.fn();
 const mockRevoke = jest.fn();
 const mockState = jest.fn();
+const mockVerifyProviderHuman = jest.fn();
 
 jest.mock('../../lib/ssdlc-decisions', () => {
   const actual = jest.requireActual('../../lib/ssdlc-decisions');
@@ -19,6 +20,14 @@ jest.mock('../../lib/ssdlc-decisions', () => {
     recordSsdlcDecision: (...args: unknown[]) => mockRecord(...args),
     revokeSsdlcDecision: (...args: unknown[]) => mockRevoke(...args),
     getSsdlcDecisionState: (...args: unknown[]) => mockState(...args),
+  };
+});
+
+jest.mock('../../lib/provider-human-authority', () => {
+  const actual = jest.requireActual('../../lib/provider-human-authority');
+  return {
+    ...actual,
+    verifyAndPersistProviderHumanAuthority: (...args: unknown[]) => mockVerifyProviderHuman(...args),
   };
 });
 
@@ -56,6 +65,11 @@ beforeEach(() => {
   mockRecord.mockResolvedValue({ decision: { id: '1' }, replayed: false });
   mockRevoke.mockResolvedValue({ decision: { id: '1', revokedAt: '2026-07-15T12:00:00.000Z' }, replayed: false });
   mockState.mockResolvedValue({ state: 'pending', effectiveDecisions: [], history: [] });
+  mockVerifyProviderHuman.mockResolvedValue({
+    receiptId: '11111111-1111-4111-8111-111111111111',
+    replayed: false,
+    actorId: 'human-9',
+  });
 });
 
 describe('lifecycle decision route authority boundary', () => {
@@ -77,7 +91,7 @@ describe('lifecycle decision route authority boundary', () => {
     expect(mockRecord).not.toHaveBeenCalled();
   });
 
-  test.each(['actor', 'principalId', 'principalType', 'authority', 'role'])(
+  test.each(['actor', 'principalId', 'principalType', 'authority', 'role', 'delegatedOnBehalfOf'])(
     'rejects request-body authority field %s',
     async (field) => {
       const response = await request(appWithUser({
@@ -130,35 +144,61 @@ describe('lifecycle decision route authority boundary', () => {
     );
   });
 
-  test('records delegated human identity only for authenticated Hermes mediation', async () => {
-    await request(appWithUser({
-      id: 'hermes-service',
+  test('denies Hermes mediation without a separately verified provider-human event', async () => {
+    const response = await request(appWithUser({
+      id: 'rorca-hermes-service',
       email: 'hermes@rorca.internal',
       supabaseId: 'auth-hermes',
       role: 'admin',
     })).post('/api/lifecycle/decisions')
       .set('Idempotency-Key', 'decision-hermes-1')
-      .send(body({
-        delegatedOnBehalfOf: { principalId: 'human-9', displayLabel: 'Release Approver' },
-      }));
+      .send(body());
 
-    expect(mockRecord.mock.calls[0][1]).toMatchObject({
-      principalType: 'hermes',
-      principalId: 'hermes-service',
-      sourceChannel: 'hermes',
-      delegatedOnBehalfOf: { principalId: 'human-9', displayLabel: 'Release Approver' },
-    });
+    expect(response.status).toBe(401);
+    expect(mockVerifyProviderHuman).not.toHaveBeenCalled();
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
 
-    const rejected = await request(appWithUser({
-      id: 'user-1',
-      email: 'user@example.test',
-      supabaseId: 'auth-user-1',
+  test('records only the verified provider-human principal for Hermes-relayed authority', async () => {
+    const humanApproval = {
+      schemaVersion: 'provider-human-event.v1',
+      issuerId: 'slack-issuer',
+      keyId: 'key-1',
+      provider: 'slack',
+      providerTenantId: 'team-1',
+      actorId: 'human-9',
+      conversationId: 'channel-1',
+      threadId: 'thread-1',
+      messageId: 'message-1',
+      occurredAt: '2026-07-20T10:00:00.000Z',
+      normalizedCommandHash: `sha256:${'0'.repeat(64)}`,
+      ingressIdempotencyKey: 'ingress-human-9',
+      signature: 'signed-provider-event-material-with-sufficient-length',
+    };
+    const response = await request(appWithUser({
+      id: 'rorca-hermes-service',
+      email: 'hermes@rorca.internal',
+      supabaseId: 'auth-hermes',
       role: 'admin',
     })).post('/api/lifecycle/decisions')
-      .set('Idempotency-Key', 'decision-user-1')
-      .send(body({
-        delegatedOnBehalfOf: { principalId: 'claimed-human', displayLabel: 'Claimed Human' },
-      }));
-    expect(rejected.status).toBe(400);
+      .set('Idempotency-Key', 'decision-hermes-signed-1')
+      .send(body({ humanApproval }));
+
+    expect(response.status).toBe(201);
+    expect(mockVerifyProviderHuman).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'workspace-evaluator',
+      purpose: 'lifecycle_decision',
+      targetHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      event: humanApproval,
+    }));
+    expect(mockRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceRequestId: 'decision-hermes-signed-1' }),
+      expect.objectContaining({
+        principalType: 'provider_human',
+        principalId: 'human-9',
+        sourceChannel: 'provider',
+        providerHumanReceiptId: '11111111-1111-4111-8111-111111111111',
+      }),
+    );
   });
 });

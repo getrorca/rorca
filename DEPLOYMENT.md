@@ -21,7 +21,7 @@ cp deploy/env.production.example .env
 Required local secrets:
 
 - `JWT_SECRET`: strong independent value used for encryption/signing internals; it does not enable a login flow.
-- `RORCA_INTERNAL_SERVICE_TOKEN`: independent unpredictable server↔worker credential of at least 32 bytes.
+- `RORCA_INTERNAL_SERVICE_TOKEN`: independent unpredictable server↔worker credential of at least 32 bytes. A separately deployed Hermes process must receive this exact value as its `RORCA_API_TOKEN`; Hermes sends it only as a Bearer credential with `X-Rorca-Service: hermes`. Do not use a browser JWT, MCP token, provider token, or a second independently generated value for that service link.
 - `RORCA_OPERATOR_CAPABILITY_SHA256`: SHA-256 digest only. Keep the preimage outside env files, browser storage, URLs, logs, the repository, and the database.
 
 Keep:

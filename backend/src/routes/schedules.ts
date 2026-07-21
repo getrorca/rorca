@@ -7,11 +7,8 @@
 
 import { Router, Request, Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne, transaction } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
-import { getBoss } from '../lib/pg-boss';
-import { scheduleName } from '../lib/scheduler';
-import { logger } from '../lib/logger';
 import { NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 
@@ -44,6 +41,9 @@ function nextRunAt(cronExpression: string): string | null {
  *     tags: [Pipeline]
  *     summary: List pipeline schedules for a workspace
  *     operationId: listPipelineSchedules
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Schedule configuration is workspace-owned execution metadata and requires an authenticated operator."
+ *     x-rorca-mcp: false
  *     description: Returns all cron-based pipeline schedules for the specified workspace, including computed next run time.
  *     parameters:
  *       - in: query
@@ -89,6 +89,9 @@ router.get('/', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Create a new pipeline schedule
  *     operationId: createPipelineSchedule
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Creating durable unattended execution requires an authenticated operator and remains outside autonomous MCP tools."
+ *     x-rorca-mcp: false
  *     description: Creates a new cron-based schedule that automatically triggers pipeline runs for a specific spec.
  *     requestBody:
  *       required: true
@@ -147,25 +150,6 @@ router.post('/', async (req: Request, res: Response) => {
       [workspaceId, specId, cronExpression, isEnabled]
     );
 
-    // Register with pg-boss native scheduling if enabled
-    if (schedule!.enabled) {
-      try {
-        const name = scheduleName(schedule!.id);
-        // pg-boss v10: createQueue() must precede schedule() — idempotent
-        await getBoss().createQueue(name);
-        await getBoss().schedule(name, schedule!.cron_expression, {
-          scheduleId: schedule!.id,
-          specId: schedule!.spec_id,
-          workspaceId: schedule!.workspace_id,
-          agent: null,
-          model: null,
-        });
-        logger.info(`[Schedules] Registered pg-boss schedule ${name}`);
-      } catch (bossErr) {
-        logger.warn({ err: bossErr, scheduleId: schedule!.id }, '[Schedules] pg-boss schedule registration failed (non-fatal)');
-      }
-    }
-
     res.status(201).json({
       schedule: {
         ...schedule,
@@ -185,6 +169,9 @@ router.post('/', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Update a pipeline schedule
  *     operationId: updatePipelineSchedule
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Changing durable unattended execution requires an authenticated operator and remains outside autonomous MCP tools."
+ *     x-rorca-mcp: false
  *     description: Updates an existing pipeline schedule. Only provided fields are modified.
  *     parameters:
  *       - in: path
@@ -243,32 +230,27 @@ router.patch('/:id', async (req: Request, res: Response) => {
     const newEnabled = enabled !== undefined ? (enabled ? 1 : 0) : existing.enabled;
     const newSpecId = specId ?? existing.spec_id;
 
-    const updated = await queryOne<ScheduleRow>(
-      `UPDATE pipeline_schedules SET cron_expression = $1, enabled = $2, spec_id = $3, updated_at = NOW() WHERE id = $4 RETURNING *`,
-      [newCron, newEnabled, newSpecId, id]
-    );
-
-    // Sync pg-boss schedule: always unschedule first, then re-register if enabled
-    try {
-      const name = scheduleName(id);
-      await getBoss().unschedule(name);
-      if (updated!.enabled) {
-        // pg-boss v10: createQueue() must precede schedule() — idempotent
-        await getBoss().createQueue(name);
-        await getBoss().schedule(name, updated!.cron_expression, {
-          scheduleId: updated!.id,
-          specId: updated!.spec_id,
-          workspaceId: updated!.workspace_id,
-          agent: null,
-          model: null,
-        });
-        logger.info(`[Schedules] Updated pg-boss schedule ${name}`);
-      } else {
-        logger.info(`[Schedules] Unregistered pg-boss schedule ${name} (disabled)`);
-      }
-    } catch (bossErr) {
-      logger.warn({ err: bossErr, scheduleId: id }, '[Schedules] pg-boss schedule sync failed (non-fatal)');
-    }
+    const updated = await transaction(async (client) => {
+      const locked = (await client.query<ScheduleRow>(
+        'SELECT * FROM pipeline_schedules WHERE id = $1 FOR UPDATE',
+        [id],
+      )).rows[0];
+      if (!locked) throw new NotFoundError('Schedule not found');
+      await client.query(
+        `UPDATE pipeline_schedule_occurrences
+            SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+                last_error_code = 'schedule_configuration_changed'
+          WHERE schedule_id = $1 AND status = 'claimed'`,
+        [id],
+      );
+      return (await client.query<ScheduleRow>(
+        `UPDATE pipeline_schedules
+            SET last_triggered_at = CASE WHEN cron_expression <> $1 THEN NULL ELSE last_triggered_at END,
+                cron_expression = $1, enabled = $2, spec_id = $3, updated_at = NOW()
+          WHERE id = $4 RETURNING *`,
+        [newCron, newEnabled, newSpecId, id],
+      )).rows[0];
+    });
 
     res.json({
       schedule: {
@@ -289,6 +271,9 @@ router.patch('/:id', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Delete a pipeline schedule
  *     operationId: deletePipelineSchedule
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Deleting durable unattended execution requires an authenticated operator and remains outside autonomous MCP tools."
+ *     x-rorca-mcp: false
  *     description: Permanently removes a pipeline schedule.
  *     parameters:
  *       - in: path
@@ -317,25 +302,22 @@ router.delete('/:id', async (req: Request, res: Response) => {
       return;
     }
 
-    const existing = await queryOne(
-      'SELECT * FROM pipeline_schedules WHERE id = $1',
-      [id]
-    );
-    if (!existing) {
-      throw new NotFoundError('Schedule not found');
-      return;
-    }
-
-    await execute('DELETE FROM pipeline_schedules WHERE id = $1', [id]);
-
-    // Remove from pg-boss scheduling
-    try {
-      const name = scheduleName(id);
-      await getBoss().unschedule(name);
-      logger.info(`[Schedules] Unregistered pg-boss schedule ${name}`);
-    } catch (bossErr) {
-      logger.warn({ err: bossErr, scheduleId: id }, '[Schedules] pg-boss unschedule failed (non-fatal)');
-    }
+    await transaction(async (client) => {
+      const existing = (await client.query(
+        'SELECT id FROM pipeline_schedules WHERE id = $1 FOR UPDATE',
+        [id],
+      )).rows[0];
+      if (!existing) throw new NotFoundError('Schedule not found');
+      const inFlight = (await client.query(
+        `SELECT id FROM pipeline_schedule_occurrences
+          WHERE schedule_id = $1 AND status = 'dispatching' FOR UPDATE`,
+        [id],
+      )).rows[0];
+      if (inFlight) {
+        throw new UnprocessableError('Schedule has an in-flight occurrence; retry deletion after dispatch reconciliation');
+      }
+      await client.query('DELETE FROM pipeline_schedules WHERE id = $1', [id]);
+    });
 
     res.json({ ok: true });
   } catch (error: any) {

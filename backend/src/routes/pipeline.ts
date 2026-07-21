@@ -151,7 +151,12 @@ import {
   issueGovernedRetryHumanApproval,
 } from '../lib/governed-retry-approval';
 import { dispatchOutcome, replayDispositionForRunStatus } from '../lib/hermes-dispatch-outcome';
-import { assertProviderTenantWorkspaceBinding } from '../lib/provider-human-authority';
+import {
+  assertProviderTenantWorkspaceBinding,
+  providerHumanActionHash,
+  ProviderHumanEventSchema,
+  verifyAndPersistProviderHumanAuthority,
+} from '../lib/provider-human-authority';
 import {
   createGovernedRetryDispatchIdentity,
   deriveAuthoritativeRetryScope,
@@ -1230,11 +1235,11 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
- *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated." }
+ *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. Production wave-parallel execution is disabled by default and requires the complete governed receipt/review/activation/cohort envelope." }
  *               parallelism: { type: integer, minimum: 1, maximum: 4, default: 1, description: "Explicit wave parallelism. Production values 2-4 require the complete governed receipt/review/activation/cohort envelope; omitted fields remain sequential." }
  *               forceSequential: { type: boolean, default: false, description: "Force effective sequential execution." }
  *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity for governed wave qualification metadata" }
- *               rolloutCohort: { type: string, description: "Explicit governed rollout cohort metadata; it cannot override the non-production wave policy" }
+ *               rolloutCohort: { type: string, description: "Explicit governed production rollout cohort metadata; it is validated with the immutable qualification and activation envelope." }
  *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi], description: "Override the execution agent for this run" }
  *               modelOverride: { type: string, description: "Override the execution model for this run" }
@@ -3070,12 +3075,15 @@ function resolveTaskManifestExecutionEnvironment(
 
 type TaskManifestRunLookupRow = Pick<PipelineRunRow,
   'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'
+  | 'effective_options' | 'task_manifest_authority_version'
 > & {
   id: number;
   spec_path: string;
   status: string;
   queue_position: number | null;
   triggered_via?: 'queue' | 'run_now' | null;
+  branch_name: string | null;
+  execution_worktree_path: string | null;
 };
 
 type TaskManifestRunReservation =
@@ -3180,7 +3188,9 @@ async function findTaskManifestRunByIdempotencyKey(
   idempotencyKey: string,
 ): Promise<TaskManifestRunLookupRow | undefined> {
   return queryOne<TaskManifestRunLookupRow>(
-    `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+    `SELECT id, spec_path, status, queue_position, triggered_via, branch_name, execution_worktree_path,
+            idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+            effective_options, task_manifest_authority_version
        FROM pipeline_runs
       WHERE workspace_id = $1
         AND idempotency_key = $2
@@ -3298,12 +3308,15 @@ async function reserveTaskManifestRun(input: {
   includeGraph: boolean;
   agentType: AgentType;
   agentModel: string | null;
+  effectiveOptions: EffectiveRunOptions;
 }): Promise<TaskManifestRunReservation> {
   return transaction(async (client) => {
     await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
 
     const existingResult = await client.query<TaskManifestRunLookupRow>(
-      `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+      `SELECT id, spec_path, status, queue_position, triggered_via, branch_name, execution_worktree_path,
+              idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+              effective_options, task_manifest_authority_version
          FROM pipeline_runs
         WHERE workspace_id = $1
           AND idempotency_key = $2
@@ -3315,6 +3328,26 @@ async function reserveTaskManifestRun(input: {
     const existing = existingResult.rows[0];
     if (existing) {
       assertExistingTaskManifestRunMatchesHash(existing, input.manifestHash, input.idempotencyKey);
+      if (!isEffectiveRunOptions(existing.effective_options)
+        || existing.effective_options.safety.deploy !== false
+        || existing.task_manifest_authority_version !== 1) {
+        if (existing.status !== 'queued') {
+          throw new ConflictError('Task manifest reservation is missing immutable authority and is no longer safely repairable');
+        }
+        const repaired = (await client.query<TaskManifestRunLookupRow>(
+          `UPDATE pipeline_runs
+           SET effective_options = $2::jsonb, task_manifest_authority_version = 1,
+               auto_merge = FALSE, merge_strategy = $3
+           WHERE id = $1 AND status = 'queued'
+           RETURNING id, spec_path, status, queue_position, triggered_via, branch_name,
+                     execution_worktree_path, idempotency_key, task_manifest_id,
+                     task_manifest_artifacts, trigger_options, effective_options,
+                     task_manifest_authority_version`,
+          [existing.id, JSON.stringify(input.effectiveOptions), input.mergeStrategy],
+        )).rows[0];
+        if (!repaired) throw new ConflictError('Task manifest reservation recovery lost its queued authority');
+        return { kind: 'existing', row: repaired };
+      }
       return { kind: 'existing', row: existing };
     }
 
@@ -3336,12 +3369,13 @@ async function reserveTaskManifestRun(input: {
          spec_path, workspace_id, status, trigger_type, queued_at, queue_position,
          triggered_via, auto_worktree, auto_merge, merge_strategy, terminal_mode,
          include_graph, agent, agent_type, agent_model,
-         idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+         idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+         effective_options, task_manifest_authority_version
        ) VALUES (
          $1, $2, 'queued', 'manual', NOW(), $3,
          $4, $5, false, $6, $7,
          $8, $9, $10, $11,
-         $12, $13, $14::jsonb, $15::jsonb
+         $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, 1
        )
        ON CONFLICT (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id, queue_position`,
@@ -3361,6 +3395,7 @@ async function reserveTaskManifestRun(input: {
         input.manifestId,
         JSON.stringify(input.artifacts),
         JSON.stringify(input.triggerOptions),
+        JSON.stringify(input.effectiveOptions),
       ],
     );
 
@@ -3384,7 +3419,9 @@ async function reserveTaskManifestRun(input: {
     }
 
     const racedResult = await client.query<TaskManifestRunLookupRow>(
-      `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+      `SELECT id, spec_path, status, queue_position, triggered_via, branch_name, execution_worktree_path,
+              idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+              effective_options, task_manifest_authority_version
          FROM pipeline_runs
         WHERE workspace_id = $1
           AND idempotency_key = $2
@@ -3520,8 +3557,6 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     }
 
     const plannedEnvelope = buildPlannedTaskManifestEnvelope(workspace.path, manifest);
-    const plannedArtifacts = buildTaskManifestArtifactsResponse(plannedEnvelope);
-    const plannedArtifactRefs = buildTaskManifestArtifactRefs(plannedArtifacts);
     const resolvedTerminalMode = resolveRequestedTerminalMode(requestBody.terminal_mode ?? requestBody.terminalMode ?? manifest.execution.terminalMode);
     assertTerminalModeAvailable(resolvedTerminalMode);
     const resolvedDryRun = requestBody.dryRun === true || manifest.policy.dryRun === true;
@@ -3616,21 +3651,29 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       return;
     }
 
+    const immutableEffectiveOptions = buildEffectiveRunOptions({
+      model: taskManifestExecutionOptions.finalAgentModel ?? null,
+      effort: resolvedEffortLevel ?? null,
+      autoWorktree: resolvedAutoWorktree,
+      worktreePath: null,
+      branchName: null,
+      mergeStrategy: resolvedMergeStrategy,
+      autoMerge: false,
+      includeGraph: requestBody.includeGraph === true,
+      terminal: resolvedTerminalMode,
+      policyLocked: true,
+      deploy: false,
+      externalSend: resolvedMergeStrategy !== 'branch-only',
+    });
+    // Existing rows are resolved after deterministic artifact verification and
+    // reservation repair below. A queued immediate reservation with no frozen
+    // branch/execution path is resumable and must not be mistaken for a terminal
+    // idempotent replay after response loss.
     const existingIdempotentRun = await findTaskManifestRunByIdempotencyKey(requestWorkspaceId, requestIdempotencyKey);
-    if (existingIdempotentRun) {
-      assertExistingTaskManifestRunMatchesHash(existingIdempotentRun, plannedEnvelope.manifestHash, requestIdempotencyKey);
-      await loadAndVerifyTaskManifestRunLineage(Number(existingIdempotentRun.id), workspace.path);
-      res.status(200).json(buildTaskManifestReplayResponse({
-        row: existingIdempotentRun,
-        manifest,
-        manifestHash: plannedEnvelope.manifestHash,
-        fallbackArtifacts: plannedArtifacts,
-        fallbackArtifactRefs: plannedArtifactRefs,
-      }));
-      return;
-    }
 
-    const activeConflict = await getTaskManifestActiveConflict(requestWorkspaceId, resolvedAutoWorktree);
+    const activeConflict = existingIdempotentRun
+      ? null
+      : await getTaskManifestActiveConflict(requestWorkspaceId, resolvedAutoWorktree);
     if (activeConflict) {
       res.status(200).json({
         ok: false,
@@ -3693,21 +3736,36 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       includeGraph: requestBody.includeGraph === true,
       agentType: taskManifestExecutionOptions.resolvedAgentType,
       agentModel: taskManifestExecutionOptions.finalAgentModel ?? null,
+      effectiveOptions: immutableEffectiveOptions,
     });
-
-    if (reservation.kind === 'existing') {
-      await loadAndVerifyTaskManifestRunLineage(Number(reservation.row.id), workspace.path);
-      res.status(200).json(buildTaskManifestReplayResponse({
-        row: reservation.row,
-        manifest,
-        manifestHash: envelope.manifestHash,
-        fallbackArtifacts: artifacts,
-        fallbackArtifactRefs: artifactRefs,
-      }));
-      return;
+    if (reservation.kind === 'created'
+      && process.env.NODE_ENV === 'test'
+      && process.env.RORCA_TASK_MANIFEST_FAILPOINT === 'after_reservation_before_preparation') {
+      throw new Error('task_manifest_failpoint:after_reservation_before_preparation');
     }
 
-    await loadAndVerifyTaskManifestRunLineage(reservation.runId, workspace.path);
+    let dispatchRunId: number;
+    if (reservation.kind === 'existing') {
+      dispatchRunId = Number(reservation.row.id);
+      await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+      const resumableImmediateReservation = requestBody.queue !== true
+        && reservation.row.status === 'queued'
+        && !reservation.row.branch_name
+        && !reservation.row.execution_worktree_path;
+      if (!resumableImmediateReservation) {
+        res.status(200).json(buildTaskManifestReplayResponse({
+          row: reservation.row,
+          manifest,
+          manifestHash: envelope.manifestHash,
+          fallbackArtifacts: artifacts,
+          fallbackArtifactRefs: artifactRefs,
+        }));
+        return;
+      }
+    } else {
+      dispatchRunId = reservation.runId;
+      await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+    }
 
     if (requestBody.queue === true) {
       res.status(202).json({
@@ -3715,12 +3773,12 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
         queued: true,
         dispatchOutcome: dispatchOutcome({
           disposition: 'queued',
-          runId: reservation.runId,
+          runId: dispatchRunId,
           runStatus: 'queued',
           reasonCode: 'task_manifest_queued',
         }),
-        runId: reservation.runId,
-        queuePosition: reservation.queuePosition,
+        runId: dispatchRunId,
+        queuePosition: reservation.kind === 'created' ? reservation.queuePosition : reservation.row.queue_position,
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
         manifestHash: envelope.manifestHash,
@@ -3745,7 +3803,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       dryRun: false,
       triggerType: 'manual',
       queue: false,
-      reservedRunId: reservation.runId,
+      reservedRunId: dispatchRunId,
       forceSequential: true,
       orchestrationMode: 'sequential',
       parallelism: 1,
@@ -3774,7 +3832,6 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
 }
 
 router.post('/task-manifests/trigger', validateBody(TaskManifestTriggerRequestSchema), handleTaskManifestTrigger);
-router.post('/task-manifest/trigger', validateBody(TaskManifestTriggerRequestSchema), handleTaskManifestTrigger);
 
 // ─── POST /api/pipeline/context-preview — Preview context routing per story ───
 
@@ -4657,6 +4714,25 @@ async function listContextTraceRoots(
 // continuation runs that did not emit CTM artifacts, reconstructs trace-like
 // metadata from story_started WAL payloads and story token rows so the Context
 // tab can still explain CAG/RAG/KG/prompt context channels.
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/context-inspector-events:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Read bounded context-inspector metadata for a run
+ *     operationId: getPipelineRunContextInspectorEvents
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Context trace reconstruction exposes operator diagnostics and raw-reference metadata, so it remains an operator-only read surface."
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Bounded context trace metadata or reconstructed fallback events }
+ *       400: { description: Invalid run ID }
+ *       404: { description: Run not found }
+ */
 router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -5501,6 +5577,7 @@ const RetryHumanApprovalSchema = z.object({
     signature: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   }).strict(),
   rationale: z.string().trim().min(10).max(2000),
+  humanApproval: ProviderHumanEventSchema.optional(),
 }).strict();
 
 /**
@@ -5547,7 +5624,6 @@ export async function issueRetryHumanApprovalHandler(req: Request, res: Response
     const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [originalRunId]);
     if (!run) throw new NotFoundError('Run not found');
     await assertPipelineWorkspaceAccess(req, run.workspace_id);
-    const principal = await assertHumanRetryApprover(req.user, run.workspace_id);
     const idempotencyKey = req.get('Idempotency-Key')?.trim();
     if (!idempotencyKey) throw new ValidationError('Idempotency-Key header is required');
 
@@ -5559,6 +5635,35 @@ export async function issueRetryHumanApprovalHandler(req: Request, res: Response
     const identityCheck = verifyRetryPreviewIdentity(identity, packet);
     if (!identityCheck.valid) throw new ConflictError('Retry preview identity is expired, invalid, or mismatched');
     if (!packet.requiresApproval) throw new ConflictError('Retry preview does not require human approval');
+    const targetHash = providerHumanActionHash({
+      purpose: 'retry_approval',
+      workspaceId: run.workspace_id,
+      originalRunId,
+      previewHash: packet.previewHash,
+      previewIdentityHash: retryHash(identity),
+      scopeHash: retryHash(packet.scope.executable.map((entry) => entry.storyId)),
+      expiresAt: identity.expiresAt,
+    });
+    const principal = req.body.humanApproval
+      ? await (async () => {
+        const authority = await verifyAndPersistProviderHumanAuthority({
+          workspaceId: run.workspace_id,
+          purpose: 'retry_approval',
+          targetHash,
+          event: req.body.humanApproval,
+        });
+        return {
+          principalType: 'provider_human' as const,
+          principalId: authority.actorId,
+          principalAuthId: authority.receiptId,
+          principalDisplayLabel: `${req.body.humanApproval.provider}:${authority.actorId}`,
+          sourceChannel: 'provider' as const,
+          providerHumanReceiptId: authority.receiptId,
+          provider: req.body.humanApproval.provider,
+          providerTenantId: req.body.humanApproval.providerTenantId,
+        };
+      })()
+      : await assertHumanRetryApprover(req.user, run.workspace_id);
 
     const issued = await issueGovernedRetryHumanApproval({
       principal,
@@ -5981,7 +6086,25 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       // Preview is deliberately read-only: no approval row, WAL record, run, or
       // queue job exists until the caller dispatches this exact expiring packet.
       const identity = createRetryPreviewIdentity(retryPreview);
-      res.status(200).json({ ok: true, preview: retryPreview, previewIdentity: identity, worktreePreflight, passReconciliation });
+      const humanApprovalTargetHash = retryPreview.requiresApproval
+        ? providerHumanActionHash({
+          purpose: 'retry_approval',
+          workspaceId: originalRun.workspace_id,
+          originalRunId,
+          previewHash: retryPreview.previewHash,
+          previewIdentityHash: retryHash(identity),
+          scopeHash,
+          expiresAt: identity.expiresAt,
+        })
+        : null;
+      res.status(200).json({
+        ok: true,
+        preview: retryPreview,
+        previewIdentity: identity,
+        humanApprovalTargetHash,
+        worktreePreflight,
+        passReconciliation,
+      });
       return;
     }
 
@@ -7301,13 +7424,18 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
       reason: 'operator_deleted_queued_run',
     });
     if (governedCancellation.outcome !== 'not_governed_retry') {
+      if (governedCancellation.outcome === 'termination_required') {
+        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
+        res.json({ ok: true, runId, status: 'cancelling', governedRetry: true });
+        return;
+      }
       if (governedCancellation.outcome !== 'cancelled_before_claim') {
         throw new ConflictError(`Governed retry cancellation is ${governedCancellation.outcome}`);
       }
       if (governedCancellation.bossJobId) {
         await getBoss().cancel('pipeline:retry', governedCancellation.bossJobId);
       }
-      res.json({ ok: true, runId, governedRetry: true });
+      res.json({ ok: true, runId, status: 'cancelled', governedRetry: true });
       return;
     }
     if (run.status !== 'queued') {

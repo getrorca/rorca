@@ -15,9 +15,13 @@ import {
   recordSsdlcDecision,
   revokeSsdlcDecision,
   type DecisionSubject,
-  type DelegatedDecisionIdentity,
   type RecordSsdlcDecisionInput,
 } from '../lib/ssdlc-decisions';
+import {
+  ProviderHumanEventSchema,
+  providerHumanActionHash,
+  verifyAndPersistProviderHumanAuthority,
+} from '../lib/provider-human-authority';
 
 const router = Router();
 
@@ -31,6 +35,7 @@ const CALLER_ACTOR_FIELDS = [
   'principalDisplayLabel',
   'authority',
   'role',
+  'delegatedOnBehalfOf',
 ] as const;
 
 function bodyObject(req: Request): Record<string, unknown> {
@@ -47,22 +52,15 @@ function rejectActorClaims(body: Record<string, unknown>): void {
   }
 }
 
-function delegatedIdentity(body: Record<string, unknown>): DelegatedDecisionIdentity | undefined {
-  const value = body.delegatedOnBehalfOf;
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new ValidationError('delegatedOnBehalfOf must be an identity object');
-  }
-  const candidate = value as Record<string, unknown>;
-  if (typeof candidate.principalId !== 'string' || typeof candidate.displayLabel !== 'string') {
-    throw new ValidationError('delegatedOnBehalfOf requires principalId and displayLabel');
-  }
-  return { principalId: candidate.principalId, displayLabel: candidate.displayLabel };
+function requestPrincipal(req: Request) {
+  if (!req.user) throw new AuthError();
+  return deriveDecisionPrincipal(req.user);
 }
 
-function requestPrincipal(req: Request, body: Record<string, unknown> = {}) {
-  if (!req.user) throw new AuthError();
-  return deriveDecisionPrincipal(req.user, delegatedIdentity(body));
+function isServicePrincipal(req: Request): boolean {
+  return !req.user
+    || req.user.email.toLowerCase().endsWith('@rorca.internal')
+    || req.user.id === 'system';
 }
 
 function sourceRequestId(req: Request): string {
@@ -117,7 +115,7 @@ function decisionSubject(value: unknown): DecisionSubject | null | undefined {
  *               expiresAt: { type: string, format: date-time }
  *               evidenceGap: { type: string }
  *               subject: { type: object }
- *               delegatedOnBehalfOf: { type: object }
+ *               humanApproval: { type: object, description: Exact signed provider-human event required for service-relayed governed decisions }
  *     responses:
  *       201: { description: Governed decision durably recorded }
  *       200: { description: Exact idempotent replay returned }
@@ -129,7 +127,7 @@ router.post('/decisions', async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectActorClaims(body);
-    const principal = requestPrincipal(req, body);
+    requestPrincipal(req);
     if (typeof body.decisionType !== 'string'
       || !SSDLC_DECISION_TYPES.includes(body.decisionType as (typeof SSDLC_DECISION_TYPES)[number])) {
       throw new ValidationError('decisionType is not a caller-authorized lifecycle decision type', { field: 'decisionType' });
@@ -149,6 +147,45 @@ router.post('/decisions', async (req, res, next) => {
       subject: decisionSubject(body.subject),
       sourceRequestId: sourceRequestId(req),
     };
+    const event = body.humanApproval === undefined
+      ? null
+      : ProviderHumanEventSchema.parse(body.humanApproval);
+    if (isServicePrincipal(req) && !event) {
+      throw new AuthError('Service principals must relay exact provider-human lifecycle authority');
+    }
+    const principal = event
+      ? await (async () => {
+        const targetHash = providerHumanActionHash({
+          purpose: 'lifecycle_decision',
+          workspaceId: input.workspaceId,
+          specSlug: input.specSlug,
+          specVersion: input.specVersion ?? null,
+          runId: input.runId ?? null,
+          storyId: input.storyId ?? null,
+          phaseId: input.phaseId,
+          gateId: input.gateId ?? null,
+          decisionType: input.decisionType,
+          rationale: input.rationale,
+          expiresAt: input.expiresAt ?? null,
+          evidenceGap: input.evidenceGap ?? null,
+          subject: input.subject ?? null,
+        });
+        const receipt = await verifyAndPersistProviderHumanAuthority({
+          workspaceId: input.workspaceId,
+          purpose: 'lifecycle_decision',
+          targetHash,
+          event,
+        });
+        return {
+          principalType: 'provider_human' as const,
+          principalId: receipt.actorId,
+          displayLabel: `${event.provider}:${receipt.actorId}`,
+          role: 'human-approver',
+          sourceChannel: 'provider' as const,
+          providerHumanReceiptId: receipt.receiptId,
+        };
+      })()
+      : requestPrincipal(req);
     const result = await recordSsdlcDecision(input, principal);
     res.status(result.replayed ? 200 : 201).json(result);
   } catch (error) {
@@ -184,7 +221,7 @@ router.post('/decisions/:decisionId/revoke', async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectActorClaims(body);
-    const principal = requestPrincipal(req, body);
+    const principal = requestPrincipal(req);
     const result = await revokeSsdlcDecision({
       workspaceId: optionalString(body.workspaceId) ?? '',
       decisionId: req.params.decisionId,

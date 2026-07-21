@@ -52,7 +52,7 @@ describe('fallback replay idempotency', () => {
 
   afterEach(() => fs.rmSync(cwd, { recursive: true, force: true }));
 
-  test('replays wave finalization only through the canonical atomic story-result poster', async () => {
+  test('retains wave finalization proposals until independent host authority exists', async () => {
     const finalization: FallbackResultEntry = {
       type: 'story_result', storyId: 'US-WAVE', status: 'pass', runId: 9,
       retries: 3, ts: '2026-07-20T00:00:00.000Z', idempotencyKey: 'wave-finalize:9:US-WAVE',
@@ -70,13 +70,8 @@ describe('fallback replay idempotency', () => {
     await writeFallbackResult(cwd, finalization);
     await flushFallbackWrites(cwd);
 
-    const withoutPoster = await replayFallbackResults(cwd, 'test-ws');
-    expect(withoutPoster).toMatchObject({ invalid: 1, retained: true, atomicFinalizations: 0 });
-
-    const poster = jest.fn(async () => 'inserted' as const);
-    const replayed = await replayFallbackResults(cwd, 'test-ws', { storyResultPoster: poster });
-    expect(replayed).toMatchObject({ inserted: 1, invalid: 0, retained: false, atomicFinalizations: 1 });
-    expect(poster).toHaveBeenCalledWith(expect.objectContaining({ integrationFinalization: expect.any(Object) }));
+    const replayed = await replayFallbackResults(cwd, 'test-ws');
+    expect(replayed).toMatchObject({ invalid: 1, retained: true, atomicFinalizations: 0 });
     expect(queryOne).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO story_results'), expect.anything());
   });
 

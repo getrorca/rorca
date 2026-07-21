@@ -58,6 +58,17 @@ interface Row {
   state_version: number | string;
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function record(row: Row): DurableWaveIntegrationRecord {
   return {
     runId: Number(row.run_id),
@@ -182,7 +193,7 @@ export async function markDurableWaveConflicted(input: {
     const current = locked.rows[0] ? record(locked.rows[0]) : undefined;
     if (!current || !sameIdentity(current, input.identity)) throw new Error('[wave-integration-store] durable integration identity is missing or stale');
     if (current.state === 'conflicted') {
-      if (JSON.stringify(current.conflictEvidence) !== JSON.stringify(input.evidence) || current.failureReason !== input.reason) {
+      if (stableJson(current.conflictEvidence) !== stableJson(input.evidence) || current.failureReason !== input.reason) {
         throw new Error('[wave-integration-store] conflict evidence changed during replay');
       }
       return current;
@@ -209,7 +220,7 @@ export async function markDurableWaveConflictAborted(input: {
 }): Promise<DurableWaveIntegrationRecord> {
   assertWaveConflictEvidence({ state: 'aborted', identity: input.identity, evidence: input.evidence });
   if (input.priorEvidence.postAbortHead !== null
-    || JSON.stringify({ ...input.evidence, postAbortHead: null }) !== JSON.stringify(input.priorEvidence)) {
+    || stableJson({ ...input.evidence, postAbortHead: null }) !== stableJson(input.priorEvidence)) {
     throw new Error('[wave-integration-store] aborted evidence does not extend exact conflicted evidence');
   }
   return transaction(async (client) => {
@@ -221,13 +232,13 @@ export async function markDurableWaveConflictAborted(input: {
     const current = locked.rows[0] ? record(locked.rows[0]) : undefined;
     if (!current || !sameIdentity(current, input.identity)) throw new Error('[wave-integration-store] durable integration identity is missing or stale');
     if (current.state === 'aborted') {
-      if (JSON.stringify(current.conflictEvidence) !== JSON.stringify(input.evidence)) {
+      if (stableJson(current.conflictEvidence) !== stableJson(input.evidence)) {
         throw new Error('[wave-integration-store] aborted conflict evidence changed during replay');
       }
       return current;
     }
     if (!['conflicted', 'resolution_pending'].includes(current.state)
-      || JSON.stringify(current.conflictEvidence) !== JSON.stringify(input.priorEvidence)) {
+      || stableJson(current.conflictEvidence) !== stableJson(input.priorEvidence)) {
       throw new Error('[wave-integration-store] conflict abort lacks exact prior evidence');
     }
     const updated = await client.query<Row>(

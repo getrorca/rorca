@@ -2086,21 +2086,26 @@ router.post('/rotate', async (req: Request, res: Response) => {
 
 /**
  * @swagger
- * /api/memory/synthesize-from-run/{runId}:
+ * /api/memory/synthesize:
  *   post:
  *     tags: [Memory]
- *     summary: Synthesize memory proposals from a pipeline run
- *     operationId: synthesizeMemoryFromRun
+ *     summary: Synthesize memory proposals from recent workspace runs
+ *     operationId: synthesizeWorkspaceMemory
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Synthesis creates durable workspace-scoped proposals and WAL evidence, so it remains an operator-owned mutation."
  *     description: |
- *       Analyzes WAL events for the specified run and generates candidate memory entries.
+ *       Analyzes recent WAL events for a workspace and generates candidate memory entries.
  *       Entries are deduplicated against existing memory, persisted as proposals in the
  *       memory_proposals table, and broadcast via SSE. User can then approve/reject proposals.
- *     parameters:
- *       - name: runId
- *         in: path
- *         required: true
- *         schema: { type: integer }
- *         description: Pipeline run ID to analyze
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
  *     responses:
  *       200:
  *         description: Generated proposals
@@ -2123,8 +2128,7 @@ router.post('/rotate', async (req: Request, res: Response) => {
  *                       source: { type: string }
  *                       status: { type: string }
  *                 total: { type: integer }
- *       400: { description: "Invalid runId" }
- *       404: { description: "Run not found" }
+ *       400: { description: "workspaceId is required" }
  */
 // POST /api/memory/synthesize — synthesize memory proposals from all recent runs for a workspace
 router.post('/synthesize', async (req: Request, res: Response) => {
@@ -2193,6 +2197,8 @@ router.post('/synthesize', async (req: Request, res: Response) => {
  *     tags: [Context Files]
  *     summary: Synthesize memory proposals from a pipeline run
  *     operationId: synthesizeMemoryFromRun
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Run synthesis writes durable memory proposals and WAL evidence, so it remains an operator-owned mutation."
  *     description: >
  *       Analyzes WAL events and story results from a completed pipeline run and
  *       generates memory proposals (structured entries for MEMORY.md). Proposals

@@ -126,9 +126,17 @@ export function trustedWalIdentityHash(input: Parameters<typeof canonicalIdentit
 
 function assertHostProcess(source: TrustedWalSource): void {
   if (process.env.NODE_ENV === 'test') return;
-  const expectedRole = source === 'worker' ? 'worker' : 'engine';
-  if (process.env.RORCA_PROCESS_ROLE !== expectedRole) {
-    throw new Error(`Trusted WAL source ${source} requires host process role ${expectedRole}`);
+  const role = process.env.RORCA_PROCESS_ROLE;
+  // story-result rows are already transactionally bound to a canonical result.
+  // The engine writes them on first finalization; the worker may only recreate
+  // the same idempotent outbox while re-finalizing a locked recovery packet.
+  const allowed = source === 'worker'
+    ? role === 'worker'
+    : source === 'story-result'
+      ? role === 'engine' || role === 'worker'
+      : role === 'engine';
+  if (!allowed) {
+    throw new Error(`Trusted WAL source ${source} requires its host engine/worker process authority`);
   }
 }
 

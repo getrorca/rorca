@@ -336,12 +336,15 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
       autoWorktree: params[4],
       mergeStrategy: params[5],
       terminalMode: params[6],
-      agentType: params[8],
+      includeGraph: params[7],
+      agentType: params[9],
       agentModel: params[10],
       idempotencyKey: params[11],
       manifestId: params[12],
       artifacts: jsonParam(params[13]),
       triggerOptions: jsonParam(params[14]),
+      effectiveOptions: jsonParam(params[15]),
+      taskManifestAuthorityVersion: 1,
     };
     taskManifestReservations.push(row);
     return Promise.resolve({ rows: [{ id: row.id, queue_position: row.queuePosition }] });
@@ -543,6 +546,11 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       mergeStrategy: 'draft-pr',
       idempotencyKey: manifest.idempotencyKey,
       manifestId: manifest.manifestId,
+      taskManifestAuthorityVersion: 1,
+      effectiveOptions: expect.objectContaining({
+        safety: expect.objectContaining({ deploy: false }),
+        merge: expect.objectContaining({ strategy: 'draft-pr', autoMerge: false }),
+      }),
     }));
     expect(taskManifestReservations[0].triggerOptions).toEqual(expect.objectContaining({
       source: 'task-manifest',

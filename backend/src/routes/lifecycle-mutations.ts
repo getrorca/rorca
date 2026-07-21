@@ -57,7 +57,7 @@ const RetryDispatchSchema = z.object({
     expiresAt: z.string().datetime(),
     signature: PreviewHash,
   }).strict(),
-  approvalToken: z.string().trim().min(8).max(512).optional(),
+  approvalReceipt: z.string().trim().min(64).max(4096).optional(),
 }).strict();
 
 function parseBody<T>(schema: ZodType<T>, req: Request): T {
@@ -288,7 +288,7 @@ router.post('/runs/:runId/retry-dispatch', async (req, res, next) => {
       previewHash: body.previewHash,
       approvedPreview: body.approvedPreview,
       previewIdentity: body.previewIdentity,
-      approvalToken: body.approvalToken,
+      approvalReceipt: body.approvalReceipt,
       safeMode: true,
     };
     await retryPipelineRunHandler(req, res);

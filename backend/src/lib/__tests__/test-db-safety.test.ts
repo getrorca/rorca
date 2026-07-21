@@ -32,6 +32,16 @@ describe('test database safety', () => {
     })).toThrow(/No dedicated test database configured/);
   });
 
+  test('ignores an ambient legacy TEST_DATABASE_URL even when it names production', () => {
+    const safe = 'postgresql://runner:secret@localhost:5433/rorca_test';
+    expect(resolveTestDatabaseUrl({
+      RORCA_TEST_DATABASE_URL: safe,
+      TEST_DATABASE_URL: 'postgresql://admin:secret@localhost:5433/rorca',
+      DATABASE_URL: 'postgresql://admin:secret@localhost:5433/rorca',
+      RORCA_TEST_DB_ENV_FILE: '/definitely/missing/rorca-test-db.env',
+    })).toBe(safe);
+  });
+
   test('rejects an explicit non-test target before connecting', () => {
     expect(() => resolveTestDatabaseUrl({
       RORCA_TEST_DATABASE_URL: 'postgresql://admin:secret@localhost:5433/rorca',
@@ -86,7 +96,7 @@ describe('test database safety', () => {
   });
 
   test('incident regression A: leave mutable DATABASE_URL pointing away from test', async () => {
-    const dedicatedUrl = process.env.RORCA_TEST_DATABASE_URL!;
+    const dedicatedUrl = resolveTestDatabaseUrl();
     const client = new Client({ connectionString: dedicatedUrl });
     try {
       await client.connect();
@@ -104,7 +114,7 @@ describe('test database safety', () => {
   });
 
   test('incident regression B: global cleanup used its immutable test target', async () => {
-    const dedicatedUrl = process.env.RORCA_TEST_DATABASE_URL!;
+    const dedicatedUrl = resolveTestDatabaseUrl();
     const client = new Client({ connectionString: dedicatedUrl });
     try {
       await client.connect();

@@ -91,7 +91,12 @@ async function main(): Promise<void> {
     throw new Error(`Bootstrap baseline must start at contractVersion 1.0.0, found ${headVersion}.`);
   }
 
-  const markerResolution = resolveMarkersForChanges(changes, currentMarkers, referenceDate);
+  const baseBreakMarkdown = baseRef
+    ? loadTextFromGit(baseRef, breakingChangesFile, cwd)
+    : null;
+  const baseMarkers = parseBreakMarkers(baseBreakMarkdown ?? '');
+  const baseMarkerLines = new Set(baseMarkers.map(marker => marker.line));
+  const markerResolution = resolveMarkersForChanges(changes, currentMarkers, referenceDate, baseMarkerLines);
   if (markerResolution.expired.length > 0) {
     throw new Error([
       'Breaking-change override markers exist but are older than 30 days relative to the PR date.',
@@ -107,10 +112,6 @@ async function main(): Promise<void> {
     ].join('\n'));
   }
 
-  const baseBreakMarkdown = baseRef
-    ? loadTextFromGit(baseRef, breakingChangesFile, cwd)
-    : null;
-  const baseMarkers = parseBreakMarkers(baseBreakMarkdown ?? '');
   const newMarkerLines = new Set(currentMarkers.map(marker => marker.line));
   for (const marker of baseMarkers) {
     newMarkerLines.delete(marker.line);

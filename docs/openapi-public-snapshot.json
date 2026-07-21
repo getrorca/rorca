@@ -1,6 +1,6 @@
 {
-  "contractVersion": "14.0.0",
-  "generatedAt": "2026-07-21T03:37:55.384Z",
+  "contractVersion": "16.0.0",
+  "generatedAt": "2026-07-21T20:25:35.541Z",
   "routes": [
     {
       "method": "GET",
@@ -4584,7 +4584,7 @@
                   },
                   "orchestrationMode": {
                     "default": "sequential",
-                    "description": "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated.",
+                    "description": "Effective orchestration request. Production wave-parallel execution is disabled by default and requires the complete governed receipt/review/activation/cohort envelope.",
                     "enum": [
                       "sequential",
                       "wave-parallel"
@@ -4611,7 +4611,7 @@
                     "type": "boolean"
                   },
                   "rolloutCohort": {
-                    "description": "Explicit governed rollout cohort metadata; it cannot override the non-production wave policy",
+                    "description": "Explicit governed production rollout cohort metadata; it is validated with the immutable qualification and activation envelope.",
                     "type": "string"
                   },
                   "specPath": {
@@ -4706,7 +4706,7 @@
         "404": {},
         "422": {}
       },
-      "hash": "sha256:a22da2c186eb646323d7200cd74ac4cad1432147c9225b6476c6418dfa8782b3"
+      "hash": "sha256:ec5c72a1dc1337577228f115bfb4d08f14a22a25f7815fbe8f6e25bfc333b02c"
     },
     {
       "method": "GET",
@@ -7786,22 +7786,12 @@
                     "example": "Add Stripe billing with monthly and annual plans",
                     "type": "string"
                   },
-                  "diagramTypes": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "domain": {
-                    "type": "string"
-                  },
                   "model": {
                     "description": "LLM model override (defaults to workspace L3 preferred_model)",
                     "example": "claude-sonnet-4-6",
                     "type": "string"
                   },
                   "multiPass": {
-                    "default": false,
                     "description": "Enable multi-pass spec generation for richer output",
                     "example": false,
                     "type": "boolean"
@@ -7836,11 +7826,7 @@
                     "description": "Alias for title",
                     "type": "string"
                   },
-                  "storyAnnotations": {
-                    "type": "string"
-                  },
                   "storyCount": {
-                    "default": 5,
                     "description": "Target number of user stories to generate (default 10)",
                     "example": 12,
                     "type": "integer"
@@ -7848,9 +7834,6 @@
                   "storyPrefix": {
                     "description": "Prefix for story IDs (default US)",
                     "example": "FEAT",
-                    "type": "string"
-                  },
-                  "templateId": {
                     "type": "string"
                   },
                   "title": {
@@ -7865,7 +7848,6 @@
                   }
                 },
                 "required": [
-                  "brief",
                   "brief"
                 ],
                 "type": "object"
@@ -7879,34 +7861,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Spec",
-                "properties": {
-                  "model": {
-                    "type": "string"
-                  },
-                  "provider": {
-                    "type": "string"
-                  },
-                  "slug": {
-                    "type": "string"
-                  },
-                  "specPath": {
-                    "type": "string"
-                  },
-                  "stories": {
-                    "items": {
-                      "$ref": "#/components/schemas/UserStory"
-                    },
-                    "type": "array"
-                  },
-                  "title": {
-                    "type": "string"
-                  },
-                  "usage": {
-                    "type": "object"
-                  }
-                },
-                "type": "object"
+                "$ref": "#/components/schemas/Spec"
               }
             }
           }
@@ -7939,7 +7894,79 @@
           }
         }
       },
-      "hash": "sha256:20faeb7bc10b77ff74cf47c4e234ceddc0847320c459f694932480f74e7d47b9"
+      "hash": "sha256:da702fa328545d430341eb159e4d5b360aa5f9bdfaba97d4422d27d401070842"
+    },
+    {
+      "method": "POST",
+      "path": "/api/specs/generate/batch",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "briefs": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "briefs"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "201": {},
+        "400": {}
+      },
+      "hash": "sha256:c7b86db1ffe112ee7635b78e333ba29b5e2c5bac5896048b5038f212a0fe9d9a"
+    },
+    {
+      "method": "GET",
+      "path": "/api/specs/generate/batch/{batchId}",
+      "parameters": [
+        {
+          "name": "batchId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {}
+      },
+      "hash": "sha256:59070fd34608b97607c80739a1ce99f9ae64f3e57a6524e4235cb3d5006338c2"
+    },
+    {
+      "method": "GET",
+      "path": "/api/specs/generate/batch/{batchId}/stream",
+      "parameters": [
+        {
+          "name": "batchId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {}
+      },
+      "hash": "sha256:8c59447486fb4fe830653bfbff63d17482d2162c5de82b5841a2577912d332a3"
     },
     {
       "method": "POST",
@@ -8553,7 +8580,8 @@
                 "required": [
                   "workspaceId",
                   "authoringPreflight",
-                  "drafts"
+                  "drafts",
+                  "idempotencyKey"
                 ],
                 "type": "object"
               }
@@ -8567,7 +8595,7 @@
         "400": {},
         "422": {}
       },
-      "hash": "sha256:cdb431274ab573ce09178cf2192b46556f30efd69dcda224958ade2e58beb27b"
+      "hash": "sha256:be51439516e3ab5a2c85fe70a7b4f5d90e40a23cefdd6fc4b45b968c6c8a6e8d"
     },
     {
       "method": "GET",

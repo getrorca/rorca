@@ -13,7 +13,7 @@ import { retryHash } from './retry-governance';
 import { stableWalJson } from './trusted-wal';
 
 export const PROVIDER_HUMAN_EVENT_VERSION = 'provider-human-event.v1' as const;
-export type ProviderHumanPurpose = 'authoring_plan_confirmation' | 'spec_set_approval' | 'retry_approval';
+export type ProviderHumanPurpose = 'authoring_plan_confirmation' | 'spec_set_approval' | 'retry_approval' | 'lifecycle_decision';
 
 export const ProviderHumanEventSchema = z.object({
   schemaVersion: z.literal(PROVIDER_HUMAN_EVENT_VERSION),
@@ -100,11 +100,6 @@ export async function verifyAndPersistProviderHumanAuthority(input: {
   if (input.requireDistinctActor && input.requesterActorId && event.actorId === input.requesterActorId) {
     throw new ForbiddenError('This approval requires a distinct human approver');
   }
-  const now = input.now ?? new Date();
-  const occurredAt = Date.parse(event.occurredAt);
-  if (!Number.isFinite(occurredAt) || Math.abs(now.getTime() - occurredAt) > 10 * 60_000) {
-    throw new ForbiddenError('Provider-human event is outside the freshness window');
-  }
   const binding = issuerBindings().find((candidate) =>
     candidate.issuerId === event.issuerId
     && candidate.keyId === event.keyId
@@ -135,6 +130,11 @@ export async function verifyAndPersistProviderHumanAuthority(input: {
       throw new ConflictError('Provider-human message was already used for a different authority target');
     }
     return { receiptId: existing.id, replayed: true, actorId: existing.actor_id };
+  }
+  const now = input.now ?? new Date();
+  const occurredAt = Date.parse(event.occurredAt);
+  if (!Number.isFinite(occurredAt) || Math.abs(now.getTime() - occurredAt) > 10 * 60_000) {
+    throw new ForbiddenError('Provider-human event is outside the freshness window');
   }
   const inserted = await queryOne<{ id: string }>(
     `INSERT INTO provider_human_authority_receipts (

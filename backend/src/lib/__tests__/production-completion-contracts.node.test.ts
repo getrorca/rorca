@@ -35,7 +35,7 @@ test('provider-human authority verifies exact target, freshness, tenant binding,
   const signature = source.indexOf('crypto.verify(null, message, publicKey, signature)');
   const lookup = source.indexOf('FROM provider_human_authority_receipts');
   const insert = source.indexOf('INSERT INTO provider_human_authority_receipts');
-  assert.ok(target > 0 && distinct > target && freshness > distinct && binding > freshness && signature > binding && lookup > signature && insert > lookup);
+  assert.ok(target > 0 && distinct > target && binding > distinct && signature > binding && lookup > signature && freshness > lookup && insert > freshness);
   assert.match(source, /message_id = \$2/);
   assert.match(source, /already used for a different authority target/);
 });
@@ -43,6 +43,7 @@ test('provider-human authority verifies exact target, freshness, tenant binding,
 test('authoring persistence and approval are durable idempotent operations with separate canonical targets', () => {
   const mutations = readSource('lib', 'authoring-mutations.ts');
   const specs = readSource('routes', 'specs.ts');
+  const specWriter = readSource('lib', 'spec-writer.ts');
   const migration = readSource('db', 'pg-migrations', '20260720145000_authoring_human_operation_authority.sql');
   assert.match(mutations, /authoring_mutation_operations/);
   assert.match(mutations, /request_hash/);
@@ -53,6 +54,12 @@ test('authoring persistence and approval are durable idempotent operations with 
   assert.match(specs, /purpose: 'authoring_plan_confirmation'/);
   assert.match(specs, /purpose: 'spec_set_approval'/);
   assert.match(specs, /requireDistinctActor: \['high', 'critical'\]\.includes/);
+  assert.match(specs, /authoringSpecMaterialHash/);
+  assert.match(specs, /ensureAuthoringVersionSnapshot/);
+  assert.match(specs, /authoring\/mutation-state/);
+  assert.match(specWriter, /persist_after_spec_file_before_diagram/);
+  assert.match(specs, /approve_after_rename/);
+  assert.match(mutations, /readAuthoringMutationState/);
   assert.match(migration, /provider_human_authority_receipts/);
   assert.match(migration, /authoring_mutation_operations/);
   assert.doesNotMatch(migration, /(?:CREATE|ALTER|DROP|DELETE FROM|UPDATE)\s+(?:TABLE\s+)?pgboss\./i);

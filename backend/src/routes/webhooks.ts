@@ -608,20 +608,13 @@ webhookAdminRouter.post('/dlq/:id/retry', requireProviderMutationAuthority, requ
 
 /**
  * @swagger
- * /api/webhooks/{provider}:
+ * /api/webhooks/linear:
  *   post:
  *     tags: [Webhooks]
- *     summary: Receive webhook events for a provider
- *     operationId: receiveProviderWebhook
- *     description: Exact callback receiver for non-GitHub providers (linear, vercel, slack). Dispatches to registered WebhookRouter handlers with retry + DLQ and requires a configured provider signature verifier. It is intentionally default-denied from MCP/native public API exposure.
+ *     summary: Receive Linear webhook events
+ *     operationId: receiveLinearWebhook
+ *     description: Exact Linear callback receiver. Requires configured signature verification and is intentionally default-denied from MCP/native public API exposure.
  *     x-rorca-mcp: false
- *     parameters:
- *       - in: path
- *         name: provider
- *         required: true
- *         schema:
- *           type: string
- *           enum: [linear, vercel, slack]
  *     requestBody:
  *       required: true
  *       content:
@@ -644,6 +637,44 @@ webhookAdminRouter.post('/dlq/:id/retry', requireProviderMutationAuthority, requ
  *         description: Signature verification failed
  *       503:
  *         description: Processing failed or a delivery claim must be retried
+ */
+/**
+ * @swagger
+ * /api/webhooks/vercel:
+ *   post:
+ *     tags: [Webhooks]
+ *     summary: Receive Vercel webhook events
+ *     operationId: receiveVercelWebhook
+ *     description: Exact Vercel callback receiver with configured signature verification; intentionally default-denied from MCP/native public API exposure.
+ *     x-rorca-mcp: false
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { type: object }
+ *     responses:
+ *       200: { description: Webhook received }
+ *       401: { description: Signature verification failed }
+ *       503: { description: Processing failed or retry required }
+ */
+/**
+ * @swagger
+ * /api/webhooks/slack:
+ *   post:
+ *     tags: [Webhooks]
+ *     summary: Receive Slack webhook events
+ *     operationId: receiveSlackWebhook
+ *     description: Exact Slack callback receiver with configured signature verification; intentionally default-denied from MCP/native public API exposure.
+ *     x-rorca-mcp: false
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { type: object }
+ *     responses:
+ *       200: { description: Webhook received }
+ *       401: { description: Signature verification failed }
+ *       503: { description: Processing failed or retry required }
  */
 webhookCallbackRouter.post(['/linear', '/vercel', '/slack'], async (req: Request, res: Response) => {
   const provider = req.path.slice(1);

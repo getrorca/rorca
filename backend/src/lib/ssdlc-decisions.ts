@@ -38,8 +38,8 @@ export const SSDLC_DECISION_TYPES = [
 
 export type SsdlcDecisionType = typeof SSDLC_DECISION_TYPES[number];
 export type StoredSsdlcDecisionType = SsdlcDecisionType | 'policy_approval';
-export type DecisionPrincipalType = 'local_admin' | 'authenticated_user' | 'hermes' | 'internal_service';
-export type DecisionSourceChannel = 'local' | 'api' | 'hermes' | 'internal';
+export type DecisionPrincipalType = 'local_admin' | 'authenticated_user' | 'provider_human' | 'hermes' | 'internal_service';
+export type DecisionSourceChannel = 'local' | 'api' | 'provider' | 'hermes' | 'internal';
 export type DecisionSubjectType = 'commit_sha' | 'artifact_digest';
 export type DerivedDecisionState = 'pending' | 'deferred' | 'not_applicable' | 'approved';
 export type DecisionActivity = 'active' | 'expired' | 'revoked' | 'stale_revision';
@@ -66,6 +66,7 @@ export interface DecisionPrincipal {
   role: string;
   sourceChannel: DecisionSourceChannel;
   delegatedOnBehalfOf?: DelegatedDecisionIdentity;
+  providerHumanReceiptId?: string;
 }
 
 export interface DecisionSubject {
@@ -119,6 +120,7 @@ interface SsdlcDecisionRow {
   actor: string;
   delegated_principal_id: string | null;
   delegated_display_label: string | null;
+  provider_human_receipt_id: string | null;
   source_request_id: string;
   source_channel: DecisionSourceChannel;
   scope_key: string;
@@ -153,6 +155,7 @@ export interface SsdlcDecision {
     displayLabel: string;
     sourceChannel: DecisionSourceChannel;
     delegatedOnBehalfOf: DelegatedDecisionIdentity | null;
+    providerHumanReceiptId: string | null;
   };
   sourceRequestId: string;
   createdAt: DbTimestamp;
@@ -350,8 +353,11 @@ export function deriveDecisionPrincipal(
 }
 
 function isApprover(principal: DecisionPrincipal): boolean {
+  if (principal.principalType === 'provider_human') return Boolean(principal.providerHumanReceiptId);
   if (principal.principalType === 'local_admin') return true;
-  if (principal.principalType === 'hermes') return Boolean(principal.delegatedOnBehalfOf);
+  // Hermes and internal services may relay a separately verified provider-human
+  // action, but can never become approvers through caller-authored delegation.
+  if (principal.principalType === 'hermes' || principal.principalType === 'internal_service') return false;
   return principal.principalType === 'authenticated_user' && principal.role === 'admin';
 }
 
@@ -509,6 +515,7 @@ function decisionFromRow(row: SsdlcDecisionRow): SsdlcDecision {
       displayLabel: row.principal_display_label,
       sourceChannel: row.source_channel,
       delegatedOnBehalfOf,
+      providerHumanReceiptId: row.provider_human_receipt_id,
     },
     sourceRequestId: row.source_request_id,
     createdAt: row.created_at,
@@ -694,15 +701,15 @@ const pgStore: DecisionStore = {
           decision_type, rationale, evidence_gap, subject_type, subject_value,
           policy_version, policy_reference, policy_authorized,
           principal_type, principal_id, principal_display_label, actor,
-          delegated_principal_id, delegated_display_label,
+          delegated_principal_id, delegated_display_label, provider_human_receipt_id,
           source_request_id, source_channel, scope_key, request_hash, expires_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12,
           $13, $14, TRUE,
           $15, $16, $17, $17,
-          $18, $19,
-          $20, $21, $22, $23, $24
+          $18, $19, $20,
+          $21, $22, $23, $24, $25
         )
         RETURNING *
       `, [
@@ -725,6 +732,7 @@ const pgStore: DecisionStore = {
         candidate.principal.displayLabel,
         candidate.principal.delegatedOnBehalfOf?.principalId ?? null,
         candidate.principal.delegatedOnBehalfOf?.displayLabel ?? null,
+        candidate.principal.providerHumanReceiptId ?? null,
         candidate.sourceRequestId,
         candidate.principal.sourceChannel,
         candidate.scopeKey,
@@ -869,6 +877,7 @@ export async function recordSsdlcDecision(
     principalType: principal.principalType,
     principalId: principal.principalId,
     delegatedOnBehalfOf: principal.delegatedOnBehalfOf ?? null,
+    providerHumanReceiptId: principal.providerHumanReceiptId ?? null,
   };
   const result = await deps.store.persist({
     workspaceId,

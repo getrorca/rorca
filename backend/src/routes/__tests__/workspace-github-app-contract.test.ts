@@ -86,7 +86,14 @@ test('GitHub webhook path enforces HMAC, exact App identity, event bounds, and a
 });
 
 test('webhook callback and administration docs remain default-denied and explicitly MCP-excluded', () => {
-  for (const operationId of ['receiveGithubWebhook', 'listWebhookDlq', 'retryWebhookDlqEvent', 'receiveProviderWebhook']) {
+  for (const operationId of [
+    'receiveGithubWebhook',
+    'listWebhookDlq',
+    'retryWebhookDlqEvent',
+    'receiveLinearWebhook',
+    'receiveVercelWebhook',
+    'receiveSlackWebhook',
+  ]) {
     const start = webhook.indexOf(`operationId: ${operationId}`);
     expect(start).toBeGreaterThan(0);
     const operation = webhook.slice(start, start + 800);

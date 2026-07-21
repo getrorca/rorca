@@ -36,7 +36,7 @@ export function planGate(): RequestHandler {
     try {
       const operation = matchOperationFromRoute(req, swaggerSpec as any);
       if (!operation) {
-        next();
+        res.status(404).json({ error: 'Not found' });
         return;
       }
 

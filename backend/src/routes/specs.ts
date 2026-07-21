@@ -19,7 +19,13 @@ import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo, ALL_MODELS, isValidModel } from '../lib/llm-client';
-import { writeSpec } from '../lib/spec-writer';
+import {
+  buildSpecDiagramsDocument,
+  buildSpecDocument,
+  writeSpec,
+  writeSpecDiagramArtifact,
+  type GeneratedSpec,
+} from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey, getOpenRouterPrefs } from './vault';
 import { authRequired } from '../lib/auth-utils';
@@ -137,8 +143,12 @@ import {
 } from '../lib/ssdlc-forge-authoring';
 import { planAuthoring } from '../lib/ssdlc-authoring-planner';
 import {
+  authoringMutationFailpoint,
+  authoringMutationRequestHash,
   claimAuthoringMutation,
   completeAuthoringMutation,
+  markAuthoringMutationStage,
+  readAuthoringMutationState,
 } from '../lib/authoring-mutations';
 import {
   ProviderHumanEventSchema,
@@ -829,50 +839,6 @@ interface SpecDiffResult {
   summary: { added: number; removed: number; modified: number; unchanged: number };
 }
 
-/**
- * @swagger
- * /api/specs/generate:
- *   post:
- *     tags: [Specs]
- *     summary: Generate a spec from a brief via LLM (legacy compatibility endpoint)
- *     operationId: generateSpec
- *     description: Legacy compatibility endpoint for server-side spec drafting from a brief. The preferred product-wide path is skill-first drafting plus canonical persistence through POST /api/specs/persist or the shared forge workflow.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId, brief]
- *             properties:
- *               workspaceId: { type: string }
- *               title: { type: string, description: "Optional — auto-generated from brief if omitted", example: "User Authentication" }
- *               brief: { type: string, example: "Add login/register with JWT tokens" }
- *               storyCount: { type: integer, default: 5 }
- *               model: { type: string, example: "claude-sonnet-4-5-20250929" }
- *               domain: { type: string }
- *               diagramTypes: { type: array, items: { type: string } }
- *               storyAnnotations: { type: string }
- *               templateId: { type: string }
- *               multiPass: { type: boolean, default: false, description: "Enable multi-pass spec generation (Pass 1: PM coarse stories, Pass 2: Spec Writer micro-stories)" }
- *     responses:
- *       200:
- *         description: Generated spec
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 slug: { type: string }
- *                 title: { type: string }
- *                 stories: { type: array, items: { $ref: '#/components/schemas/UserStory' } }
- *                 provider: { type: string }
- *                 model: { type: string }
- *                 usage: { type: object }
- *                 specPath: { type: string }
- *       400: { description: "Missing required fields" }
- *       404: { description: "Workspace not found" }
- */
 // ─── Multi-pass helpers ─────────────────────────────────────────────────────
 
 /** Load a default persona's prompt text from the default-personas/ directory. */
@@ -1100,7 +1066,7 @@ const PersistAuthoringBatchSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]),
   authoringPreflight: PersistAuthoringBindingSchema,
   drafts: z.array(z.record(z.string(), z.unknown())).min(1).max(12),
-  idempotencyKey: z.string().trim().min(2).max(128).optional(),
+  idempotencyKey: z.string().trim().min(8).max(128),
 }).strict();
 
 const CompileLifecyclePlanSchema = z.object({
@@ -1718,6 +1684,52 @@ interface ForgeContextBundle {
   opencodeDirectionContext: string;
 }
 
+function authoringSpecMaterialHash(document: Record<string, unknown>): string {
+  const material = structuredClone(document);
+  delete material.generatedAt;
+  const authoring = material.authoring;
+  if (authoring && typeof authoring === 'object' && !Array.isArray(authoring)) {
+    const mutable = authoring as Record<string, unknown>;
+    const mutationReceipt = mutable.mutationReceipt;
+    if (mutationReceipt && typeof mutationReceipt === 'object' && !Array.isArray(mutationReceipt)) {
+      delete (mutationReceipt as Record<string, unknown>).state;
+    }
+    delete mutable.approvalMutationReceipt;
+    delete mutable.approvalResult;
+    delete mutable.providerApproval;
+  }
+  return providerHumanActionHash(material);
+}
+
+function authoringDiagramMaterial(document: string): string {
+  return document.replace(/^Generated: .*$/m, 'Generated: <deterministic>');
+}
+
+async function ensureAuthoringVersionSnapshot(input: {
+  slug: string;
+  contentJson: string;
+  receiptId: string;
+}): Promise<number> {
+  const existing = await queryOne<{ version: number; content_json: string | Record<string, unknown> }>(
+    `SELECT version, content_json FROM spec_versions
+      WHERE spec_slug = $1
+        AND content_json::jsonb #>> '{authoring,mutationReceipt,receiptId}' = $2
+      ORDER BY version ASC LIMIT 1`,
+    [input.slug, input.receiptId],
+  );
+  if (existing) {
+    const stored = typeof existing.content_json === 'string'
+      ? JSON.parse(existing.content_json) as Record<string, unknown>
+      : existing.content_json;
+    const current = JSON.parse(input.contentJson) as Record<string, unknown>;
+    if (authoringSpecMaterialHash(stored) !== authoringSpecMaterialHash(current)) {
+      throw new ConflictError('Recovered authoring version snapshot has different material');
+    }
+    return Number(existing.version);
+  }
+  return snapshotVersion(input.slug, input.contentJson, 'pending');
+}
+
 interface ForgePersistResult {
   id: string;
   slug: string;
@@ -1751,7 +1763,12 @@ async function persistExplicitDraftInternal(
   options?: {
     sourceMode?: string;
     invocationSurface?: string;
-    mutationReceipt?: { receiptId: string; requestHash: string; idempotencyKey: string };
+    mutationReceipt?: {
+      receiptId: string;
+      requestHash: string;
+      idempotencyKey: string;
+      state: 'claimed' | 'artifact_written' | 'wal_written' | 'recoverable_failure';
+    };
   },
 ): Promise<ForgePersistResult> {
   const workspaceId = String(body.workspaceId);
@@ -1824,16 +1841,34 @@ async function persistExplicitDraftInternal(
   const algorithmicDiagrams = generateDiagramBundle(normalizedStories as any, ['storyDeps']);
   const allDiagrams = { ...(body.diagrams ?? {}), ...algorithmicDiagrams };
   const mermaidDiagram = body.mermaidDiagram?.trim() || algorithmicDiagrams.storyDeps?.mermaid || '';
-
+  const generatedSpec: GeneratedSpec = {
+    slug,
+    title,
+    stories: normalizedStories,
+    diagrams: allDiagrams as GeneratedSpec['diagrams'],
+    mermaidDiagram: mermaidDiagram || undefined,
+    model: body.model,
+    contextUsed: body.contextUsed as GeneratedSpec['contextUsed'],
+    contextSummary: resolvedContextSummary,
+    reasoning: body.reasoning,
+    source,
+    postSavePolicy: postSavePolicyMetadata(postSavePolicy),
+    authoring: persistedAuthoring,
+  };
   const { pendingFile: existingPending, approvedFile: existingApproved, existingFile: existingSpecPath } = resolveSpecStoragePaths(workspace.path, slug);
   const hadExistingSpec = existingSpecPath !== null;
   const previousSpecRaw = existingSpecPath ? fs.readFileSync(existingSpecPath, 'utf8') : null;
   const previousSpecContent = previousSpecRaw ? JSON.parse(previousSpecRaw) as SpecEditInput : null;
+  const previousAuthoring = previousSpecContent?.authoring as Record<string, unknown> | undefined;
+  const previousMutationReceipt = previousAuthoring?.mutationReceipt as Record<string, unknown> | undefined;
+  const recoveringExactMutation = Boolean(options?.mutationReceipt
+    && previousMutationReceipt?.receiptId === options.mutationReceipt.receiptId
+    && previousMutationReceipt?.requestHash === options.mutationReceipt.requestHash
+    && previousMutationReceipt?.idempotencyKey === options.mutationReceipt.idempotencyKey);
 
-  if (hadExistingSpec && !overwrite) {
+  if (hadExistingSpec && !overwrite && !recoveringExactMutation) {
     throw new ConflictError(`Spec '${slug}' already exists. Re-submit with overwrite=true to replace it.`);
   }
-
   await assertNoActiveSpecExecutionConflicts(workspaceId, slug);
 
   if (previousSpecContent) {
@@ -1858,39 +1893,76 @@ async function persistExplicitDraftInternal(
     };
   }
 
-  if (fs.existsSync(existingPending)) {
-    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
-    fs.unlinkSync(existingPending);
-  } else if (fs.existsSync(existingApproved)) {
-    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
-    fs.unlinkSync(existingApproved);
+  generatedSpec.postSavePolicy = postSavePolicyMetadata(postSavePolicy);
+  const expectedSpecMaterialHash = authoringSpecMaterialHash(buildSpecDocument(generatedSpec, '<generated-at>'));
+  const expectedDiagramMaterial = authoringDiagramMaterial(buildSpecDiagramsDocument(generatedSpec, '<generated-at>'));
+  if (recoveringExactMutation) {
+    if (!previousSpecContent || authoringSpecMaterialHash(previousSpecContent as Record<string, unknown>) !== expectedSpecMaterialHash) {
+      throw new ConflictError('Persisted authoring artifact material differs from its mutation request');
+    }
+    const recoveryDiagramsPath = path.join(path.dirname(existingPending), `${slug}-diagrams.md`);
+    if (fs.existsSync(recoveryDiagramsPath)) {
+      if (authoringDiagramMaterial(fs.readFileSync(recoveryDiagramsPath, 'utf8')) !== expectedDiagramMaterial) {
+        throw new ConflictError('Persisted authoring diagram artifact differs from its mutation request');
+      }
+    } else {
+      writeSpecDiagramArtifact(workspace.path, generatedSpec);
+    }
   }
 
-  const writeResult = writeSpec(workspace.path, {
-    slug,
-    title,
-    stories: normalizedStories,
-    diagrams: allDiagrams as any,
-    mermaidDiagram: mermaidDiagram || undefined,
-    model: body.model,
-    contextUsed: body.contextUsed as any,
-    contextSummary: resolvedContextSummary,
-    reasoning: body.reasoning,
-    source,
-    postSavePolicy: postSavePolicyMetadata(postSavePolicy),
-    authoring: persistedAuthoring,
-  });
+  if (!recoveringExactMutation) {
+    if (fs.existsSync(existingPending)) {
+      await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
+      fs.unlinkSync(existingPending);
+    } else if (fs.existsSync(existingApproved)) {
+      await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
+      fs.unlinkSync(existingApproved);
+    }
+  }
 
-  // Canonical persistence owns the version snapshot; plan compilation remains a
-  // read-only consumer of this durable normalized generation.
-  await snapshotVersion(slug, fs.readFileSync(writeResult.specPath, 'utf8'), 'pending');
-  await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: slug });
+  const writeResult = recoveringExactMutation
+    ? {
+      id: slug,
+      specPath: existingSpecPath!,
+      diagramsPath: path.join(path.dirname(existingPending), `${slug}-diagrams.md`),
+    }
+    : writeSpec(workspace.path, generatedSpec);
+  authoringMutationFailpoint('persist_after_file_publication');
+
+  if (!recoveringExactMutation) {
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: slug });
+  }
+  if (options?.mutationReceipt) {
+    // Exact receipt-bound snapshot identity makes replay safe whether the crash
+    // occurred before or after snapshot insertion.
+    await ensureAuthoringVersionSnapshot({
+      slug,
+      contentJson: fs.readFileSync(writeResult.specPath, 'utf8'),
+      receiptId: options.mutationReceipt.receiptId,
+    });
+  } else if (!recoveringExactMutation) {
+    await snapshotVersion(slug, fs.readFileSync(writeResult.specPath, 'utf8'), 'pending');
+  }
+  authoringMutationFailpoint('persist_after_snapshot');
+  if (options?.mutationReceipt && options.mutationReceipt.state !== 'artifact_written'
+    && options.mutationReceipt.state !== 'wal_written') {
+    await markAuthoringMutationStage({
+      receiptId: options.mutationReceipt.receiptId,
+      requestHash: options.mutationReceipt.requestHash,
+      from: 'claimed',
+      to: 'artifact_written',
+    });
+    options.mutationReceipt.state = 'artifact_written';
+  }
 
   const priorGenerationLog = await getEffectiveGenerationLog(slug);
   const priorFingerprints = readStageFingerprintsFromSummary(priorGenerationLog?.context_summary_json);
 
   const walEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ('spec_generated', $1, $2, 'api', $3) RETURNING *`,
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload, ingest_key)
+     VALUES ('spec_generated', $1, $2, 'api', $3, $4)
+     ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+     RETURNING *`,
     [workspaceId, slug, JSON.stringify({
       title,
       source,
@@ -1901,33 +1973,53 @@ async function persistExplicitDraftInternal(
       postSavePolicy: postSavePolicyMetadata(postSavePolicy),
       authoring: telemetry,
       ...(postSaveDecision ? { postSaveDecision } : {}),
-    })],
+    }), options?.mutationReceipt ? `authoring-persist-generated:v1:${options.mutationReceipt.receiptId}` : null],
   );
   if (walEvent) {
     broadcastAll(walEvent);
   }
 
-  const { stageFingerprints: currentFingerprints, saveGeneration, generationLogId } = await seedPersistGenerationLog({
-    slug,
-    workspaceId,
-    source,
-    ...(options?.sourceMode ? { sourceMode: options.sourceMode } : {}),
-    ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
-    title,
-    storyCount: normalizedStories.length,
-    stories: normalizedStories,
-    model: body.model,
-    overwrite,
-    postSave,
-    postSavePolicy,
-    ...(postSaveDecision ? { requestedPostSave, requestedPostSavePolicy, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
-    normalizationChanges: changes,
-    contextUsed: body.contextUsed,
-    callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
-    resolvedContextSummary,
-    reasoning: body.reasoning,
-    authoring: telemetry,
-  });
+  const recoveredGenerationLog = recoveringExactMutation && options?.mutationReceipt
+    ? await queryOne<{ id: number; save_generation: number }>(
+      `SELECT id, COALESCE(save_generation, id::bigint)::bigint AS save_generation
+       FROM spec_generation_logs
+       WHERE spec_slug = $1
+         AND context_summary_json #>> '{authoring,mutationReceipt,receiptId}' = $2
+       ORDER BY id DESC LIMIT 1`,
+      [slug, options.mutationReceipt.receiptId],
+    )
+    : null;
+  const seededGeneration = recoveredGenerationLog
+    ? {
+      stageFingerprints: computeSpecStageFingerprints({ title, userStories: normalizedStories }),
+      saveGeneration: Number(recoveredGenerationLog.save_generation),
+      generationLogId: Number(recoveredGenerationLog.id),
+    }
+    : await seedPersistGenerationLog({
+      slug,
+      workspaceId,
+      source,
+      ...(options?.sourceMode ? { sourceMode: options.sourceMode } : {}),
+      ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
+      title,
+      storyCount: normalizedStories.length,
+      stories: normalizedStories,
+      model: body.model,
+      overwrite,
+      postSave,
+      postSavePolicy,
+      ...(postSaveDecision ? { requestedPostSave, requestedPostSavePolicy, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
+      normalizationChanges: changes,
+      contextUsed: body.contextUsed,
+      callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
+      resolvedContextSummary,
+      reasoning: body.reasoning,
+      authoring: {
+        ...telemetry,
+        ...(options?.mutationReceipt ? { mutationReceipt: options.mutationReceipt } : {}),
+      },
+    });
+  const { stageFingerprints: currentFingerprints, saveGeneration, generationLogId } = seededGeneration;
 
   const workflowRun = await scheduleSpecPostSaveJobs(slug, workspaceId, {
     ...postSave,
@@ -1948,6 +2040,7 @@ async function persistExplicitDraftInternal(
     throwOnFailure: true,
     source: 'canonical-persist',
   });
+  authoringMutationFailpoint('persist_after_lifecycle_compilation');
   const lifecyclePlan: ForgePersistResult['lifecyclePlan'] = compiledPlan ? {
     planId: compiledPlan.planId,
     inputHash: compiledPlan.inputHash,
@@ -1962,16 +2055,32 @@ async function persistExplicitDraftInternal(
   );
   await updatePersistGenerationLogForSave(slug, saveGeneration, {
     summaryPatch: {
-      authoring: completedTelemetry,
+      authoring: {
+        ...completedTelemetry,
+        ...(options?.mutationReceipt ? { mutationReceipt: options.mutationReceipt } : {}),
+      },
       ...(lifecyclePlan ? { lifecyclePlan } : {}),
     },
   });
   const authoringWalEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
-     VALUES ('spec_authoring_persisted', $1, $2, 'authoring-persist', $3) RETURNING *`,
-    [workspaceId, slug, JSON.stringify(completedTelemetry)],
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload, ingest_key)
+     VALUES ('spec_authoring_persisted', $1, $2, 'authoring-persist', $3, $4)
+     ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+     RETURNING *`,
+    [workspaceId, slug, JSON.stringify(completedTelemetry),
+      options?.mutationReceipt ? `authoring-persist-complete:v1:${options.mutationReceipt.receiptId}` : null],
   );
   if (authoringWalEvent) broadcastAll(authoringWalEvent);
+  authoringMutationFailpoint('persist_after_wal');
+  if (options?.mutationReceipt && options.mutationReceipt.state !== 'wal_written') {
+    await markAuthoringMutationStage({
+      receiptId: options.mutationReceipt.receiptId,
+      requestHash: options.mutationReceipt.requestHash,
+      from: 'artifact_written',
+      to: 'wal_written',
+    });
+    options.mutationReceipt.state = 'wal_written';
+  }
   const finalPersistedContent = JSON.parse(fs.readFileSync(writeResult.specPath, 'utf8')) as Record<string, unknown>;
 
   return {
@@ -4992,6 +5101,55 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
   }
 });
 
+const AuthoringMutationStateRequestSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  operation: z.enum(['preflight', 'confirm', 'persist', 'persist-batch', 'approve', 'compile-legacy']),
+  idempotencyKey: z.string().min(8).max(200),
+  request: z.unknown(),
+}).strict();
+
+/**
+ * @swagger
+ * /api/specs/authoring/mutation-state:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Reconcile one exact durable authoring mutation
+ *     operationId: getAuthoringMutationState
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Provider supervisors need a read-only exact-request reconciliation path after ambiguous authoring transport or process loss."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, operation, idempotencyKey, request]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               operation: { type: string, enum: [preflight, confirm, persist, persist-batch, approve, compile-legacy] }
+ *               idempotencyKey: { type: string }
+ *               request: { type: object, additionalProperties: true }
+ *     responses:
+ *       200: { description: Canonical mutation receipt, stage, and bounded completed response }
+ *       404: { description: Exact mutation is not claimed }
+ *       409: { description: Request hash differs from canonical mutation authority }
+ */
+router.post('/authoring/mutation-state', validateBody(AuthoringMutationStateRequestSchema), async (req: Request, res: Response) => {
+  try {
+    const input = AuthoringMutationStateRequestSchema.parse(req.body);
+    const state = await readAuthoringMutationState({
+      workspaceId: String(input.workspaceId),
+      operation: input.operation,
+      idempotencyKey: input.idempotencyKey,
+      requestHash: authoringMutationRequestHash(input.request),
+    });
+    if (!state) throw new NotFoundError('Authoring mutation not found');
+    res.json({ schemaVersion: 'rorca.authoring-mutation-state.v1', ...state });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Authoring mutation state');
+  }
+});
+
 /**
  * @swagger
  * /api/specs/persist:
@@ -5170,6 +5328,7 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
       res.status(claim.responseStatus ?? 200).json(claim.responseBody);
       return;
     }
+    if (claim) authoringMutationFailpoint('persist_after_claim');
     const result = await persistExplicitDraftInternal(req, parsedBody, claim ? {
       sourceMode: 'skill-first-explicit',
       invocationSurface: 'api.specs.persist',
@@ -5177,14 +5336,17 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
         receiptId: claim.receiptId,
         requestHash: claim.requestHash,
         idempotencyKey: idempotencyKey!,
+        state: claim.state === 'completed' ? 'wal_written' : claim.state,
       },
     } : undefined);
+    const { stories: _responseStories, diagrams: _responseDiagrams, mermaidDiagram: _responseMermaid, ...boundedResult } = result;
     const response = {
-      ...result,
+      ...(claim ? boundedResult : result),
       requestedPolicy: resolvePersistPostSavePolicyInput(parsedBody) ?? null,
       ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
     };
     if (claim) {
+      authoringMutationFailpoint('persist_before_receipt_completion');
       await completeAuthoringMutation({
         receiptId: claim.receiptId,
         requestHash: claim.requestHash,
@@ -5215,7 +5377,7 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
  *         application/json:
  *           schema:
  *             type: object
- *             required: [workspaceId, authoringPreflight, drafts]
+ *             required: [workspaceId, authoringPreflight, drafts, idempotencyKey]
  *             additionalProperties: false
  *             properties:
  *               workspaceId: { type: string }
@@ -5234,6 +5396,16 @@ router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (
     const workspaceId = String(input.workspaceId);
     const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) throw new NotFoundError('Workspace not found');
+    const parentClaim = await claimAuthoringMutation({
+      workspaceId,
+      operation: 'persist-batch',
+      idempotencyKey: input.idempotencyKey,
+      request: input,
+    });
+    if (parentClaim.completed && parentClaim.responseBody) {
+      res.status(parentClaim.responseStatus ?? 200).json(parentClaim.responseBody);
+      return;
+    }
     await assertAuthoritativePreflightReceipt(workspaceId, input.authoringPreflight);
     await assertAuthoringConfirmation(workspaceId, input.authoringPreflight);
 
@@ -5261,23 +5433,37 @@ router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (
           binding: input.authoringPreflight,
         });
 
-        const existing = resolveSpecStoragePaths(workspace.path, slug).existingFile;
-        if (existing) {
-          const content = JSON.parse(fs.readFileSync(existing, 'utf8')) as Record<string, unknown>;
-          const authoring = content.authoring as Record<string, unknown> | undefined;
-          const parent = authoring?.parentAuthoringPlan as Record<string, unknown> | undefined;
-          if (parent?.acceptedPreflightHash === input.authoringPreflight.acceptedPreflightHash
-            && authoring?.state === 'validated') {
-            results.push({ index, slug, status: 'reused', resumable: true });
-            continue;
-          }
+        const childIdempotencyKey = `batch:${parentClaim.receiptId}:${index}`;
+        const childClaim = await claimAuthoringMutation({
+          workspaceId,
+          operation: 'persist',
+          idempotencyKey: childIdempotencyKey,
+          request: draft,
+          specId: slug,
+          parentReceiptId: parentClaim.receiptId,
+        });
+        if (childClaim.completed && childClaim.responseBody) {
+          results.push({ index, slug, status: 'reused', resumable: true, ...childClaim.responseBody });
+          continue;
         }
-
         const persisted = await persistExplicitDraftInternal(req, draft, {
           sourceMode: 'skill-first-batch',
           invocationSurface: 'api.specs.persist.batch',
+          mutationReceipt: {
+            receiptId: childClaim.receiptId,
+            requestHash: childClaim.requestHash,
+            idempotencyKey: childIdempotencyKey,
+            state: childClaim.state === 'completed' ? 'wal_written' : childClaim.state,
+          },
         });
-        results.push({ index, slug: persisted.slug, status: 'persisted', lifecyclePlan: persisted.lifecyclePlan });
+        const childResponse = { slug: persisted.slug, lifecyclePlan: persisted.lifecyclePlan ?? null };
+        await completeAuthoringMutation({
+          receiptId: childClaim.receiptId,
+          requestHash: childClaim.requestHash,
+          responseStatus: 200,
+          responseBody: childResponse,
+        });
+        results.push({ index, status: 'persisted', ...childResponse });
       } catch (error) {
         results.push({
           index,
@@ -5302,24 +5488,57 @@ router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (
       callerSurface: input.authoringPreflight.callerSurface,
       model: input.authoringPreflight.model ?? null,
       persistenceOutcome: failed > 0 ? 'partial' : 'persisted',
-      idempotencyKey: input.idempotencyKey ?? null,
+      idempotencyKey: input.idempotencyKey,
       completed,
       failed,
     };
+    if (failed === 0 && parentClaim.state === 'claimed') {
+      await markAuthoringMutationStage({
+        receiptId: parentClaim.receiptId,
+        requestHash: parentClaim.requestHash,
+        from: 'claimed',
+        to: 'artifact_written',
+      });
+      parentClaim.state = 'artifact_written';
+    }
+    const failedIndexes = results.filter((result) => result.status === 'failed').map((result) => result.index);
     const walEvent = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
-       VALUES ('spec_authoring_batch_persisted', $1, 'authoring-persist', $2) RETURNING *`,
-      [workspaceId, JSON.stringify(payload)],
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload, ingest_key)
+       VALUES ('spec_authoring_batch_persisted', $1, 'authoring-persist', $2, $3)
+       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+       RETURNING *`,
+      [workspaceId, JSON.stringify(payload), failed === 0
+        ? `authoring-persist-batch-complete:v1:${parentClaim.receiptId}`
+        : `authoring-persist-batch-partial:v1:${parentClaim.receiptId}:${authoringMutationRequestHash(failedIndexes)}`],
     );
     if (walEvent) broadcastAll(walEvent);
-    res.status(failed > 0 ? 207 : 200).json({
+    if (failed === 0 && parentClaim.state !== 'wal_written') {
+      await markAuthoringMutationStage({
+        receiptId: parentClaim.receiptId,
+        requestHash: parentClaim.requestHash,
+        from: 'artifact_written',
+        to: 'wal_written',
+      });
+      parentClaim.state = 'wal_written';
+    }
+    const response = {
       status: failed > 0 ? 'partial' : 'completed',
       parentAuthoringPlanHash: input.authoringPreflight.planHash,
       acceptedPreflightHash: input.authoringPreflight.acceptedPreflightHash,
+      mutationReceipt: { receiptId: parentClaim.receiptId, requestHash: parentClaim.requestHash },
       summary: { completed, failed, total: results.length },
       results,
-      resume: failed > 0 ? { retryOnlyFailedIndexes: results.filter((result) => result.status === 'failed').map((result) => result.index) } : null,
-    });
+      resume: failed > 0 ? { retryOnlyFailedIndexes: failedIndexes } : null,
+    };
+    if (failed === 0) {
+      await completeAuthoringMutation({
+        receiptId: parentClaim.receiptId,
+        requestHash: parentClaim.requestHash,
+        responseStatus: 200,
+        responseBody: response,
+      });
+    }
+    res.status(failed > 0 ? 207 : 200).json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Persist explicit draft batch');
   }
@@ -5680,6 +5899,30 @@ async function processBatch(batch: BatchState): Promise<void> {
  *       400: { description: "Missing or empty briefs array, or brief missing required fields" }
  *       500: { description: "Internal server error" }
  */
+/**
+ * @swagger
+ * /api/specs/generate/batch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue multiple briefs through the legacy batch-generation alias
+ *     operationId: generateSpecBatchLegacy
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "The legacy alias preserves the same bounded local batch-authoring behavior as canonical forge/batch for existing CLI clients."
+ *     x-rorca-public-api: true
+ *     description: Compatibility alias for POST /api/specs/forge/batch with the same request and response contract.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [briefs]
+ *             properties:
+ *               briefs: { type: array, items: { type: object } }
+ *     responses:
+ *       201: { description: Batch queued successfully }
+ *       400: { description: Invalid briefs }
+ */
 router.post(['/forge/batch', '/generate/batch'], async (req: Request, res: Response) => {
   try {
     const { briefs } = req.body as { briefs?: BatchRequestItem[] };
@@ -5779,6 +6022,25 @@ router.post(['/forge/batch', '/generate/batch'], async (req: Request, res: Respo
  *                 items: { type: array, items: { type: object } }
  *       404: { description: "Batch not found or expired" }
  */
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Read batch status through the legacy generation alias
+ *     operationId: getGenerateBatchStatusLegacy
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "The legacy alias exposes the same read-only local batch status as canonical forge/batch for existing clients."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Batch status }
+ *       404: { description: Batch not found or expired }
+ */
 router.get(['/forge/batch/:batchId', '/generate/batch/:batchId'], (req: Request, res: Response) => {
   try {
     const batchId = req.params.batchId as string;
@@ -5839,6 +6101,25 @@ router.get(['/forge/batch/:batchId', '/generate/batch/:batchId'], (req: Request,
  *       200:
  *         description: SSE event stream (text/event-stream)
  *       404: { description: "Batch not found or expired" }
+ */
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}/stream:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Stream batch progress through the legacy generation alias
+ *     operationId: streamGenerateBatchProgressLegacy
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "The legacy alias exposes the same read-only local batch progress stream as canonical forge/batch for existing clients."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: SSE batch progress stream }
+ *       404: { description: Batch not found or expired }
  */
 router.get(['/forge/batch/:batchId/stream', '/generate/batch/:batchId/stream'], (req: Request, res: Response) => {
   const batchId = req.params.batchId as string;
@@ -9750,6 +10031,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
       res.status(claim.responseStatus ?? 200).json(claim.responseBody);
       return;
     }
+    if (claim) authoringMutationFailpoint('approve_after_claim');
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
@@ -9759,10 +10041,76 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
     const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
 
     if (!fs.existsSync(pendingFile)) {
+      if (claim && fs.existsSync(approvedFile)) {
+        const approvedContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8')) as Record<string, unknown>;
+        const approvedAuthoring = approvedContent.authoring as Record<string, unknown> | undefined;
+        const approvalMutationReceipt = approvedAuthoring?.approvalMutationReceipt as Record<string, unknown> | undefined;
+        const approvalResult = approvedAuthoring?.approvalResult as Record<string, unknown> | undefined;
+        if (approvalMutationReceipt?.receiptId === claim.receiptId
+          && approvalMutationReceipt?.requestHash === claim.requestHash
+          && approvalResult) {
+          if (approvalResult.materialHash !== authoringSpecMaterialHash(approvedContent)) {
+            throw new ConflictError('Approved authoring artifact material differs from its mutation receipt');
+          }
+          const replayProviderApproval = approvalResult.providerApproval as Record<string, unknown> | null | undefined;
+          if (replayProviderApproval) {
+            const durableProviderReceipt = await queryOne<{ id: string }>(
+              `SELECT id FROM provider_human_authority_receipts
+                WHERE id = $1 AND workspace_id = $2 AND purpose = 'spec_set_approval'
+                  AND target_hash = $3 AND actor_id = $4`,
+              [replayProviderApproval.receiptId, workspaceId, replayProviderApproval.targetHash, replayProviderApproval.actorId],
+            );
+            if (!durableProviderReceipt) throw new ConflictError('Approved artifact lacks its exact durable provider-human receipt');
+          }
+          if (claim.state === 'claimed' || claim.state === 'recoverable_failure') {
+            await markAuthoringMutationStage({
+              receiptId: claim.receiptId,
+              requestHash: claim.requestHash,
+              from: 'claimed',
+              to: 'artifact_written',
+            });
+            claim.state = 'artifact_written';
+          }
+          const replayWal = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload, ingest_key)
+             VALUES ('spec_approved', $1, $2, $3, $4, $5)
+             ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+             RETURNING *`,
+            [specId, workspaceId, String(approvalResult.actorId ?? 'provider-human'),
+              JSON.stringify(approvalResult.walPayload ?? { workspaceId }),
+              `authoring-approve:v1:${claim.receiptId}`],
+          );
+          if (replayWal) broadcastAll(replayWal);
+          if (claim.state !== 'wal_written') {
+            await markAuthoringMutationStage({
+              receiptId: claim.receiptId,
+              requestHash: claim.requestHash,
+              from: 'artifact_written',
+              to: 'wal_written',
+            });
+            claim.state = 'wal_written';
+          }
+          const response = {
+            ok: true,
+            approvedPath: approvedFile,
+            readiness: approvalResult.readiness,
+            ...(approvalResult.providerApproval ? { providerApproval: approvalResult.providerApproval } : {}),
+            mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
+          };
+          await completeAuthoringMutation({
+            receiptId: claim.receiptId,
+            requestHash: claim.requestHash,
+            responseStatus: 200,
+            responseBody: response,
+          });
+          res.json(response);
+          return;
+        }
+      }
       throw new NotFoundError(`Spec '${specId}' not found in pending`);
-      return;
     }
 
     const pendingContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8')) as Record<string, unknown>;
@@ -9791,9 +10139,18 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
     });
     assertSpecReadinessAllowsMutation(readiness, readinessOverrideRequested);
 
+    const authoringRecord = authoring && typeof authoring === 'object' && !Array.isArray(authoring)
+      ? authoring as Record<string, unknown>
+      : null;
+    const governedAuthoring = pendingContent.source === 'hermes-chatops-skill-first'
+      || Boolean(authoringRecord?.mutationReceipt);
+    if (governedAuthoring && !input.humanApproval) {
+      throw new ForbiddenError('Governed provider-authored specs require exact provider-human approval authority');
+    }
+
     let providerApproval: { receiptId: string; actorId: string; targetHash: string } | null = null;
     if (input.humanApproval) {
-      const authoringRecord = authoring as Record<string, unknown>;
+      if (!authoringRecord) throw new UnprocessableError('Provider-human approval requires governed authoring metadata', 'AUTHORING_PREFLIGHT_REQUIRED');
       const parentPlan = authoringRecord.parentAuthoringPlan as Record<string, unknown> | undefined;
       const mutationReceipt = authoringRecord.mutationReceipt as Record<string, unknown> | undefined;
       if (parentPlan?.acceptedPlanHash !== input.humanApproval.acceptedPlanHash
@@ -9825,6 +10182,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
         ).toLowerCase()),
       });
       providerApproval = { receiptId: receipt.receiptId, actorId: receipt.actorId, targetHash };
+      authoringMutationFailpoint('approve_after_provider_approval');
       authoringRecord.providerApproval = {
         schemaVersion: 'provider-human-event.v1',
         receiptId: receipt.receiptId,
@@ -9839,19 +10197,45 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
         acceptedPreflightHash: input.humanApproval.acceptedPreflightHash,
         persistReceiptId: input.humanApproval.persistReceiptId,
       };
-      fs.writeFileSync(pendingFile, `${JSON.stringify(pendingContent, null, 2)}\n`, 'utf8');
-      const fileDescriptor = fs.openSync(pendingFile, 'r');
-      try { fs.fsyncSync(fileDescriptor); } finally { fs.closeSync(fileDescriptor); }
     } else if (servicePrincipal) {
       throw new ForbiddenError('Service principals must relay exact provider-human approval authority');
     }
 
+    if (claim) {
+      const mutableAuthoring = authoringRecord ?? {};
+      pendingContent.authoring = mutableAuthoring;
+      mutableAuthoring.approvalMutationReceipt = {
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        idempotencyKey,
+      };
+      mutableAuthoring.approvalResult = {
+        readiness,
+        providerApproval,
+        materialHash: authoringSpecMaterialHash(pendingContent),
+        actorId: providerApproval?.actorId ?? req.user!.id,
+        walPayload: { workspaceId, providerApproval },
+      };
+    }
+    fs.writeFileSync(pendingFile, `${JSON.stringify(pendingContent, null, 2)}\n`, 'utf8');
+    const fileDescriptor = fs.openSync(pendingFile, 'r');
+    try { fs.fsyncSync(fileDescriptor); } finally { fs.closeSync(fileDescriptor); }
+
     // Create approved/ if needed and move the file
     fs.mkdirSync(approvedDir, { recursive: true });
-    const approvedFile = path.join(approvedDir, `${specId}.json`);
     fs.renameSync(pendingFile, approvedFile);
     const approvedDirFd = fs.openSync(approvedDir, fs.constants.O_RDONLY);
     try { fs.fsyncSync(approvedDirFd); } finally { fs.closeSync(approvedDirFd); }
+    authoringMutationFailpoint('approve_after_rename');
+    if (claim && claim.state !== 'artifact_written' && claim.state !== 'wal_written') {
+      await markAuthoringMutationStage({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        from: 'claimed',
+        to: 'artifact_written',
+      });
+      claim.state = 'artifact_written';
+    }
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(
@@ -9864,6 +10248,16 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
         claim ? `authoring-approve:v1:${claim.receiptId}` : null],
     );
     if (walEvent) broadcastAll(walEvent);
+    authoringMutationFailpoint('approve_after_wal');
+    if (claim && claim.state !== 'wal_written') {
+      await markAuthoringMutationStage({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        from: 'artifact_written',
+        to: 'wal_written',
+      });
+      claim.state = 'wal_written';
+    }
 
     const response = {
       ok: true,
@@ -9873,6 +10267,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
       ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
     };
     if (claim) {
+      authoringMutationFailpoint('approve_before_receipt_completion');
       await completeAuthoringMutation({
         receiptId: claim.receiptId,
         requestHash: claim.requestHash,

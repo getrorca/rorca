@@ -54,7 +54,7 @@ import budgetRouter from './routes/budget';
 import finopsSettingsRouter from './routes/finops-settings';
 import usersRouter from './routes/users';
 import authRouter from './routes/auth';
-import { authRequired, LOCAL_ADMIN, resolveAuthUserFromToken } from './lib/auth-utils';
+import { authRequired } from './lib/auth-utils';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
@@ -385,38 +385,10 @@ if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
 }
 
 // ─── Auth middleware (all routes below require authentication) ───
-// PR-009: Conditional auth — AUTH_REQUIRED=true enforces JWT on all protected routes.
-// Default (false/absent) = local single-user mode: inject local admin so req.user is
-// always defined (prevents crashes in routes that access user.id unconditionally).
-if (process.env.AUTH_REQUIRED === 'true') {
-  app.use(authRequired);
-} else {
-  // Local single-user mode: use JWT if provided and valid, otherwise inject local admin.
-  // Stale/invalid tokens are ignored (not rejected) so local dev doesn't break when
-  // the frontend has a leftover Supabase session from a previous run.
-  app.use(async (req: any, _res: any, next: any) => {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    if (token) {
-      try {
-        const resolvedUser = await resolveAuthUserFromToken(token);
-        if (resolvedUser) {
-          req.user = resolvedUser;
-          return next();
-        }
-        // Stale/invalid token in local mode — fall through to LOCAL_ADMIN
-        req.user = LOCAL_ADMIN;
-        return next();
-      } catch {
-        // Stale/invalid token in local mode — fall through to LOCAL_ADMIN
-        req.user = LOCAL_ADMIN;
-        return next();
-      }
-    }
-    req.user = LOCAL_ADMIN;
-    next();
-  });
-}
+// The same resolver runs in both shipped topologies. In local mode an omitted
+// credential becomes LOCAL_ADMIN, but a supplied Bearer/internal credential is
+// always validated and classified before that human fallback.
+app.use(authRequired);
 
 // ─── Rate limiting (after auth so req.user is available) ───
 app.use(rateLimiter);

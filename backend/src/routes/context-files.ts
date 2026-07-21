@@ -411,37 +411,6 @@ router.get('/:id/context-files/diff', requireWorkspaceMember(), async (req: Requ
   }
 });
 
-// ─── Create New Skill File ───────────────────────────────────────────────────
-
-/**
- * @swagger
- * /api/workspaces/{id}/context-files/create-skill:
- *   post:
- *     summary: Create a new skill file in .rorca/skills/ with a default template
- *     operationId: createSkillFile
- *     description: Creates a new skill markdown file in the workspace .rorca/skills/ directory using the specified or blank template.
- *     tags: [Context Files]
- *     parameters:
- *       - name: id
- *         in: path
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               filename:
- *                 type: string
- *                 description: Filename without extension (e.g. "my-skill")
- *     responses:
- *       201:
- *         description: Skill file created
- *       409:
- *         description: File already exists
- */
 // ─── Skill Templates ──────────────────────────────────────────────────────────
 
 const SKILL_TEMPLATES: Record<string, string> = {
@@ -786,6 +755,8 @@ function requireRole(...roles: string[]) {
  *     tags: [Context Files]
  *     summary: Create a new skill file in .rorca/skills/
  *     operationId: createSkillFile
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Creating executable workspace skill instructions is an operator-owned mutation requiring workspace administration."
  *     description: >
  *       Creates a new skill markdown file at .rorca/skills/{filename}.md in the
  *       workspace directory. Optionally uses a predefined template. Returns the

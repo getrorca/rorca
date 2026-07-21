@@ -6,6 +6,10 @@
 import type { PoolClient } from 'pg';
 import { queryOne, transaction } from '../db/index';
 import { retryHash, type RetryPreviewPacket } from './retry-governance';
+import {
+  prepareHostRunCloseout,
+  terminalizePreparedHostRunCloseout,
+} from './run-closeout-authority';
 
 export type RetryPreparationState =
   | 'unowned'
@@ -325,8 +329,7 @@ export async function requestGovernedRetryRunCancellation(input: {
     if (!run) throw new GovernedRetryStateConflictError('Governed retry run disappeared during cancellation');
     const bossJobId = dispatch?.boss_job_id ?? preview.boss_job_id ?? null;
     if (['cancelled', 'refused'].includes(preview.status)
-      || ['finalized', 'failed', 'manual_review_required', 'cancelled'].includes(dispatch?.state ?? '')
-      || !['queued', 'running', 'paused'].includes(run.status)) {
+      || ['finalized', 'failed', 'manual_review_required', 'cancelled'].includes(dispatch?.state ?? '')) {
       return { outcome: 'already_terminal', previewHash: preview.preview_hash, bossJobId };
     }
     if (dispatch && ['committed', 'integrating', 'integrated_validated'].includes(dispatch.state)) {
@@ -343,17 +346,18 @@ export async function requestGovernedRetryRunCancellation(input: {
       priorDispatchState: dispatch?.state ?? null,
       priorRunStatus: run.status,
     });
-    const running = dispatch && ['claimed', 'executing'].includes(dispatch.state);
-    if (running) {
+    const workerTerminalizationRequired = dispatch
+      && ['prepared', 'dispatched', 'claimed', 'executing'].includes(dispatch.state);
+    if (workerTerminalizationRequired) {
       const requested = await client.query(
         `UPDATE governed_retry_dispatches
          SET cancellation_requested_at = COALESCE(cancellation_requested_at, NOW()),
              cancellation_request = COALESCE(cancellation_request, $2::jsonb)
-         WHERE identity_hash = $1 AND state IN ('claimed', 'executing')
+         WHERE identity_hash = $1 AND state IN ('prepared', 'dispatched', 'claimed', 'executing')
          RETURNING identity_hash`,
         [dispatch.identity_hash, evidence],
       );
-      if (requested.rowCount !== 1) throw new GovernedRetryStateConflictError('Governed retry cancellation lost its claim race');
+      if (requested.rowCount !== 1) throw new GovernedRetryStateConflictError('Governed retry cancellation lost its pre-Git race');
       return { outcome: 'termination_required', previewHash: preview.preview_hash, bossJobId };
     }
     if (dispatch) {
@@ -387,6 +391,250 @@ export async function requestGovernedRetryRunCancellation(input: {
       [preview.preview_hash, evidence],
     );
     return { outcome: 'cancelled_before_claim', previewHash: preview.preview_hash, bossJobId };
+  });
+}
+
+export type GovernedRetryTerminalizationResult =
+  | { outcome: 'not_governed_retry' }
+  | { outcome: 'terminalized'; terminal: 'cancelled' | 'failed'; previewHash: string; dispatchIdentityHash: string; bossJobId: string | null }
+  | { outcome: 'already_terminal'; terminal: 'cancelled' | 'failed'; previewHash: string; dispatchIdentityHash: string; bossJobId: string | null }
+  | { outcome: 'manual_review_required'; previewHash: string; dispatchIdentityHash: string; bossJobId: string | null };
+
+/**
+ * Common application-owned terminalizer for every pre-Git governed retry exit.
+ * The caller must stop/verify the engine and PTY process trees first. Rorca
+ * state then converges under the canonical preview -> dispatch -> run lock
+ * order, including immutable host closeout and trusted terminal outbox. pg-boss
+ * is deliberately outside this transaction and may only be notified afterward.
+ */
+export async function terminalizeGovernedRetryRun(input: {
+  runId: number;
+  workspaceId: string;
+  requestedTerminal: 'auto' | 'cancelled' | 'failed';
+  reason: string;
+  source: string;
+}): Promise<GovernedRetryTerminalizationResult> {
+  const candidate = await queryOne<{
+    preview_hash: string;
+    identity_hash: string;
+    state: string;
+    cancellation_requested_at: string | null;
+  }>(
+    `SELECT preview.preview_hash, dispatch.identity_hash, dispatch.state,
+            dispatch.cancellation_requested_at
+       FROM pipeline_retry_previews preview
+       JOIN governed_retry_dispatches dispatch ON dispatch.preview_hash = preview.preview_hash
+      WHERE dispatch.retry_run_id = $1 AND preview.workspace_id = $2`,
+    [input.runId, input.workspaceId],
+  );
+  if (!candidate) return { outcome: 'not_governed_retry' };
+
+  const postGitStates = ['committed', 'integrating', 'integrated_validated', 'finalized', 'manual_review_required'];
+  if (postGitStates.includes(candidate.state)) {
+    return transaction(async (client) => {
+      const preview = (await client.query<{ preview_hash: string }>(
+        `SELECT preview_hash FROM pipeline_retry_previews
+          WHERE preview_hash = $1 AND workspace_id = $2 FOR UPDATE`,
+        [candidate.preview_hash, input.workspaceId],
+      )).rows[0];
+      const dispatch = (await client.query<{ identity_hash: string; state: string; boss_job_id: string | null }>(
+        `SELECT identity_hash, state, boss_job_id::text
+           FROM governed_retry_dispatches WHERE identity_hash = $1 FOR UPDATE`,
+        [candidate.identity_hash],
+      )).rows[0];
+      await client.query('SELECT id FROM pipeline_runs WHERE id = $1 AND workspace_id = $2 FOR UPDATE', [input.runId, input.workspaceId]);
+      if (!preview || !dispatch) throw new GovernedRetryStateConflictError('Governed retry authority disappeared during post-Git reconciliation');
+      if (dispatch.state !== 'finalized' && dispatch.state !== 'manual_review_required') {
+        const evidence = JSON.stringify({
+          schemaVersion: 'rorca.governed-retry-reconciliation.v1',
+          reason: input.reason.slice(0, 512),
+          source: input.source.slice(0, 128),
+          retryRunId: input.runId,
+          dispatchIdentityHash: dispatch.identity_hash,
+          postGitAmbiguity: true,
+        });
+        await client.query(
+          `UPDATE governed_retry_story_attempts
+              SET state = 'manual_review_required', failure_evidence = $2::jsonb
+            WHERE dispatch_identity_hash = $1 AND state IN ('committed','integrating')`,
+          [dispatch.identity_hash, evidence],
+        );
+        await client.query(
+          `UPDATE governed_retry_dispatches
+              SET state = 'manual_review_required', failure_evidence = $2::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL
+            WHERE identity_hash = $1 AND state IN ('committed','integrating','integrated_validated')`,
+          [dispatch.identity_hash, evidence],
+        );
+        await client.query(
+          `UPDATE pipeline_runs
+              SET status = 'partial_failure', finished_at = COALESCE(finished_at, NOW()),
+                  summary = 'governed_retry_post_git_manual_review_required',
+                  lifecycle_status = 'blocked', lifecycle_updated_at = NOW(),
+                  lifecycle_diagnostics = lifecycle_diagnostics || $2::jsonb,
+                  pid = NULL, worker_id = NULL, queue_position = NULL
+            WHERE id = $1`,
+          [input.runId, JSON.stringify({ owner: 'governed_retry_terminalizer', reason: input.reason })],
+        );
+      }
+      return {
+        outcome: 'manual_review_required' as const,
+        previewHash: preview.preview_hash,
+        dispatchIdentityHash: dispatch.identity_hash,
+        bossJobId: dispatch.boss_job_id,
+      };
+    });
+  }
+
+  const terminal = input.requestedTerminal === 'failed'
+    ? 'failed'
+    : input.requestedTerminal === 'cancelled' || candidate.cancellation_requested_at
+      ? 'cancelled'
+      : 'failed';
+  if (input.requestedTerminal === 'cancelled' && !candidate.cancellation_requested_at) {
+    throw new GovernedRetryStateConflictError('Governed retry cancellation has no durable winning request');
+  }
+  const preparedCloseout = await prepareHostRunCloseout({
+    runId: input.runId,
+    status: terminal,
+    governedRetryDispatchIdentity: candidate.identity_hash,
+  });
+
+  return transaction(async (client) => {
+    const preview = (await client.query<{
+      preview_hash: string; status: string; preparation_state: RetryPreparationState;
+    }>(
+      `SELECT preview_hash, status, preparation_state
+         FROM pipeline_retry_previews
+        WHERE preview_hash = $1 AND workspace_id = $2 FOR UPDATE`,
+      [candidate.preview_hash, input.workspaceId],
+    )).rows[0];
+    const dispatch = (await client.query<{
+      identity_hash: string; state: string; boss_job_id: string | null;
+      cancellation_requested_at: string | null;
+    }>(
+      `SELECT identity_hash, state, boss_job_id::text, cancellation_requested_at
+         FROM governed_retry_dispatches WHERE identity_hash = $1 FOR UPDATE`,
+      [candidate.identity_hash],
+    )).rows[0];
+    const run = (await client.query<{ status: string; host_closeout_event_id: number | null }>(
+      `SELECT status, host_closeout_event_id FROM pipeline_runs
+        WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+      [input.runId, input.workspaceId],
+    )).rows[0];
+    if (!preview || !dispatch || !run) {
+      throw new GovernedRetryStateConflictError('Governed retry authority disappeared during terminalization');
+    }
+    if (postGitStates.includes(dispatch.state)) {
+      throw new GovernedRetryStateConflictError('Governed retry crossed post-Git authority during terminalization');
+    }
+    const actualTerminal = input.requestedTerminal === 'failed'
+      ? 'failed'
+      : input.requestedTerminal === 'cancelled' || dispatch.cancellation_requested_at
+        ? 'cancelled'
+        : 'failed';
+    if (actualTerminal !== terminal) {
+      throw new GovernedRetryStateConflictError('Governed retry cancellation won while terminal authority was being prepared');
+    }
+    const matchingTerminal = terminal === 'cancelled'
+      ? preview.status === 'cancelled' && dispatch.state === 'cancelled' && run.status === 'cancelled'
+      : preview.status === 'refused' && dispatch.state === 'failed' && run.status === 'failed';
+    if (matchingTerminal && run.host_closeout_event_id != null) {
+      return {
+        outcome: 'already_terminal' as const,
+        terminal,
+        previewHash: preview.preview_hash,
+        dispatchIdentityHash: dispatch.identity_hash,
+        bossJobId: dispatch.boss_job_id,
+      };
+    }
+    if (['cancelled', 'failed', 'manual_review_required', 'finalized'].includes(dispatch.state)) {
+      throw new GovernedRetryStateConflictError(`Governed retry has contradictory terminal state ${dispatch.state}`);
+    }
+
+    const evidence = JSON.stringify({
+      schemaVersion: terminal === 'cancelled'
+        ? 'rorca.governed-retry-cancellation.v1'
+        : 'rorca.governed-retry-reconciliation.v1',
+      reason: input.reason.slice(0, 512),
+      source: input.source.slice(0, 128),
+      previewHash: preview.preview_hash,
+      dispatchIdentityHash: dispatch.identity_hash,
+      retryRunId: input.runId,
+      priorPreviewStatus: preview.status,
+      priorPreparationState: preview.preparation_state,
+      priorDispatchState: dispatch.state,
+      priorRunStatus: run.status,
+    });
+    await client.query(
+      `UPDATE governed_retry_story_attempts
+          SET state = $2, cancellation_evidence = CASE WHEN $2 = 'cancelled' THEN $3::jsonb ELSE cancellation_evidence END,
+              cancelled_at = CASE WHEN $2 = 'cancelled' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+              failure_evidence = CASE WHEN $2 = 'failed' THEN $3::jsonb ELSE failure_evidence END
+        WHERE dispatch_identity_hash = $1 AND state IN ('pending','executing')`,
+      [dispatch.identity_hash, terminal === 'cancelled' ? 'cancelled' : 'failed', evidence],
+    );
+    await client.query(
+      `UPDATE governed_retry_dispatches
+          SET state = $2, cancellation_evidence = CASE WHEN $2 = 'cancelled' THEN $3::jsonb ELSE cancellation_evidence END,
+              cancelled_at = CASE WHEN $2 = 'cancelled' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+              failure_evidence = CASE WHEN $2 = 'failed' THEN $3::jsonb ELSE failure_evidence END,
+              lease_owner = NULL, lease_expires_at = NULL, launch_pid = NULL, launch_token_hash = NULL
+        WHERE identity_hash = $1 AND state IN ('prepared','dispatched','claimed','executing')`,
+      [dispatch.identity_hash, terminal === 'cancelled' ? 'cancelled' : 'failed', evidence],
+    );
+    await client.query(
+      `UPDATE pipeline_retry_previews
+          SET status = $2, preparation_state = $3,
+              cancelled_at = CASE WHEN $2 = 'cancelled' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+              cancellation_evidence = CASE WHEN $2 = 'cancelled' THEN $4::jsonb ELSE cancellation_evidence END,
+              refusal_reason = CASE WHEN $2 = 'refused' THEN $5 ELSE refusal_reason END,
+              preparation_owner = NULL, preparation_lease_expires_at = NULL
+        WHERE preview_hash = $1 AND status IN ('approved','dispatched')`,
+      [preview.preview_hash, terminal === 'cancelled' ? 'cancelled' : 'refused', terminal === 'cancelled' ? 'cancelled' : 'refused', evidence, input.reason.slice(0, 512)],
+    );
+    await client.query(
+      `UPDATE run_pty_sessions
+          SET status = 'killed', exit_signal = COALESCE(exit_signal, 'SIGTERM'),
+              exited_at = COALESCE(exited_at, NOW()), updated_at = NOW()
+        WHERE run_id = $1 AND status IN ('starting','active')`,
+      [input.runId],
+    );
+    await client.query(
+      `UPDATE pipeline_runs
+          SET summary = $2,
+              lifecycle_diagnostics = lifecycle_diagnostics || $3::jsonb
+        WHERE id = $1`,
+      [input.runId, input.reason.slice(0, 512), JSON.stringify({ owner: 'governed_retry_terminalizer', source: input.source })],
+    );
+    const closeout = await terminalizePreparedHostRunCloseout(client, preparedCloseout);
+    await client.query(
+      `INSERT INTO wal_events (event_type, workspace_id, run_id, payload, ingest_key)
+       VALUES ($1, $2, $3, $4::jsonb, $5)
+       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING`,
+      [
+        terminal === 'cancelled' ? 'run_cancelled' : 'governed_retry_failed',
+        input.workspaceId,
+        input.runId,
+        JSON.stringify({
+          schemaVersion: 'rorca.governed-retry-terminalization.v1',
+          terminal,
+          reason: input.reason,
+          previewHash: preview.preview_hash,
+          dispatchIdentityHash: dispatch.identity_hash,
+          hostCloseoutEventId: closeout.id,
+          hostCloseoutIdentityHash: closeout.identityHash,
+        }),
+        `governed-retry-terminal:${dispatch.identity_hash}:${terminal}`,
+      ],
+    );
+    return {
+      outcome: 'terminalized' as const,
+      terminal,
+      previewHash: preview.preview_hash,
+      dispatchIdentityHash: dispatch.identity_hash,
+      bossJobId: dispatch.boss_job_id,
+    };
   });
 }
 

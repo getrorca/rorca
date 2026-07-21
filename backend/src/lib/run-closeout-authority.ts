@@ -145,6 +145,53 @@ export async function insertPreparedHostRunCloseout(
   return reference;
 }
 
+export async function terminalizePreparedHostRunCloseout(
+  client: PoolClient,
+  prepared: PreparedHostRunCloseout,
+): Promise<TrustedWalReference> {
+  if (prepared.status === 'done') {
+    throw new ConflictError('Successful release closeout cannot use failure terminalization');
+  }
+  const closeout = await insertPreparedHostRunCloseout(client, prepared);
+  const publicStatus = prepared.status === 'cancelled'
+    ? 'cancelled'
+    : prepared.status === 'partial_failure' ? 'partial_failure' : 'failed';
+  const lifecycleStatus = prepared.status === 'cancelled' ? 'cancelled' : 'failed';
+  const terminalized = await client.query(
+    `UPDATE pipeline_runs
+     SET status = $2, lifecycle_status = $3, lifecycle_updated_at = NOW(),
+         finished_at = COALESCE(finished_at, NOW()), pid = NULL, worker_id = NULL,
+         queue_position = NULL
+     WHERE id = $1 AND workspace_id = $4
+     RETURNING id`,
+    [prepared.runId, publicStatus, lifecycleStatus, prepared.workspaceId],
+  );
+  if (terminalized.rowCount !== 1) throw new ConflictError('Host closeout could not terminalize canonical run');
+
+  const terminal = await insertTrustedWalEvent(client, {
+    eventType: 'run_finished',
+    workspaceId: prepared.workspaceId,
+    runId: prepared.runId,
+    specId: prepared.specId,
+    source: 'worker',
+    payload: {
+      run_id: prepared.runId,
+      status: prepared.status,
+      host_closeout_event_id: closeout.id,
+      host_closeout_identity_hash: closeout.identityHash,
+      semantic_closeout: true,
+    },
+  });
+  const ready = await client.query(
+    `UPDATE wal_events SET outbox_ready_at = COALESCE(outbox_ready_at, NOW())
+     WHERE id = ANY($1::int[]) AND trust_provenance = 'host'
+     RETURNING id`,
+    [[closeout.id, terminal.row.id]],
+  );
+  if (ready.rowCount !== 2) throw new ConflictError('Failure closeout and terminal outbox were not released atomically');
+  return closeout;
+}
+
 export async function persistHostRunCloseout(input: {
   runId: number;
   status: HostRunCloseoutStatus;
@@ -153,44 +200,21 @@ export async function persistHostRunCloseout(input: {
 }): Promise<TrustedWalReference> {
   const prepared = await prepareHostRunCloseout(input);
   return transaction(async (client) => {
+    if (input.terminalizeRun && prepared.status !== 'done') {
+      return terminalizePreparedHostRunCloseout(client, prepared);
+    }
     const closeout = await insertPreparedHostRunCloseout(client, prepared);
     if (input.terminalizeRun) {
-      const publicStatus = input.status === 'cancelled'
-        ? 'cancelled'
-        : input.status === 'partial_failure' ? 'partial_failure' : input.status === 'done' ? 'done' : 'failed';
-      const lifecycleStatus = input.status === 'cancelled' ? 'cancelled' : input.status === 'done' ? 'finished' : 'failed';
       const terminalized = await client.query(
         `UPDATE pipeline_runs
-         SET status = $2, lifecycle_status = $3,
-             finished_at = COALESCE(finished_at, NOW())
-         WHERE id = $1 AND workspace_id = $4
+         SET status = 'done', lifecycle_status = 'finished', lifecycle_updated_at = NOW(),
+             finished_at = COALESCE(finished_at, NOW()), pid = NULL, worker_id = NULL,
+             queue_position = NULL
+         WHERE id = $1 AND workspace_id = $2
          RETURNING id`,
-        [prepared.runId, publicStatus, lifecycleStatus, prepared.workspaceId],
+        [prepared.runId, prepared.workspaceId],
       );
       if (terminalized.rowCount !== 1) throw new ConflictError('Host closeout could not terminalize canonical run');
-    }
-    if (prepared.status !== 'done') {
-      const terminal = await insertTrustedWalEvent(client, {
-        eventType: 'run_finished',
-        workspaceId: prepared.workspaceId,
-        runId: prepared.runId,
-        specId: prepared.specId,
-        source: 'worker',
-        payload: {
-          run_id: prepared.runId,
-          status: prepared.status,
-          host_closeout_event_id: closeout.id,
-          host_closeout_identity_hash: closeout.identityHash,
-          semantic_closeout: true,
-        },
-      });
-      const ready = await client.query(
-        `UPDATE wal_events SET outbox_ready_at = COALESCE(outbox_ready_at, NOW())
-         WHERE id = ANY($1::int[]) AND trust_provenance = 'host'
-         RETURNING id`,
-        [[closeout.id, terminal.row.id]],
-      );
-      if (ready.rowCount !== 2) throw new ConflictError('Failure closeout and terminal outbox were not released atomically');
     }
     return closeout;
   });

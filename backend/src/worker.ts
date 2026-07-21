@@ -35,7 +35,6 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { spawn, execFileSync, execSync, type ChildProcess } from 'child_process';
-import { z } from 'zod';
 import { advanceClaimedWaveDispatch, auditWaveProductionDecision, claimWaveProductionDispatch, revalidatePersistedWavePolicy } from './lib/wave-production-governance';
 import PgBoss from 'pg-boss';
 import {
@@ -53,7 +52,7 @@ import {
 // so it must bypass per-request JWT RLS scoping.
 import { initDb, query, queryOne, execute, transaction, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
-import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
+import { registerSchedulesWithBoss, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
 import { registerHydrationWorker } from './lib/hydration-worker';
 import { registerContextCaptureHandlers } from './lib/context-distillation';
@@ -99,6 +98,7 @@ import {
   publishGovernedRetryDispatch,
   readGovernedRetryPublication,
   refusePublishedGovernedRetryBeforeClaim,
+  terminalizeGovernedRetryRun,
   waitForGovernedRetryPublication,
 } from './lib/governed-retry-publication';
 import { tryGenerateLearnCloseoutCandidates } from './lib/learn-closeout';
@@ -408,7 +408,30 @@ async function synthesizeInterruptedStoryFailure(params: {
     const payload = typeof active?.payload === 'string'
       ? JSON.parse(active.payload) as Record<string, unknown>
       : active?.payload ?? {};
-    const storyId = active?.story_id ?? (typeof payload.story_id === 'string' ? payload.story_id : null);
+    let storyId = active?.story_id ?? (typeof payload.story_id === 'string' ? payload.story_id : null);
+    if (!storyId) {
+      // A child can fail after the launch gate but before emitting story_started.
+      // Bind that transport failure to the first unresolved frozen story rather
+      // than leaving the run unable to obtain exact host closeout authority.
+      const unresolved = await queryOne<{ story_id: string }>(
+        `SELECT candidate.story_id
+           FROM pipeline_runs run
+           CROSS JOIN LATERAL unnest(run.expected_story_ids) WITH ORDINALITY
+             AS candidate(story_id, ordinal)
+          WHERE run.id = $1
+            AND NOT (candidate.story_id = ANY(COALESCE(run.excluded_story_ids, '{}'::text[])))
+            AND NOT EXISTS (
+              SELECT 1 FROM story_results result
+               WHERE result.run_id = run.id AND result.story_id = candidate.story_id
+                 AND result.result_provenance = 'host'
+                 AND result.status IN ('pass', 'fail', 'timeout', 'skip')
+            )
+          ORDER BY candidate.ordinal
+          LIMIT 1`,
+        [params.runId],
+      );
+      storyId = unresolved?.story_id ?? null;
+    }
     if (!storyId) return;
 
     const existing = await queryOne<{ id: number; status: string; result_provenance: string }>(
@@ -474,7 +497,7 @@ async function assertCurrentWaveRunDispatch(input: {
   return currentWavePolicy;
 }
 
-async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
+export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   // Process all jobs concurrently — batchSize controls how many are fetched per poll,
   // but each spawns an independent child process that should run in parallel.
   const outcomes = await Promise.allSettled(jobs.map(async (job) => {
@@ -559,27 +582,16 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         workspacePath,
         worktreePath,
         expectedBranchName: payload.branchName ?? null,
+        expectedDirtyPaths: ['.gitignore', '.rorca/run-specs', '.rorca/runtime'],
       });
       if (!worktreeValidation.ok) {
         logger.error(
           { runId, workspacePath, worktreePath, worktreeValidation },
           '[worker] refusing to execute run in stale or invalid reusable worktree',
         );
-        await execute(
-          `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), summary = $2 WHERE id = $1`,
-          [runId, `worktree_guard:${worktreeValidation.reason}`],
-        );
-        await transitionRunLifecycle(runId, 'failed', {
-          owner: 'worker', process: 'worktree_guard_rejected', reason: worktreeValidation.reason,
-        });
-        await emitWalEvent('run_finished', workspaceId, {
-          run_id: runId,
-          status: 'failed',
-          reason: 'stale_worktree',
-          worktree_path: worktreePath,
-          validation: worktreeValidation,
-        });
-        return;
+        // Throw into the shared fresh-run preflight terminalizer. Returning after
+        // a direct status update would skip trusted closeout/outbox authority.
+        throw new Error(`worktree_guard:${worktreeValidation.reason}`);
       }
     }
 
@@ -1150,6 +1162,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     const runId = parsed.data.runId;
     const reasonText = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+    logger.error({ runId, error: outcome.reason, reasonText }, '[worker] Fresh pipeline run rejected before spawn');
     const reason = /sandbox|isolation|bubblewrap/i.test(reasonText)
       ? 'autonomous_sandbox_preflight_failed'
       : /egress|broker/i.test(reasonText)
@@ -1190,7 +1203,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 // ── Job handler: pipeline:retry ───────────────────────────────────────────
 
 
-async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
+export async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   const outcomes = await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
     logger.info({ jobId, data: redactExecutionJobPayload(job.data) }, '[worker] pipeline:retry received');
@@ -1412,7 +1425,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         workspacePath,
         worktreePath,
         expectedBranchName: branchName,
-        expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+        expectedDirtyPaths: [
+          '.gitignore', '.rorca/run-specs', '.rorca/runtime',
+          '.rorca/progress', '.rorca/run-state.json', 'progress.txt',
+        ],
       });
       if (!worktreeValidation.ok) {
         logger.error(
@@ -1596,10 +1612,24 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       `UPDATE governed_retry_dispatches
        SET state = 'executing'
        WHERE identity_hash = $1 AND fencing_token = $2 AND lease_owner = $3
-         AND state IN ('claimed', 'executing')`,
+         AND state IN ('claimed', 'executing') AND cancellation_requested_at IS NULL`,
       [dispatchIdentity.identityHash, fencingToken, leaseOwner],
     );
-    if (executing.rowCount !== 1) throw new Error('[governed-retry] lease fence was lost before execution');
+    if (executing.rowCount !== 1) {
+      await synthesizeAllMissingFrozenStoryFailures(runId, workspaceId, 'cancelled_before_engine_launch');
+      const terminalized = await terminalizeGovernedRetryRun({
+        runId,
+        workspaceId,
+        requestedTerminal: 'auto',
+        reason: 'cancelled_before_engine_launch',
+        source: 'worker_retry_prelaunch',
+      });
+      if (terminalized.outcome === 'terminalized' || terminalized.outcome === 'already_terminal') {
+        await advanceQueue(workspaceId);
+        return;
+      }
+      throw new Error(`[governed-retry] lease fence was lost before execution (${terminalized.outcome})`);
+    }
     await execute(
       `UPDATE governed_retry_story_attempts SET state = 'executing'
        WHERE dispatch_identity_hash = $1 AND state = 'pending'`,
@@ -2090,9 +2120,11 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           code,
           null,
         );
-        await transitionRunLifecycle(runId, wasCancelled ? 'cancelled' : 'validating', {
-          owner: 'worker_retry', process: 'exited', exitCode: code, semantic: 'engine_exit_observed',
-        });
+        if (!wasCancelled) {
+          await transitionRunLifecycle(runId, 'validating', {
+            owner: 'worker_retry', process: 'exited', exitCode: code, semantic: 'engine_exit_observed',
+          });
+        }
 
         await synthesizeInterruptedStoryFailure({
           runId,
@@ -2102,6 +2134,26 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           exitSignal: null,
           source: 'worker_retry',
         });
+
+        if (wasCancelled) {
+          await synthesizeAllMissingFrozenStoryFailures(runId, workspaceId, 'operator_cancelled_running_retry');
+          const terminalized = await terminalizeGovernedRetryRun({
+            runId,
+            workspaceId,
+            requestedTerminal: 'cancelled',
+            reason: 'operator_cancelled_running_retry',
+            source: 'worker_retry_child_close',
+          });
+          if (terminalized.outcome !== 'terminalized' && terminalized.outcome !== 'already_terminal') {
+            reject(new Error(`[governed-retry] cancellation closeout did not converge (${terminalized.outcome})`));
+            return;
+          }
+          await advanceQueue(workspaceId).catch(qErr =>
+            logger.error({ err: qErr, runId, workspaceId }, '[worker] advanceQueue failed after retry cancellation'));
+          try { fs.unlinkSync(expectedRetrySpecPath); } catch { /* best-effort */ }
+          resolve();
+          return;
+        }
 
         const governedFinalizedStoryIds: string[] = [];
         try {
@@ -2337,37 +2389,20 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         let terminalUpdateError: unknown;
         try {
-          const failureEvidence = JSON.stringify({ reason: 'spawn_failed', error: (err as Error).message, fencingToken });
-          await execute(
-            `UPDATE governed_retry_story_attempts SET state = 'failed', failure_evidence = $2::jsonb
-             WHERE dispatch_identity_hash = $1 AND state = 'executing'`,
-            [dispatchIdentity.identityHash, failureEvidence],
-          );
-          await execute(
-            `UPDATE governed_retry_dispatches
-             SET state = 'failed', failure_evidence = $4::jsonb,
-                 lease_owner = NULL, lease_expires_at = NULL
-             WHERE identity_hash = $1 AND state = 'executing'
-               AND fencing_token = $2 AND lease_owner = $3`,
-            [dispatchIdentity.identityHash, fencingToken, leaseOwner, failureEvidence],
-          );
-          await execute(
-            `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
-            [runId],
-          );
-          await transitionRunLifecycle(runId, 'failed', {
-            owner: 'worker_retry', process: 'spawn_failed', error: (err as Error).message,
+          await synthesizeAllMissingFrozenStoryFailures(runId, workspaceId, 'retry_engine_spawn_failed');
+          const terminalized = await terminalizeGovernedRetryRun({
+            runId,
+            workspaceId,
+            requestedTerminal: 'failed',
+            reason: `retry_engine_spawn_failed:${(err as Error).message}`,
+            source: 'worker_retry_spawn_error',
           });
-          await emitWalEvent('run_finished', workspaceId, {
-            run_id: runId,
-            original_run_id: originalRunId,
-            status: 'failed',
-            error: (err as Error).message,
-            source: 'worker_retry',
-          });
+          if (terminalized.outcome !== 'terminalized' && terminalized.outcome !== 'already_terminal') {
+            throw new Error(`[governed-retry] spawn failure did not converge (${terminalized.outcome})`);
+          }
         } catch (dbErr) {
           terminalUpdateError = dbErr;
-          logger.error({ dbErr, runId }, '[worker] Failed to update retry run status after spawn error');
+          logger.error({ dbErr, runId }, '[worker] Failed to terminalize retry after spawn error');
         }
 
         if (terminalUpdateError) {
@@ -2393,47 +2428,12 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 }
 
 // ── Job handler: pipeline:cron ────────────────────────────────────────────
-// Handles two variants:
-//
-//  a) Meta-cron (queue: pipeline:cron, data: {}):
-//     Fires every minute via pg-boss native schedule. Calls
-//     checkAndFireDueSchedules() which checks all enabled pipeline_schedules
-//     against their cron expressions and triggers due ones. pg-boss distributed
-//     lock ensures exactly one fire per minute across all worker instances.
-//
-//  b) Per-schedule (queue: pipeline:cron:<id>, data: { scheduleId, specId, ... }):
-//     Fires directly for a specific schedule. Delegates to triggerScheduledRun().
-//     Per-schedule distributed lock ensures exactly one trigger per schedule interval.
-
-const PipelineCronJobData = z.object({
-  scheduleId: z.number().int().positive(),
-  specId: z.string().min(1),
-  workspaceId: z.string().min(1),
-  agent: z.string().nullable().optional(),
-  model: z.string().nullable().optional(),
-});
-
+// One meta-cron tick checks application-owned schedule occurrence claims. There
+// are deliberately no dynamic per-schedule pg-boss queues or firing paths.
 async function handlePipelineCron(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   for (const job of jobs) {
-    logger.info({ jobId: job.id, name: job.name, data: job.data }, '[worker] pipeline:cron received');
-
-    // Detect variant: if data has scheduleId it's a per-schedule direct fire
-    const parsed = PipelineCronJobData.safeParse(job.data);
-    if (parsed.success) {
-      // Per-schedule direct fire
-      const { scheduleId, specId, workspaceId, agent, model } = parsed.data;
-      await triggerScheduledRun({
-        id: scheduleId,
-        spec_id: specId,
-        workspace_id: workspaceId,
-        agent: agent ?? null,
-        model: model ?? null,
-      });
-    } else {
-      // Meta-cron: check all enabled schedules for due entries
-      logger.info({ jobId: job.id }, '[worker] pipeline:cron meta-tick — checking all due schedules');
-      await checkAndFireDueSchedules();
-    }
+    logger.info({ jobId: job.id, name: job.name }, '[worker] pipeline:cron meta-tick');
+    await checkAndFireDueSchedules();
   }
 }
 
@@ -2464,15 +2464,24 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
        WHERE pr.id = $1`,
       [runId],
     );
-    if (!run || !['running', 'paused'].includes(run.status)) {
-      logger.info({ jobId: job.id, runId, status: run?.status }, '[worker] pipeline:cancel — run already terminal or missing');
+    if (!run) {
+      logger.info({ jobId: job.id, runId }, '[worker] pipeline:cancel — run missing');
+      continue;
+    }
+    const governedState = await queryOne<{ state: string }>(
+      'SELECT state FROM governed_retry_dispatches WHERE retry_run_id = $1',
+      [runId],
+    );
+    const governedNeedsTerminalization = governedState
+      && !['finalized', 'failed', 'manual_review_required', 'cancelled'].includes(governedState.state);
+    if (!['queued', 'running', 'paused'].includes(run.status) && !governedNeedsTerminalization) {
+      logger.info({ jobId: job.id, runId, status: run.status }, '[worker] pipeline:cancel — run already terminal');
       continue;
     }
 
     const child = activeProcesses.get(runId);
-    const ptyPid = run.pty_status === 'active' ? run.pty_child_pid : null;
+    const ptyPid = run.pty_status && ['starting', 'active'].includes(run.pty_status) ? run.pty_child_pid : null;
     cancellingRuns.add(runId);
-    await transitionRunLifecycle(runId, 'cancelled', { owner: 'worker_cancel', process: 'termination_requested' });
 
     if (child) {
       // Signal both the engine and independently tracked forkpty process. The
@@ -2504,8 +2513,34 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
     if (isProcessAlive(ptyPid)) signalPtyProcessGroup(ptyPid, 'SIGKILL');
 
     cancellingRuns.delete(runId);
+    const governedRetry = await queryOne<{ identity_hash: string }>(
+      'SELECT identity_hash FROM governed_retry_dispatches WHERE retry_run_id = $1',
+      [runId],
+    );
+    if (governedRetry) {
+      await synthesizeAllMissingFrozenStoryFailures(runId, run.workspace_id, 'worker_cancel_crash_recovery');
+      const governedTerminal = await terminalizeGovernedRetryRun({
+        runId,
+        workspaceId: run.workspace_id,
+        requestedTerminal: 'auto',
+        reason: 'worker_cancel_crash_recovery',
+        source: 'worker_cancel_untracked',
+      });
+      if (governedTerminal.outcome === 'terminalized'
+        || governedTerminal.outcome === 'already_terminal'
+        || governedTerminal.outcome === 'manual_review_required') {
+        if (governedTerminal.bossJobId) {
+          await getBoss().cancel('pipeline:retry', governedTerminal.bossJobId).catch((error) =>
+            logger.warn({ error, runId, bossJobId: governedTerminal.bossJobId }, '[worker] governed retry terminalized but pg-boss cancellation notification was deferred'));
+        }
+        await advanceQueue(run.workspace_id);
+        continue;
+      }
+      throw new Error('Governed retry cancellation lost its application authority');
+    }
+
     await execute(
-      `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW()
+      `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), pid = NULL, worker_id = NULL
        WHERE id = $1 AND status IN ('running', 'paused')`,
       [runId],
     );
@@ -2513,9 +2548,10 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
       `UPDATE run_pty_sessions
        SET status = 'killed', exit_signal = COALESCE(exit_signal, 'SIGTERM'),
            exited_at = COALESCE(exited_at, NOW()), updated_at = NOW()
-       WHERE run_id = $1 AND status = 'active'`,
+       WHERE run_id = $1 AND status IN ('starting', 'active')`,
       [runId],
     );
+    await transitionRunLifecycle(runId, 'cancelled', { owner: 'worker_cancel', process: 'crash_recovery_terminalized' });
     await emitWalEvent('run_cancelled', run.workspace_id, {
       run_id: runId,
       cancelledAt: new Date().toISOString(),
@@ -2626,18 +2662,36 @@ async function reconcileStaleGovernedRetry(runId: number): Promise<'not-governed
   const row = await queryOne<{
     workspace_id: string; status: string; pid: number | null;
     dispatch_state: string; dispatch_identity: string; packet: RetryPreviewPacket;
-    preview_hash: string;
+    preview_hash: string; pty_child_pid: number | null; pty_status: string | null;
   }>(
     `SELECT run.workspace_id, run.status, run.pid, dispatch.state AS dispatch_state,
-            dispatch.identity_hash AS dispatch_identity, preview.packet, preview.preview_hash
+            dispatch.identity_hash AS dispatch_identity, preview.packet, preview.preview_hash,
+            pty.child_pid AS pty_child_pid, pty.status AS pty_status
      FROM governed_retry_dispatches dispatch
      JOIN pipeline_retry_previews preview ON preview.preview_hash = dispatch.preview_hash
      JOIN pipeline_runs run ON run.id = dispatch.retry_run_id
+     LEFT JOIN run_pty_sessions pty ON pty.run_id = run.id
      WHERE dispatch.retry_run_id = $1`,
     [runId],
   );
   if (!row) return 'not-governed';
-  if (isProcessAlive(row.pid)) return 'active';
+  if (activeProcesses.has(runId)) return 'active';
+
+  // A stale governed delivery has no live worker owner. Terminate both durable
+  // process trees before application terminalization; a surviving PID must not
+  // keep an orphaned retry outside the governed ledger indefinitely.
+  const engineAlive = isProcessAlive(row.pid);
+  const ptyPid = row.pty_status && ['starting', 'active'].includes(row.pty_status) ? row.pty_child_pid : null;
+  const ptyAlive = isProcessAlive(ptyPid);
+  if (engineAlive) {
+    try { process.kill(row.pid!, 'SIGTERM'); } catch { /* raced exit */ }
+  }
+  if (ptyAlive) signalPtyProcessGroup(ptyPid, 'SIGTERM');
+  if (engineAlive || ptyAlive) await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+  if (isProcessAlive(row.pid)) {
+    try { process.kill(row.pid!, 'SIGKILL'); } catch { /* raced exit */ }
+  }
+  if (isProcessAlive(ptyPid)) signalPtyProcessGroup(ptyPid, 'SIGKILL');
 
   await recoverIntegratedValidatedStoryFinalizations({ runId });
   await recoverUnreleasedIntegratedPasses({ runId });
@@ -2666,59 +2720,30 @@ async function reconcileStaleGovernedRetry(runId: number): Promise<'not-governed
     return 'reconciled';
   }
   if (['committed', 'integrating', 'integrated_validated'].includes(row.dispatch_state)) {
-    const evidence = JSON.stringify({
-      schemaVersion: 'rorca.governed-retry-reconciliation.v1',
+    const terminalized = await terminalizeGovernedRetryRun({
+      runId,
+      workspaceId: row.workspace_id,
+      requestedTerminal: 'auto',
       reason: 'stale_post_git_authority_incomplete',
-      duplicateAgentStarted: false,
+      source: 'worker_stale_reconciliation',
     });
-    await execute(
-      `UPDATE governed_retry_dispatches
-       SET state = CASE WHEN state = 'integrating' THEN 'manual_review_required' ELSE state END,
-           failure_evidence = CASE WHEN state = 'integrating' THEN $2::jsonb ELSE failure_evidence END,
-           lease_owner = NULL, lease_expires_at = NULL
-       WHERE retry_run_id = $1`,
-      [runId, evidence],
-    );
-    await execute(
-      `UPDATE pipeline_runs SET summary = 'stale_post_git_manual_review_required'
-       WHERE id = $1 AND status NOT IN ('done','failed','cancelled')`,
-      [runId],
-    );
+    if (terminalized.outcome !== 'manual_review_required') {
+      throw new Error(`[governed-retry] post-Git reconciliation did not preserve manual review (${terminalized.outcome})`);
+    }
     return 'reconciled';
   }
 
   await synthesizeAllMissingFrozenStoryFailures(runId, row.workspace_id, 'worker_crash_recovery');
-  const evidence = JSON.stringify({
-    schemaVersion: 'rorca.governed-retry-reconciliation.v1',
-    reason: 'stale_pre_git_worker_exit',
-    duplicateAgentStarted: false,
-  });
-  await transaction(async (client) => {
-    await client.query(
-      `UPDATE governed_retry_story_attempts SET state = 'failed', failure_evidence = $2::jsonb
-       WHERE dispatch_identity_hash = $1 AND state IN ('pending','executing','committed','integrating')`,
-      [row.dispatch_identity, evidence],
-    );
-    await client.query(
-      `UPDATE governed_retry_dispatches
-       SET state = 'failed', failure_evidence = $2::jsonb, lease_owner = NULL, lease_expires_at = NULL
-       WHERE identity_hash = $1 AND state IN ('prepared','dispatched','claimed','executing')`,
-      [row.dispatch_identity, evidence],
-    );
-    await client.query(
-      `UPDATE pipeline_retry_previews
-       SET status = 'refused', preparation_state = 'refused',
-           refusal_reason = 'stale_pre_git_worker_exit'
-       WHERE preview_hash = $1 AND status IN ('approved','dispatched')`,
-      [row.preview_hash],
-    );
-  });
-  await persistHostRunCloseout({
+  const terminalized = await terminalizeGovernedRetryRun({
     runId,
-    status: 'failed',
-    governedRetryDispatchIdentity: row.dispatch_identity,
-    terminalizeRun: true,
+    workspaceId: row.workspace_id,
+    requestedTerminal: 'auto',
+    reason: 'stale_pre_git_worker_exit',
+    source: 'worker_stale_reconciliation',
   });
+  if (terminalized.outcome !== 'terminalized' && terminalized.outcome !== 'already_terminal') {
+    throw new Error(`[governed-retry] stale pre-Git terminalization did not converge (${terminalized.outcome})`);
+  }
   return 'reconciled';
 }
 
@@ -2891,6 +2916,10 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
          ON rps.run_id = pr.id
        WHERE pr.status = 'running'
          AND NOT EXISTS (SELECT 1 FROM pipeline_run_release_intents ri WHERE ri.run_id = pr.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM governed_retry_dispatches retry
+           WHERE retry.retry_run_id = pr.id
+         )
          AND (pr.worker_id IS NULL OR (pr.worker_id != $1 AND wh.worker_id IS NULL))`,
       [WORKER_ID],
     );
@@ -3116,39 +3145,43 @@ async function reconcileState(): Promise<void> {
   }
 
   for (const run of stuckRuns) {
-    // Final safety: if the PID is still alive, the engine is running — skip.
-    if (run.pid) {
-      try {
-        process.kill(run.pid, 0); // signal 0 = liveness check, doesn't kill
-        logger.info(
-          { runId: run.id, pid: run.pid },
-          '[worker] reconcileState — Case A: pg-boss job gone but PID still alive, skipping',
-        );
-        continue;
-      } catch {
-        // PID not found — process is dead, proceed with reconciliation
-      }
-    }
-
-    logger.warn(
-      { runId: run.id, currentStatus: 'running', lastHeartbeat: run.last_heartbeat },
-      '[worker] reconcileState — Case A: no live pgboss job, no recent heartbeat, PID dead — reconciling pass boundaries before failure',
-    );
-
     try {
+      // Governed retries delegate process termination and terminal state to the
+      // application terminalizer before the generic live-PID shortcut.
       const governed = await reconcileStaleGovernedRetry(run.id);
       if (governed === 'active') continue;
-      if (governed === 'not-governed') {
-        const passRecovery = await recoverUnreleasedIntegratedPasses({ runId: run.id });
-        if (passRecoveryBlocksCompletion(passRecovery)) {
-          logger.error({ runId: run.id, passRecovery }, '[worker] startup pass refinalization remains blocked');
-        }
-        await synthesizeAllMissingFrozenStoryFailures(run.id, String(run.workspace_id), 'state_reconciliation');
-        await persistHostRunCloseout({ runId: run.id, status: 'failed', terminalizeRun: true });
-        await transitionRunLifecycle(run.id, 'failed', {
-          owner: 'worker_reconciliation', process: 'heartbeat_stale_or_pid_dead',
-        });
+      if (governed === 'reconciled') {
+        await advanceQueue(String(run.workspace_id));
+        continue;
       }
+
+      // Final safety for ordinary runs: a live engine still owns its closeout.
+      if (run.pid) {
+        try {
+          process.kill(run.pid, 0); // signal 0 = liveness check, doesn't kill
+          logger.info(
+            { runId: run.id, pid: run.pid },
+            '[worker] reconcileState — Case A: pg-boss job gone but PID still alive, skipping',
+          );
+          continue;
+        } catch {
+          // PID not found — process is dead, proceed with generic reconciliation
+        }
+      }
+
+      logger.warn(
+        { runId: run.id, currentStatus: 'running', lastHeartbeat: run.last_heartbeat },
+        '[worker] reconcileState — Case A: no live pgboss job, no recent heartbeat, PID dead — reconciling pass boundaries before failure',
+      );
+      const passRecovery = await recoverUnreleasedIntegratedPasses({ runId: run.id });
+      if (passRecoveryBlocksCompletion(passRecovery)) {
+        logger.error({ runId: run.id, passRecovery }, '[worker] startup pass refinalization remains blocked');
+      }
+      await synthesizeAllMissingFrozenStoryFailures(run.id, String(run.workspace_id), 'state_reconciliation');
+      await persistHostRunCloseout({ runId: run.id, status: 'failed', terminalizeRun: true });
+      await transitionRunLifecycle(run.id, 'failed', {
+        owner: 'worker_reconciliation', process: 'heartbeat_stale_or_pid_dead',
+      });
 
       logger.warn(
         { runId: run.id, workspaceId: run.workspace_id },

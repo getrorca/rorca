@@ -45,15 +45,13 @@ import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
 
 jest.setTimeout(90_000);
 
 // ── DB URL ─────────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
 
@@ -286,6 +284,7 @@ async function waitForWorkerReady(logs: string[], maxMs = 15_000): Promise<boole
 
 beforeAll(async () => {
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // Run migrations to ensure schema is current
   const { runPgMigrations } = await import('../db/pg-index');
