@@ -649,6 +649,40 @@ export async function completeRunPtySession(
   });
 }
 
+/**
+ * Worker-owned crash fallback: close any generation left active after the
+ * execution-engine process has already terminated. Normal engine cleanup wins
+ * first; this only repairs rows that could otherwise masquerade as live PTYs.
+ */
+export async function finalizeActiveRunPtyAfterEngineExit(
+  runId: number,
+  status: 'exited' | 'killed' | 'failed' | 'timed_out',
+  exitCode: number | null,
+  exitSignal: string | null,
+): Promise<void> {
+  await transaction(async (client) => {
+    const closed = await client.query(
+      `UPDATE pty_generations
+       SET is_active = FALSE, status = $2, exit_code = COALESCE(exit_code, $3),
+           exit_signal = COALESCE(exit_signal, $4), exited_at = COALESCE(exited_at, NOW()),
+           updated_at = NOW()
+       WHERE run_id = $1 AND is_active = TRUE
+       RETURNING id`,
+      [runId, status, exitCode, exitSignal],
+    );
+    if (closed.rows.length > 0) {
+      await client.query(
+        `UPDATE run_pty_sessions
+         SET status = $2, exit_code = COALESCE(exit_code, $3),
+             exit_signal = COALESCE(exit_signal, $4), exited_at = COALESCE(exited_at, NOW()),
+             updated_at = NOW()
+         WHERE run_id = $1 AND status = 'active'`,
+        [runId, status, exitCode, exitSignal],
+      );
+    }
+  });
+}
+
 export async function requestRunPtyResize(runId: number, generationToken: string, cols: number, rows: number): Promise<PtyGenerationIdentity> {
   return transaction(async (client) => {
     // Token admission and the control write share the same transaction. The

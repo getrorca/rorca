@@ -744,26 +744,35 @@ describe('PTY resize forwarding and SSE attach/disconnect', () => {
     expect(remaining?.count).toBe('0');
   });
 
-  test('rejects oversized dimensions and invalid UTF-8 input before mutation', async () => {
+  test('clamps unsafe dimensions while rejecting oversized dimensions and invalid UTF-8', async () => {
     const runId = await seedRun('running', 'pty');
-    await db.execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, cols, rows, status)
-       VALUES ($1, 'ws-pty-attach', $2, 'claude', 80, 24, 'active')`,
-      [runId, wsDir],
-    );
-
-    const generationToken = crypto.randomUUID();
+    const generation = await startRunPtySession({
+      runId, workspaceId: 'ws-pty-attach', storyId: 'US-001', attempt: 1,
+      cwd: wsDir, agentType: 'claude', cols: 80, rows: 24, childPid: null,
+    });
+    const generationToken = generation.generationToken;
     const resize = await request(app)
       .post(`/api/pipeline/runs/${runId}/pty/resize`)
       .set('Authorization', `Bearer ${authToken}`)
       .send({ generationToken, cols: 501, rows: 24 });
+    const undersizedResize = await request(app)
+      .post(`/api/pipeline/runs/${runId}/pty/resize`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ generationToken, cols: 11, rows: 5 });
     const input = await request(app)
       .post(`/api/pipeline/runs/${runId}/input`)
       .set('Authorization', `Bearer ${authToken}`)
       .send({ generationToken, dataBase64: Buffer.from([0xc3, 0x28]).toString('base64') });
 
     expect(resize.status).toBe(400);
+    expect(undersizedResize.status).toBe(200);
     expect(input.status).toBe(400);
+    const claimed = await claimLatestRunPtyResize({
+      runId,
+      generationId: generation.generationId,
+      generationToken,
+    });
+    expect(claimed).toEqual(expect.objectContaining({ cols: 80, rows: 12 }));
     const controls = await db.queryOne<{ inputs: string; resizes: string }>(
       `SELECT
          (SELECT COUNT(*)::text FROM run_pty_input_requests WHERE run_id = $1) AS inputs,
