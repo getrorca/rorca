@@ -148,18 +148,35 @@ export function resumeRun(
   });
 }
 
+export interface RetryPreviewPacket {
+  previewHash: string;
+  requiresApproval: boolean;
+  forceSequential: boolean;
+  scope: Record<'requested' | 'requiredDependency' | 'copiedPassed' | 'skipped' | 'executable' | 'remaining' | 'excluded', Array<{ storyId: string; reasonCode: string }>>;
+  [key: string]: unknown;
+}
+
+export interface RetryPreviewIdentity {
+  schemaVersion: 'retry-preview-identity.v1';
+  previewHash: string;
+  originalRunId: number;
+  expiresAt: string;
+  signature: string;
+}
+
 export interface RetryPreviewResponse {
   ok: true;
-  preview: {
-    previewHash: string;
-    requiresApproval: boolean;
-    forceSequential: boolean;
-    scope: Record<'requested' | 'requiredDependency' | 'copiedPassed' | 'skipped' | 'executable' | 'remaining' | 'excluded', Array<{ storyId: string; reasonCode: string }>>;
-  };
+  preview: RetryPreviewPacket;
+  previewIdentity: RetryPreviewIdentity;
   worktreePreflight: { classification: string; ok: boolean; detail?: string } | null;
 }
 
-export function previewRetry(runId: number, body?: { storyIds?: string[]; forceSequential?: boolean }, opts?: ApiOptions): Promise<RetryPreviewResponse> {
+export interface RetryRunRequest {
+  storyIds?: string[];
+  forceSequential?: boolean;
+}
+
+export function previewRetry(runId: number, body?: RetryRunRequest, opts?: ApiOptions): Promise<RetryPreviewResponse> {
   return apiFetch(`/api/pipeline/runs/${runId}/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -170,7 +187,7 @@ export function previewRetry(runId: number, body?: { storyIds?: string[]; forceS
 
 export async function retryRun(
   runId: number,
-  body?: { storyIds?: string[]; workspaceId?: string; forceSequential?: boolean },
+  body?: RetryRunRequest,
   opts?: ApiOptions,
 ): Promise<{ ok: true; runId: number; originalRunId: number; retriedStories: Array<{ storyId: string; attempt: number }>; copiedStories: string[] }> {
   const preview = await previewRetry(runId, body, opts);
@@ -178,7 +195,14 @@ export async function retryRun(
   return apiFetch(`/api/pipeline/runs/${runId}/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...(body ?? {}), safeMode: true, forceSequential: preview.preview.forceSequential, previewHash: preview.preview.previewHash }),
+    body: JSON.stringify({
+      ...(body?.storyIds ? { storyIds: body.storyIds } : {}),
+      safeMode: true,
+      forceSequential: preview.preview.forceSequential,
+      previewHash: preview.preview.previewHash,
+      approvedPreview: preview.preview,
+      previewIdentity: preview.previewIdentity,
+    }),
     signal: opts?.signal,
   });
 }

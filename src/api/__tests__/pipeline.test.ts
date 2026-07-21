@@ -12,12 +12,55 @@ vi.mock('../../lib/apiFetch', () => ({
 }));
 
 import { apiFetch } from '../../lib/apiFetch';
-import { triggerPipeline } from '../pipeline';
+import { retryRun, triggerPipeline } from '../pipeline';
 
 const mockApiFetch = vi.mocked(apiFetch);
 
 beforeEach(() => {
   mockApiFetch.mockReset();
+});
+
+describe('retryRun', () => {
+  it('dispatches the exact governed preview without leaking frontend-only workspace scope', async () => {
+    const preview = {
+      previewHash: `sha256:${'a'.repeat(64)}`,
+      requiresApproval: false,
+      forceSequential: true,
+      scope: {
+        requested: [{ storyId: 'SPK-005', reasonCode: 'requested' }],
+        requiredDependency: [], copiedPassed: [], skipped: [],
+        executable: [{ storyId: 'SPK-005', reasonCode: 'failed' }],
+        remaining: [], excluded: [],
+      },
+      options: { terminalMode: 'pty' },
+    };
+    const previewIdentity = {
+      schemaVersion: 'retry-preview-identity.v1' as const,
+      previewHash: preview.previewHash,
+      originalRunId: 533,
+      expiresAt: '2026-07-20T23:00:00.000Z',
+      signature: `sha256:${'b'.repeat(64)}`,
+    };
+    mockApiFetch
+      .mockResolvedValueOnce({ ok: true, preview, previewIdentity, worktreePreflight: null })
+      .mockResolvedValueOnce({ ok: true, runId: 534, originalRunId: 533, retriedStories: [], copiedStories: [] });
+
+    await retryRun(533, { storyIds: ['SPK-005'] });
+
+    expect(mockApiFetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((mockApiFetch.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      storyIds: ['SPK-005'],
+      safeMode: true,
+    });
+    expect(JSON.parse((mockApiFetch.mock.calls[1][1] as RequestInit).body as string)).toEqual({
+      storyIds: ['SPK-005'],
+      safeMode: true,
+      forceSequential: true,
+      previewHash: preview.previewHash,
+      approvedPreview: preview,
+      previewIdentity,
+    });
+  });
 });
 
 describe('triggerPipeline', () => {

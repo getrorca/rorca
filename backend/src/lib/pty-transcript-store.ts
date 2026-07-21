@@ -395,96 +395,248 @@ export type PtyTranscriptAppender = (
   input: AppendPtyTranscriptEventInput,
 ) => Promise<PtyTranscriptEvent>;
 
-/** Serialized retrying recorder used by the push-only node-pty callback. */
+const DEFAULT_TRANSCRIPT_RECORDER_MAX_PENDING_EVENTS = 512;
+const DEFAULT_TRANSCRIPT_RECORDER_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+const TRANSCRIPT_MODEL_BATCH_BYTES = Math.min(MAX_TRANSCRIPT_PAYLOAD_BYTES, 16 * 1024);
+const TRANSCRIPT_MODEL_FLUSH_MS = 100;
+
+type StableTranscriptInput = AppendPtyTranscriptEventInput & { eventId: string };
+
+export interface PtyTranscriptRecorderLimits {
+  maxPendingEvents: number;
+  maxPendingBytes: number;
+}
+
+function estimateTranscriptInputBytes(input: AppendPtyTranscriptEventInput): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(input), 'utf8');
+  } catch {
+    return MAX_TRANSCRIPT_PAYLOAD_BYTES;
+  }
+}
+
+/**
+ * Serialized retrying recorder used by the push-only node-pty callback.
+ *
+ * Terminal output is coalesced into bounded text blocks and the persistence
+ * queue is explicitly capped. A full-screen TUI can emit millions of short
+ * repaint lines; chaining one Promise closure per line retains all of those
+ * strings and can exhaust V8 before PostgreSQL catches up. Overflow is made
+ * explicit as a durable `gap` event rather than growing memory without bound.
+ */
 export class PtyTranscriptRecorder {
   private readonly normalizer = new PtyTranscriptNormalizer();
-  private pending: Promise<void> = Promise.resolve();
+  private readonly queue: StableTranscriptInput[] = [];
+  private readonly maxPendingEvents: number;
+  private readonly maxPendingBytes: number;
+  private pendingBytes = 0;
+  private pumping: Promise<void> | null = null;
   private terminalFailure: TranscriptPersistenceError | null = null;
+  private droppedEvents = 0;
+  private droppedBytes = 0;
+  private modelParts: string[] = [];
+  private modelBytes = 0;
+  private modelFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly generation: PtyGenerationRef,
     private readonly appender: PtyTranscriptAppender = appendPtyTranscriptEvent,
-  ) {}
+    limits: Partial<PtyTranscriptRecorderLimits> = {},
+  ) {
+    this.maxPendingEvents = Math.max(1, limits.maxPendingEvents ?? DEFAULT_TRANSCRIPT_RECORDER_MAX_PENDING_EVENTS);
+    this.maxPendingBytes = Math.max(MAX_TRANSCRIPT_PAYLOAD_BYTES, limits.maxPendingBytes ?? DEFAULT_TRANSCRIPT_RECORDER_MAX_PENDING_BYTES);
+  }
 
   recordModelBytes(bytes: Buffer): void {
-    for (const text of this.normalizer.accept(bytes)) {
-      this.enqueue({
-        eventType: 'model_message',
-        eventSource: 'terminal_normalized',
-        role: 'assistant',
-        payload: { text },
-        presentation: true,
-        authoritative: false,
-      });
-    }
+    this.bufferModelLines(this.normalizer.accept(bytes));
   }
 
   recordHostNotice(code: string, message: string, details: unknown = null): void {
+    this.flushModelText();
     this.enqueue({ eventType: 'host_notice', eventSource: 'host', role: 'host', payload: { code, message, details } });
   }
 
   recordError(code: string, message: string, details: unknown = null): void {
+    this.flushModelText();
     this.enqueue({ eventType: 'error', eventSource: 'host', role: 'host', payload: { code, message, details } });
   }
 
   recordStructured(input: AppendPtyTranscriptEventInput): void {
+    this.flushModelText();
     this.enqueue(input);
   }
 
   async drain(): Promise<void> {
-    for (const text of this.normalizer.finish()) {
-      this.enqueue({
-        eventType: 'model_message',
-        eventSource: 'terminal_normalized',
-        role: 'assistant',
-        payload: { text },
-        presentation: true,
-        authoritative: false,
-      });
+    if (this.modelFlushTimer) {
+      clearTimeout(this.modelFlushTimer);
+      this.modelFlushTimer = null;
     }
-    await this.pending;
+    this.bufferModelLines(this.normalizer.finish());
+    this.flushModelText();
+    while (this.queue.length > 0 || this.droppedEvents > 0 || this.pumping) {
+      this.schedulePump();
+      if (this.pumping) await this.pumping;
+      if (this.terminalFailure) break;
+    }
     if (this.terminalFailure) throw this.terminalFailure;
   }
 
-  private enqueue(input: AppendPtyTranscriptEventInput): void {
-    const stableInput = { ...input, eventId: input.eventId ?? randomUUID() };
-    this.pending = this.pending.then(async () => {
-      let lastError: unknown;
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        try {
-          await this.appender(this.generation, stableInput);
-          if (attempt > 1) {
-            try {
-              await this.appender(this.generation, {
-                eventId: randomUUID(),
-                eventType: 'error',
-                eventSource: 'recovery',
-                role: 'host',
-                payload: {
-                  code: 'transcript_write_retried',
-                  message: 'A transcript event required persistence retry before succeeding.',
-                  retryAttempts: attempt,
-                  recoveredEventId: stableInput.eventId,
-                },
-              });
-            } catch (retryNoticeError) {
-              logger.warn({ error: retryNoticeError, eventId: stableInput.eventId }, '[pty-transcript] retry notice could not be appended');
-            }
-          }
-          return;
-        } catch (error) {
-          lastError = error;
-          if (attempt < 3) await new Promise<void>((resolve) => setTimeout(resolve, attempt * 25));
-        }
+  private bufferModelLines(lines: string[]): void {
+    for (const text of lines) {
+      const textBytes = Buffer.byteLength(text, 'utf8');
+      const separatorBytes = this.modelParts.length > 0 ? 1 : 0;
+      if (this.modelParts.length > 0 && this.modelBytes + separatorBytes + textBytes > TRANSCRIPT_MODEL_BATCH_BYTES) {
+        this.flushModelText();
       }
-      this.terminalFailure = lastError instanceof TranscriptPersistenceError
-        ? lastError
-        : new TranscriptPersistenceError(undefined, {
-            runId: this.generation.runId,
-            generationId: this.generation.generationId,
-            eventId: stableInput.eventId,
-          });
-      logger.error({ error: lastError, runId: this.generation.runId, generationId: this.generation.generationId }, '[pty-transcript] retries exhausted');
+      this.modelParts.push(text);
+      this.modelBytes += (this.modelParts.length > 1 ? 1 : 0) + textBytes;
+      if (this.modelBytes >= TRANSCRIPT_MODEL_BATCH_BYTES) this.flushModelText();
+    }
+    if (this.modelParts.length > 0 && !this.modelFlushTimer) {
+      this.modelFlushTimer = setTimeout(() => {
+        this.modelFlushTimer = null;
+        this.flushModelText();
+      }, TRANSCRIPT_MODEL_FLUSH_MS);
+      this.modelFlushTimer.unref?.();
+    }
+  }
+
+  private flushModelText(): void {
+    if (this.modelParts.length === 0) return;
+    if (this.modelFlushTimer) {
+      clearTimeout(this.modelFlushTimer);
+      this.modelFlushTimer = null;
+    }
+    const text = this.modelParts.join('\n');
+    this.modelParts = [];
+    this.modelBytes = 0;
+    this.enqueue({
+      eventType: 'model_message',
+      eventSource: 'terminal_normalized',
+      role: 'assistant',
+      payload: { text },
+      presentation: true,
+      authoritative: false,
     });
+  }
+
+  private enqueue(input: AppendPtyTranscriptEventInput): void {
+    if (this.terminalFailure) return;
+    const stableInput: StableTranscriptInput = { ...input, eventId: input.eventId ?? randomUUID() };
+    const bytes = estimateTranscriptInputBytes(stableInput);
+
+    // Preserve host/structured evidence by evicting queued presentation blocks
+    // first. If even that cannot fit, account for the rejected event in the gap.
+    while ((this.queue.length >= this.maxPendingEvents || this.pendingBytes + bytes > this.maxPendingBytes)
+      && stableInput.presentation !== true) {
+      const presentationIndex = this.queue.findIndex(candidate => candidate.presentation === true);
+      if (presentationIndex < 0) break;
+      const [evicted] = this.queue.splice(presentationIndex, 1);
+      const evictedBytes = estimateTranscriptInputBytes(evicted);
+      this.pendingBytes = Math.max(0, this.pendingBytes - evictedBytes);
+      this.noteDropped(evictedBytes);
+    }
+
+    if (this.queue.length >= this.maxPendingEvents || this.pendingBytes + bytes > this.maxPendingBytes) {
+      this.noteDropped(bytes);
+      this.schedulePump();
+      return;
+    }
+    this.queue.push(stableInput);
+    this.pendingBytes += bytes;
+    this.schedulePump();
+  }
+
+  private noteDropped(bytes: number): void {
+    this.droppedEvents += 1;
+    this.droppedBytes += Math.max(0, bytes);
+  }
+
+  private schedulePump(): void {
+    if (this.pumping || this.terminalFailure) return;
+    this.pumping = this.pump()
+      .catch((error: unknown) => {
+        this.terminalFailure = error instanceof TranscriptPersistenceError
+          ? error
+          : new TranscriptPersistenceError(undefined, {
+              runId: this.generation.runId,
+              generationId: this.generation.generationId,
+            });
+      })
+      .finally(() => { this.pumping = null; });
+  }
+
+  private async pump(): Promise<void> {
+    while (!this.terminalFailure && (this.queue.length > 0 || this.droppedEvents > 0)) {
+      // Persist already-admitted events before the gap that follows them. This
+      // keeps the normalized chronology truthful even when later repaint blocks
+      // overflow while an earlier database write is in flight.
+      if (this.queue.length > 0) {
+        const next = this.queue.shift()!;
+        this.pendingBytes = Math.max(0, this.pendingBytes - estimateTranscriptInputBytes(next));
+        if (!await this.appendWithRetry(next)) return;
+        continue;
+      }
+      const droppedEvents = this.droppedEvents;
+      const droppedBytes = this.droppedBytes;
+      this.droppedEvents = 0;
+      this.droppedBytes = 0;
+      if (!await this.appendWithRetry({
+        eventId: randomUUID(),
+        eventType: 'gap',
+        eventSource: 'recovery',
+        role: 'host',
+        payload: {
+          code: 'transcript_recorder_backpressure',
+          message: 'Normalized terminal events were omitted to keep transcript persistence memory bounded.',
+          droppedEvents,
+          droppedBytes,
+        },
+        presentation: true,
+        authoritative: false,
+      })) return;
+    }
+  }
+
+  private async appendWithRetry(stableInput: StableTranscriptInput): Promise<boolean> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await this.appender(this.generation, stableInput);
+        if (attempt > 1) {
+          try {
+            await this.appender(this.generation, {
+              eventId: randomUUID(),
+              eventType: 'error',
+              eventSource: 'recovery',
+              role: 'host',
+              payload: {
+                code: 'transcript_write_retried',
+                message: 'A transcript event required persistence retry before succeeding.',
+                retryAttempts: attempt,
+                recoveredEventId: stableInput.eventId,
+              },
+            });
+          } catch (retryNoticeError) {
+            logger.warn({ error: retryNoticeError, eventId: stableInput.eventId }, '[pty-transcript] retry notice could not be appended');
+          }
+        }
+        return true;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) await new Promise<void>((resolve) => setTimeout(resolve, attempt * 25));
+      }
+    }
+    this.terminalFailure = lastError instanceof TranscriptPersistenceError
+      ? lastError
+      : new TranscriptPersistenceError(undefined, {
+          runId: this.generation.runId,
+          generationId: this.generation.generationId,
+          eventId: stableInput.eventId,
+        });
+    this.queue.length = 0;
+    this.pendingBytes = 0;
+    logger.error({ error: lastError, runId: this.generation.runId, generationId: this.generation.generationId }, '[pty-transcript] retries exhausted');
+    return false;
   }
 }

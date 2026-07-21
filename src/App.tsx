@@ -409,7 +409,6 @@ function AppLayout() {
   const [showShortcutsOverlay, setShowShortcutsOverlay] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
-  const [queueCount, setQueueCount] = useState(0);
   const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
   useBreakpoint();
   // Derive activeRunId from URL path /runs/:runId
@@ -422,20 +421,6 @@ function AppLayout() {
 
   // CIE-009: Toast on external context file changes
   useFileWatchSSE();
-
-  // Poll queue count every 10s for badge
-  useEffect(() => {
-    if (!workspaceId) { setQueueCount(0); return; }
-    const fetchCount = () => {
-      const url = `/api/run-queue/status?workspaceId=${workspaceId}`;
-      apiFetch(url)
-        .then((data) => setQueueCount((data as Record<string, number>).queueLength))
-        .catch(() => setQueueCount(0));
-    };
-    fetchCount();
-    const interval = setInterval(fetchCount, 10_000);
-    return () => clearInterval(interval);
-  }, [workspaceId]);
 
   // Poll pending specs count every 10s for Review Queue badge
   useEffect(() => {
