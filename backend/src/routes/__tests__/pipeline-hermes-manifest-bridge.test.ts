@@ -242,6 +242,7 @@ let tmpDir = '';
 let wsDir = '';
 let nextRunId = 9000;
 let taskManifestReservations: JsonRecord[] = [];
+let taskManifestLineages: JsonRecord[] = [];
 let pipelineRunInserts: JsonRecord[] = [];
 
 function clone<T>(value: T): T {
@@ -315,6 +316,16 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
   if (text.includes('SELECT COUNT(*) as count FROM pipeline_runs')) {
     return Promise.resolve({ rows: [{ count: '0' }] });
   }
+  if (text.includes('INSERT INTO task_manifest_run_lineage')) {
+    const row = {
+      run_id: params[0], workspace_id: params[1], root_run_id: params[2], parent_run_id: params[3],
+      lineage_depth: params[4], schema_version: params[5], manifest_id: params[6],
+      source_idempotency_key: params[7], manifest_hash: params[8], synthetic_spec_hash: params[9],
+      manifest_path: params[10], synthetic_spec_path: params[11], lineage_identity_hash: params[12],
+    };
+    taskManifestLineages.push(row);
+    return Promise.resolve({ rows: [row] });
+  }
   if (text.includes('INSERT INTO pipeline_runs') && text.includes('RETURNING id')) {
     const row = {
       id: nextRunId++,
@@ -342,6 +353,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   nextRunId = 9000;
   taskManifestReservations = [];
+  taskManifestLineages = [];
   pipelineRunInserts = [];
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hermes-bridge-'));
   wsDir = path.join(tmpDir, 'workspace');
@@ -381,6 +393,16 @@ beforeEach(() => {
   });
   mockQueryOne.mockImplementation(async (sql: unknown, params: unknown[] = []) => {
     const text = sqlText(sql);
+    if (text.includes('FROM task_manifest_run_lineage lineage')) {
+      const lineage = taskManifestLineages.find((row) => row.run_id === params[0]);
+      const run = taskManifestReservations.find((row) => row.id === params[0]);
+      return lineage && run ? {
+        ...lineage,
+        task_manifest_id: run.manifestId,
+        task_manifest_artifacts: run.artifacts,
+        trigger_options: run.triggerOptions,
+      } : undefined;
+    }
     if (text.includes('SELECT * FROM workspaces WHERE id = $1')) {
       return { id: params[0] ?? 'ws-hermes', label: 'Hermes Test Workspace', path: wsDir, domain: 'test' };
     }

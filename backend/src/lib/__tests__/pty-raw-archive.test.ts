@@ -41,7 +41,9 @@ function tempWorkspace(): string {
 }
 
 let serviceRoot = '';
-function archiveRoot(): string { return path.join(serviceRoot, 'workspace-test'); }
+function archiveRoot(workspaceId = 'ws-1'): string {
+  return path.join(serviceRoot, createHash('sha256').update(workspaceId).digest('hex'));
+}
 
 describe('raw PTY archive', () => {
   beforeEach(() => {
@@ -102,6 +104,8 @@ describe('raw PTY archive', () => {
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
       archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 0,
       completion_state: 'writing',
@@ -144,6 +148,7 @@ describe('raw PTY archive', () => {
     const manifest = {
       id: '223e4567-e89b-42d3-a456-426614174001', generation_id: GENERATION_ID, run_id: 77,
       workspace_id: 'ws-1', story_id: 'PTY-RACE', archive_root_relative: archiveRoot(),
+      raw_archive_expected: true, raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096, next_raw_offset: 0, completion_state: 'writing', retention_days: 30,
       retention_expires_at: new Date(Date.now() + 86_400_000).toISOString(), gaps: [], started_at: new Date().toISOString(),
       completed_at: null, failure_code: null, failure_message: null, workspace_path: workspace,
@@ -172,6 +177,8 @@ describe('raw PTY archive', () => {
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
       archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 8,
       completion_state: 'writing',
@@ -242,6 +249,8 @@ describe('raw PTY archive', () => {
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
       archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 3,
       completion_state: 'complete',
@@ -345,6 +354,8 @@ describe('raw PTY archive', () => {
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
       archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 15,
       completion_state: 'complete',
