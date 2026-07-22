@@ -73,6 +73,7 @@
         "backend/src/lib/__tests__/release-one-scheduler-gate.node.test.ts",
         "backend/src/lib/__tests__/test-harness-authority.node.test.ts",
         "scripts/__tests__/build-cli.test.mjs",
+        "scripts/__tests__/check-opencore-export.test.mjs",
         "backend/src/db/__tests__/runtime-migration-resolution.node.test.ts",
         "backend/src/lib/__tests__/pg-boss-configured-schema.node.test.ts"
       ],
@@ -150,7 +151,7 @@
         { "command": "npm", "args": ["run", "check:contract"] },
         { "command": "npm", "args": ["run", "check:licenses"] },
         { "command": "npm", "args": ["run", "check:license-boundaries"] },
-        { "command": "npm", "args": ["run", "split:check", "--", "--worktree", "--report-review-boundary"] },
+        { "command": "npm", "args": ["run", "split:check", "--", "--candidate", "--report-review-boundary"] },
         {
           "command": "{node}",
           "cwd": "rorca-backend",

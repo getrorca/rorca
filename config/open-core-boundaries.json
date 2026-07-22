@@ -157,6 +157,10 @@
       "reason": "Deterministic bundled CLI and no-shadow regression coverage is shared release infrastructure."
     },
     {
+      "path": "scripts/__tests__/check-opencore-export.test.mjs",
+      "reason": "Candidate-aware OpenCore boundary regression coverage is shared release infrastructure."
+    },
+    {
       "path": "scripts/generate-release-one-f2-classification.mjs",
       "reason": "Deterministic Release-1 evidence classification generation is shared release infrastructure."
     },

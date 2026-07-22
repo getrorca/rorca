@@ -34,6 +34,7 @@ function parseArgs(argv: string[]) {
     head?: string;
     staged?: boolean;
     worktree?: boolean;
+    candidate?: boolean;
     allowReview?: boolean;
     reportReviewBoundary?: boolean;
     verbose?: boolean;
@@ -54,6 +55,9 @@ function parseArgs(argv: string[]) {
         break;
       case '--worktree':
         options.worktree = true;
+        break;
+      case '--candidate':
+        options.candidate = true;
         break;
       case '--allow-review':
         options.allowReview = true;
@@ -78,12 +82,13 @@ function parseArgs(argv: string[]) {
 
 function usage(): string {
   return [
-    'Usage: npm run split:check -- [--base <git-ref> --head <git-ref> | --staged | --worktree] [--allow-review | --report-review-boundary] [--verbose]',
+    'Usage: npm run split:check -- [--base <git-ref> --head <git-ref> | --staged | --worktree | --candidate] [--allow-review | --report-review-boundary] [--verbose]',
     '',
     'Examples:',
     '  npm run split:check -- --base origin/main --head HEAD',
     '  npm run split:check -- --base HEAD~1 --head HEAD --allow-review',
     '  npm run split:check -- --staged',
+    '  npm run split:check -- --candidate --report-review-boundary',
   ].join('\n');
 }
 
@@ -114,11 +119,18 @@ function classify(file: string, config: BoundaryConfig): { kind: Classification;
   };
 }
 
-function changedFiles(options: { base?: string; head?: string; staged?: boolean; worktree?: boolean }): string[] {
-  if (options.worktree) {
+function changedFiles(options: { base?: string; head?: string; staged?: boolean; worktree?: boolean; candidate?: boolean }): string[] {
+  const worktreeChanges = () => {
     const tracked = git(['diff', '--name-only', '--diff-filter=ACDMR', 'HEAD']);
     const untracked = git(['ls-files', '--others', '--exclude-standard']);
     return [...new Set(`${tracked}\n${untracked}`.split('\n').map((line) => line.trim()).filter(Boolean))].sort();
+  };
+  if (options.worktree) return worktreeChanges();
+  if (options.candidate) {
+    const dirty = git(['status', '--porcelain=v1', '--untracked-files=all']).length > 0;
+    if (dirty) return worktreeChanges();
+    const output = git(['diff', '--name-only', '--diff-filter=ACDMR', 'HEAD~1..HEAD']);
+    return output.split('\n').map((line) => line.trim()).filter(Boolean);
   }
   const output = options.staged
     ? git(['diff', '--cached', '--name-only', '--diff-filter=ACDMR'])
@@ -168,11 +180,11 @@ function main() {
     process.exit(0);
   }
 
-  if (!options.staged && !options.worktree && (Boolean(options.base) !== Boolean(options.head))) {
+  if (!options.staged && !options.worktree && !options.candidate && (Boolean(options.base) !== Boolean(options.head))) {
     throw new Error('Provide both --base and --head together, or choose --staged/--worktree.');
   }
-  if ([options.staged, options.worktree, Boolean(options.base || options.head)].filter(Boolean).length > 1) {
-    throw new Error('--staged, --worktree, and --base/--head are mutually exclusive');
+  if ([options.staged, options.worktree, options.candidate, Boolean(options.base || options.head)].filter(Boolean).length > 1) {
+    throw new Error('--staged, --worktree, --candidate, and --base/--head are mutually exclusive');
   }
   if (options.allowReview && options.reportReviewBoundary) {
     throw new Error('--allow-review and --report-review-boundary are mutually exclusive');
@@ -221,7 +233,7 @@ function main() {
     console.log('\nTip: rerun with --verbose to list every matching file.');
   }
 
-  if (!options.staged && !options.worktree) {
+  if (!options.staged && !options.worktree && !options.candidate) {
     const base = options.base ?? 'HEAD~1';
     const head = options.head ?? 'HEAD';
     const commits = commitsForRange(base, head);

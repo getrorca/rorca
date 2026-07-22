@@ -91,7 +91,8 @@ test('production gate definition is dependency ordered, complete, and contains n
     .flatMap((gate) => gate.steps ?? [{ command: gate.command, args: gate.args ?? [] }])
     .map((step) => [step.command, ...(step.args ?? [])].join(' '))
     .join('\n');
-  assert.match(serializedCommands, /split:check -- --worktree --report-review-boundary/);
+  assert.match(serializedCommands, /split:check -- --candidate --report-review-boundary/);
+  assert.match(serializedCommands, /check-opencore-export\.test\.mjs/);
   assert.doesNotMatch(serializedCommands, /--allow-review/);
   for (const forbidden of [
     /\bgit\s+push\b/i,
