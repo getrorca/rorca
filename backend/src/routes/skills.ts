@@ -79,6 +79,8 @@ async function emitSkillWalEvent(eventType: string, workspaceId: string | null, 
  * @swagger
  * /api/skills:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: List all discovered and installed skills
  *     operationId: listSkills
@@ -183,6 +185,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/install:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Skills]
  *     summary: Install a skill from markdown content
  *     operationId: installSkill
@@ -249,6 +253,8 @@ router.post('/install', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/top:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Get top skills from skills.sh ranked by install count
  *     operationId: getTopSkills
@@ -347,6 +353,8 @@ router.get('/top', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/preview:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Preview a skill from skills.sh without installing
  *     operationId: previewSkill
@@ -420,6 +428,8 @@ router.get('/preview', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/{name}/content:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Get full markdown content for a skill
  *     operationId: getSkillContent
@@ -519,6 +529,8 @@ router.get('/:name/content', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/{name}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Remove an installed skill by name
  *     operationId: removeSkill
@@ -682,6 +694,8 @@ async function fetchSkillFromRegistry(query: string): Promise<{
  * @swagger
  * /api/skills/install-from-sh:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Skills]
  *     summary: Install a skill from the skills.sh registry via HTTP
  *     operationId: installSkillFromSh
@@ -788,6 +802,8 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/suggestions:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Get skill suggestions based on workspace stack detection
  *     operationId: getSkillSuggestions
@@ -915,6 +931,8 @@ router.get('/suggestions', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/search:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Search the skills.sh marketplace
  *     operationId: searchSkillsSh
@@ -1070,6 +1088,8 @@ function parseGitHubRepo(repoUrl: string): { owner: string; repo: string } | nul
  * @swagger
  * /api/skills/browse-github:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Browse SKILL.md files in a GitHub repository
  *     operationId: browseGitHubSkills
@@ -1275,6 +1295,8 @@ router.post('/browse-github', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/install-from-github:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Skills]
  *     summary: Install a skill from a GitHub repository by path
  *     operationId: installSkillFromGitHub
@@ -1442,6 +1464,8 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/bulk-install:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Install multiple skills in a single request
  *     operationId: bulkInstallSkills
@@ -1657,6 +1681,8 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/bulk-remove:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Remove multiple installed skills at once
  *     operationId: bulkRemoveSkills
@@ -1756,6 +1782,8 @@ router.post('/bulk-remove', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/export:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Skills]
  *     summary: Export installed skills as a shareable JSON manifest
  *     operationId: exportSkills

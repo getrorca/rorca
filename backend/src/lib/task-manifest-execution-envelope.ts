@@ -346,8 +346,6 @@ export function createTaskManifestExecutionEnvelope(manifest: TaskManifest): Syn
       acceptanceCriteria: storyAcceptanceCriteria(manifest, task),
       dependsOn: task.dependsOn,
       ...(files.length > 0 ? { files } : {}),
-      ...(manifest.execution.agentOverride ? { agent: manifest.execution.agentOverride } : {}),
-      ...(manifest.execution.modelOverride ? { model: manifest.execution.modelOverride } : {}),
     };
   });
 

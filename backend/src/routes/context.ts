@@ -145,6 +145,8 @@ function parseContextUpload(req: Request, res: Response, next: NextFunction): vo
  * @swagger
  * /api/context/extract:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Context]
  *     summary: Extract context from paste/URL/Q&A for direction layers
  *     operationId: extractContext
@@ -212,6 +214,8 @@ router.post('/extract', validateBody(ContextExtractSchema), async (req: Request,
  * @swagger
  * /api/context/upload:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Context]
  *     summary: Upload files for context extraction
  *     operationId: uploadContextFiles
@@ -288,6 +292,8 @@ router.post('/upload', parseContextUpload, async (req: Request, res: Response) =
  * @swagger
  * /api/context/fetch-preview:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Context]
  *     summary: Fetch URL preview for context extraction
  *     operationId: fetchContextPreview

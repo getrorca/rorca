@@ -365,7 +365,13 @@ export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promis
   if (!pool) pool = createPool();
 
   const client = await pool.connect();
+  let advisoryLockHeld = false;
   try {
+    // Marker deletion is migration authority. Serialize it with every runner on
+    // the same session and keep selection/deletion in one transaction.
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]);
+    advisoryLockHeld = true;
+    await client.query('BEGIN');
     await client.query(`
       ALTER TABLE public.schema_migrations
       ADD COLUMN IF NOT EXISTS skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
@@ -377,18 +383,27 @@ export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promis
       WHERE skipped_in_lite_mode = TRUE
          OR filename LIKE '%[skipped: extension unavailable]%'
       ORDER BY version ASC
+      FOR UPDATE
     `);
 
     const versions = rows.map((row) => Number(row.version));
-    if (versions.length === 0) return [];
-
-    await client.query(
-      'DELETE FROM public.schema_migrations WHERE version = ANY($1::bigint[])',
-      [versions]
-    );
-
+    if (versions.length > 0) {
+      await client.query(
+        `DELETE FROM public.schema_migrations
+         WHERE version = ANY($1::bigint[])
+           AND (skipped_in_lite_mode = TRUE OR filename LIKE '%[skipped: extension unavailable]%')`,
+        [versions],
+      );
+    }
+    await client.query('COMMIT');
     return versions;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* preserve original failure */ }
+    throw error;
   } finally {
+    if (advisoryLockHeld) {
+      try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* session release clears it */ }
+    }
     client.release();
     if (ownPool) await pool.end();
   }

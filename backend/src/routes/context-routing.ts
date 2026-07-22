@@ -69,6 +69,8 @@ const IGNORED_DIRS = new Set([
  * @swagger
  * /api/workspaces/{id}/directory-tree:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get workspace directory tree (lazy-loaded by path)
  *     operationId: getDirectoryTree
  *     description: Returns a lazy-loaded directory listing for the given workspace, filtered to exclude common build/dependency directories.
@@ -176,6 +178,8 @@ router.get('/:id/context-routing', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{id}/skills:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List available .rorca/skills/*.md files
  *     operationId: listSkillFiles
  *     description: Lists all Markdown skill files in the workspace .rorca/skills/ directory with metadata.
@@ -329,6 +333,8 @@ router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), async (req:
  * @swagger
  * /api/workspaces/{id}/rorca-config/raw:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get raw .rorca/config.json text content (for JSON editor)
  *     operationId: getRorcaConfigRaw
  *     description: Returns the raw JSON text of .rorca/config.json for use in a code editor, or pretty-printed defaults if the file does not exist.
@@ -360,6 +366,8 @@ router.get('/:id/rorca-config/raw', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{id}/rorca-config/raw:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Save raw JSON text to .rorca/config.json (with validation)
  *     operationId: updateRorcaConfigRaw
  *     description: Parses and validates raw JSON text, then writes it to .rorca/config.json preserving the user's formatting.
@@ -415,6 +423,8 @@ router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{id}/rorca-config/eject:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Generate default .rorca/config.json for a workspace that doesn't have one
  *     operationId: ejectRorcaConfig
  *     description: Creates a default .rorca/config.json in the workspace directory, enabling advanced configuration for the first time.
@@ -449,6 +459,8 @@ router.post('/:id/rorca-config/eject', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{id}/rorca-config/export:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Export .rorca/config.json as downloadable JSON
  *     operationId: exportRorcaConfig
  *     description: Returns the .rorca/config.json as a downloadable file attachment with Content-Disposition header.

@@ -10,7 +10,8 @@ const mockFetch = jest.fn();
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCA_API } from '../server';
+import { server } from '../server';
+const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;

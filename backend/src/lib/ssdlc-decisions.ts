@@ -662,6 +662,34 @@ const pgStore: DecisionStore = {
         }
       }
 
+      if (candidate.principal.providerHumanReceiptId) {
+        const receipt = (await client.query<{
+          id: string; workspace_id: string; purpose: string; actor_id: string;
+          decision_id: string | null;
+        }>(`
+          SELECT receipt.id, receipt.workspace_id, receipt.purpose, receipt.actor_id,
+                 decision.id::text AS decision_id
+          FROM provider_human_authority_receipts receipt
+          LEFT JOIN ssdlc_decisions decision
+            ON decision.provider_human_receipt_id = receipt.id
+          WHERE receipt.id = $1
+          FOR UPDATE OF receipt
+        `, [candidate.principal.providerHumanReceiptId])).rows[0];
+        if (!receipt || receipt.workspace_id !== candidate.workspaceId
+          || receipt.purpose !== 'lifecycle_decision'
+          || receipt.actor_id !== candidate.principal.principalId) {
+          throw new ConflictError('Provider-human lifecycle receipt does not bind this decision authority');
+        }
+        // Consumption survives expiry and revocation. Only the decision's exact
+        // source-request replay above may reuse its already-bound receipt.
+        if (receipt.decision_id) {
+          throw new ConflictError('Provider-human lifecycle receipt was already consumed by a decision', {
+            receiptId: receipt.id,
+            existingDecisionId: receipt.decision_id,
+          });
+        }
+      }
+
       const active = (await client.query<SsdlcDecisionRow>(`
         SELECT * FROM ssdlc_decisions
         WHERE workspace_id = $1

@@ -114,7 +114,8 @@ describe('POST /api/notifications/read-all', () => {
 
     const countRes = await request(app)
       .get('/api/notifications/unread-count')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email);
     expect(countRes.body.count).toBe(0);
   });
 });
@@ -126,12 +127,14 @@ describe('DELETE /api/notifications/:id', () => {
 
     const res = await request(app)
       .delete(`/api/notifications/${nId}`)
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email);
     expect(res.status).toBe(200);
 
     const listRes = await request(app)
       .get('/api/notifications')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email);
     expect(listRes.body.items).toHaveLength(0);
   });
 });
@@ -141,7 +144,8 @@ describe('Notification preferences', () => {
     const user = await createUser();
     const res = await request(app)
       .get('/api/notifications/preferences')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email);
     expect(res.status).toBe(200);
     expect(res.body.preferences.spec_approved).toEqual({ inApp: true, email: true });
     expect(res.body.preferences.mention).toEqual({ inApp: true, email: true });
@@ -151,7 +155,8 @@ describe('Notification preferences', () => {
     const user = await createUser();
     const putRes = await request(app)
       .put('/api/notifications/preferences')
-      .set('Authorization', `Bearer ${tokenFor(user)}`)
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
       .send({
         preferences: {
           spec_approved: { inApp: true, email: false },
@@ -162,7 +167,8 @@ describe('Notification preferences', () => {
 
     const getRes = await request(app)
       .get('/api/notifications/preferences')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email);
     expect(getRes.body.preferences.spec_approved).toEqual({ inApp: true, email: false });
     expect(getRes.body.preferences.mention).toEqual({ inApp: false, email: true });
   });
@@ -172,7 +178,8 @@ describe('Notification preferences', () => {
     // Disable in-app for spec_approved
     await request(app)
       .put('/api/notifications/preferences')
-      .set('Authorization', `Bearer ${tokenFor(user)}`)
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
       .send({
         preferences: { spec_approved: { inApp: false, email: true } },
       });
@@ -183,7 +190,8 @@ describe('Notification preferences', () => {
 
     const countRes = await request(app)
       .get('/api/notifications/unread-count')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email);
     expect(countRes.body.count).toBe(0);
   });
 });

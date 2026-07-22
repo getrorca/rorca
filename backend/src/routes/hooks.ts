@@ -22,6 +22,8 @@ const VALID_HOOK_TYPES = ['pre_run', 'post_run', 'pre_story', 'post_story'];
  * @swagger
  * /api/pipeline/hooks:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: List pipeline hooks for a workspace
  *     operationId: listPipelineHooks
@@ -61,6 +63,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/hooks:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Create a new pipeline hook
  *     operationId: createPipelineHook
@@ -137,6 +141,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/hooks/{id}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Update a pipeline hook
  *     operationId: updatePipelineHook
@@ -207,6 +213,8 @@ router.put('/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/hooks/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Delete a pipeline hook
  *     operationId: deletePipelineHook

@@ -73,7 +73,7 @@ import {
 import { logger } from '../lib/logger';
 import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
-import { getBoss } from '../lib/pg-boss';
+import { getBoss, getPgBossSchemaSql } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired, isSuperUser } from '../lib/auth-utils';
 import { AuthError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
@@ -85,7 +85,6 @@ import {
   persistLegacyStoryResultAccounting,
   type CanonicalStoryResultStatus,
 } from '../lib/story-result-persistence';
-import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
 import { isPtyGenerationReaderEnabled } from '../lib/pty-feature-flags';
 import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { normalizeRejectedStoryEvidence, sanitizeStoredRejectedStoryEvidence, type PortableRejectionEvidence } from '../lib/rejected-wave-closeout';
@@ -1142,6 +1141,8 @@ interface StoryResultRow {
  * @swagger
  * /api/pipeline/preflight:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Pre-flight capability check for spec stories vs engine
  *     operationId: preflightPipelineCheck
@@ -1381,6 +1382,36 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       return;
     }
 
+    // Generic trigger idempotency is application-owned. A scheduler/client may
+    // lose the committed HTTP response; exact replay must discover the durable
+    // run instead of attempting a second INSERT and wedging on the unique key.
+    if (idempotencyKey && queuedRunId === undefined && reservedRunId === undefined && dryRun !== true) {
+      const replay = await queryOne<{
+        id: number; workspace_id: string; spec_path: string; trigger_type: string; status: string;
+        branch_name: string | null; worktree_path: string | null;
+      }>(
+        `SELECT id, workspace_id, spec_path, trigger_type, status, branch_name, worktree_path
+         FROM pipeline_runs WHERE workspace_id = $1 AND idempotency_key = $2`,
+        [workspaceId, idempotencyKey],
+      );
+      if (replay) {
+        if (replay.spec_path !== specPath || replay.trigger_type !== (triggerType === 'scheduled' ? 'scheduled' : 'manual')) {
+          throw new ConflictError('Pipeline idempotency key was reused for a different trigger request');
+        }
+        res.status(200).json({
+          ok: true,
+          replayed: true,
+          runId: replay.id,
+          status: replay.status,
+          queued: replay.status === 'queued',
+          idempotencyKey,
+          branchName: replay.branch_name,
+          worktreePath: replay.worktree_path,
+        });
+        return;
+      }
+    }
+
     const requestedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
     const resolvedTerminalMode = resolveOperatorInputTerminalMode(
       requestedTerminalMode,
@@ -1585,9 +1616,23 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       mergeStrategy: mergeStrategy ?? 'direct',
     });
     if ((req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution) {
-      // TaskManifest v1 freezes no-deploy authority independently of whether
-      // branch/PR publication is later permitted by the release seam.
-      autonomousSafety = { ...autonomousSafety, deploy: false };
+      // The reservation's complete immutable safety envelope is authoritative;
+      // generic trigger defaults may never broaden branch-only/no-send policy.
+      const reservedOptions = reservedRunId === undefined ? null : parseJsonRecordLike((await queryOne<{ effective_options: unknown }>(
+        'SELECT effective_options FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
+        [normalizeWorkerRunId(reservedRunId), workspaceId],
+      ))?.effective_options);
+      if (!reservedOptions || !isEffectiveRunOptions(reservedOptions)) {
+        throw new ConflictError('TaskManifest reservation lacks immutable effective execution options');
+      }
+      autonomousSafety = {
+        autoWorktree: reservedOptions.worktree.enabled,
+        autoMerge: reservedOptions.merge.autoMerge,
+        mergeStrategy: reservedOptions.merge.strategy,
+        deploy: reservedOptions.safety.deploy,
+        externalSend: reservedOptions.safety.externalSend,
+        policyLocked: reservedOptions.safety.policyLocked,
+      };
     }
     let frozenQueuedOptions: EffectiveRunOptions | null = null;
     if (queuedRunId !== undefined) {
@@ -2632,9 +2677,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       mergeStrategy: resolvedMergeStrategy,
       wavePolicy,
       safetyOptions: {
-        deploy: autonomousSafety.deploy,
-        externalSend: autonomousSafety.externalSend,
-        policyLocked: autonomousSafety.policyLocked,
+        deploy: effectiveRunOptions.safety.deploy,
+        externalSend: effectiveRunOptions.safety.externalSend,
+        policyLocked: effectiveRunOptions.safety.policyLocked,
       },
       executionManifestPath: manifestBundle.path,
       envOverrides,
@@ -2663,14 +2708,61 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     if (typeof boss.createQueue === 'function') {
       await boss.createQueue('pipeline:run');
     }
-    const jobId = await boss.send('pipeline:run', jobPayload, {
-      retryLimit: 0,
-      expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
-    });
+    const taskPublication = (req as Request & { _taskManifestPublication?: TaskManifestPublicationClaim })._taskManifestPublication;
+    const payloadHash = retryHash(jobPayload);
+    if (taskManifestAuthorityRequested && !taskPublication) {
+      throw new ConflictError('TaskManifest dispatch lacks application publication authority');
+    }
+    if (taskPublication) {
+      const prepared = await execute(
+        `UPDATE task_manifest_dispatch_publications
+         SET payload_hash = COALESCE(payload_hash, $3), updated_at = NOW()
+         WHERE run_id = $1 AND state = 'preparing' AND lease_owner = $2
+           AND (payload_hash IS NULL OR payload_hash = $3)`,
+        [runId, taskPublication.owner, payloadHash],
+      );
+      if (prepared.rowCount !== 1) throw new ConflictError('TaskManifest publication lease or payload identity changed');
+      if (process.env.NODE_ENV === 'test' && process.env.RORCA_TASK_MANIFEST_FAILPOINT === 'after_preparation_before_send') {
+        throw new Error('task_manifest_failpoint:after_preparation_before_send');
+      }
+    }
+
+    let jobId: string | null = null;
+    if (taskPublication) {
+      const schema = getPgBossSchemaSql();
+      const existingJob = await queryOne<{ id: string }>(
+        `SELECT id::text FROM ${schema}.job WHERE id = $1
+         UNION ALL SELECT id::text FROM ${schema}.archive WHERE id = $1 LIMIT 1`,
+        [taskPublication.bossJobId],
+      ).catch(() => undefined);
+      jobId = existingJob?.id ?? await boss.send('pipeline:run', jobPayload, {
+        id: taskPublication.bossJobId,
+        retryLimit: 0,
+        expireInSeconds: 300,
+      });
+    } else {
+      jobId = await boss.send('pipeline:run', jobPayload, {
+        retryLimit: 0,
+        expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
+      });
+    }
 
     if (jobId === null) {
-      await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
+      if (!taskPublication) {
+        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
+      }
       throw new ServiceUnavailableError('Failed to enqueue pipeline:run job: pg-boss returned null (queue may be missing or not started)');
+    }
+    if (taskPublication) {
+      const published = await execute(
+        `UPDATE task_manifest_dispatch_publications
+         SET state = 'published', lease_owner = NULL, lease_expires_at = NULL,
+             published_at = NOW(), updated_at = NOW()
+         WHERE run_id = $1 AND state = 'preparing' AND lease_owner = $2
+           AND boss_job_id = $3 AND payload_hash = $4`,
+        [runId, taskPublication.owner, taskPublication.bossJobId, payloadHash],
+      );
+      if (published.rowCount !== 1) throw new ConflictError('TaskManifest job publication did not converge to application authority');
     }
 
     logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
@@ -2686,6 +2778,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const capMode = (req as any)._capabilityMismatchMode;
     const executionReadiness = (req as any)._executionReadiness;
     const canonicalReadiness = (req as any)._specReadiness;
+    const taskResponseIdentity = taskManifestAuthorityRequested
+      ? await taskManifestResponseIdentity(runId, effectiveTaskManifestArtifacts)
+      : undefined;
     res.status(201).json({
       ok: true,
       runId,
@@ -2726,6 +2821,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
       ...(effectiveTaskManifestArtifacts ? { artifacts: effectiveTaskManifestArtifacts } : {}),
       ...(effectiveTaskManifestArtifactRefs ? { artifactRefs: effectiveTaskManifestArtifactRefs } : {}),
+      ...(taskResponseIdentity ? { responseIdentity: taskResponseIdentity, workspaceId } : {}),
       ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
@@ -3219,19 +3315,44 @@ function assertExistingTaskManifestRunMatchesHash(
   );
 }
 
-function buildTaskManifestReplayResponse(input: {
+async function taskManifestResponseIdentity(runId: number, artifacts: unknown): Promise<JsonRecord> {
+  const lineage = await queryOne<{
+    workspace_id: string; manifest_id: string; source_idempotency_key: string;
+    manifest_hash: string; synthetic_spec_hash: string; lineage_identity_hash: string;
+  }>(
+    `SELECT workspace_id, manifest_id, source_idempotency_key, manifest_hash,
+            synthetic_spec_hash, lineage_identity_hash
+     FROM task_manifest_run_lineage WHERE run_id = $1`, [runId],
+  );
+  if (!lineage) throw new ConflictError('TaskManifest response lacks immutable run lineage');
+  return {
+    schemaVersion: 'rorca.task-manifest-response-identity.v1',
+    workspaceId: lineage.workspace_id,
+    runId,
+    manifestId: lineage.manifest_id,
+    idempotencyKey: lineage.source_idempotency_key,
+    manifestHash: lineage.manifest_hash,
+    syntheticSpecHash: lineage.synthetic_spec_hash,
+    lineageIdentityHash: lineage.lineage_identity_hash,
+    artifactDigest: retryHash(artifacts),
+  };
+}
+
+async function buildTaskManifestReplayResponse(input: {
   row: TaskManifestRunLookupRow;
   manifest: TaskManifest;
   manifestHash: string;
   fallbackArtifacts: TaskManifestArtifactsResponse;
   fallbackArtifactRefs: JsonRecord[];
-}): JsonRecord {
+}): Promise<JsonRecord> {
   const artifacts = parseJsonRecordLike(input.row.task_manifest_artifacts) ?? input.fallbackArtifacts;
   const artifactRefs = getStoredArtifactRefsFromTriggerOptions(input.row.trigger_options) ?? input.fallbackArtifactRefs;
   const runId = Number(input.row.id);
   const disposition = replayDispositionForRunStatus(input.row.status);
+  const responseIdentity = await taskManifestResponseIdentity(runId, artifacts);
   return {
     ok: true,
+    workspaceId: responseIdentity.workspaceId,
     idempotent: true,
     reused: true,
     queued: input.row.status === 'queued',
@@ -3251,6 +3372,7 @@ function buildTaskManifestReplayResponse(input: {
     artifacts,
     artifactRefs,
     manifestSource: buildManifestSourceFromRun(input.row),
+    responseIdentity,
   };
 }
 
@@ -3439,6 +3561,48 @@ async function reserveTaskManifestRun(input: {
   });
 }
 
+interface TaskManifestPublicationClaim {
+  outcome: 'acquired' | 'busy' | 'published';
+  owner: string | null;
+  bossJobId: string;
+}
+
+async function claimTaskManifestPublication(runId: number, workspaceId: string): Promise<TaskManifestPublicationClaim> {
+  const owner = `task-manifest-api:${process.pid}:${randomUUID()}`;
+  return transaction(async (client) => {
+    const run = (await client.query<{ status: string; workspace_id: string; task_manifest_id: string | null }>(
+      'SELECT status, workspace_id, task_manifest_id FROM pipeline_runs WHERE id = $1 FOR UPDATE', [runId],
+    )).rows[0];
+    if (!run || run.workspace_id !== workspaceId || !run.task_manifest_id || run.status !== 'queued') {
+      throw new ConflictError('TaskManifest publication no longer owns a queued canonical run');
+    }
+    const existing = (await client.query<{
+      boss_job_id: string; state: 'preparing' | 'published'; lease_owner: string | null; lease_expires_at: string | null;
+    }>('SELECT boss_job_id, state, lease_owner, lease_expires_at FROM task_manifest_dispatch_publications WHERE run_id = $1 FOR UPDATE', [runId])).rows[0];
+    if (existing?.state === 'published') return { outcome: 'published', owner: null, bossJobId: existing.boss_job_id };
+    if (existing?.state === 'preparing' && existing.lease_expires_at
+      && new Date(existing.lease_expires_at).getTime() > Date.now()) {
+      return { outcome: 'busy', owner: existing.lease_owner, bossJobId: existing.boss_job_id };
+    }
+    if (existing) {
+      await client.query(
+        `UPDATE task_manifest_dispatch_publications
+         SET lease_owner = $2, lease_expires_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
+         WHERE run_id = $1`, [runId, owner],
+      );
+      return { outcome: 'acquired', owner, bossJobId: existing.boss_job_id };
+    }
+    const bossJobId = randomUUID();
+    await client.query(
+      `INSERT INTO task_manifest_dispatch_publications
+         (run_id, workspace_id, boss_job_id, state, lease_owner, lease_expires_at)
+       VALUES ($1,$2,$3,'preparing',$4,NOW() + INTERVAL '5 minutes')`,
+      [runId, workspaceId, bossJobId, owner],
+    );
+    return { outcome: 'acquired', owner, bossJobId };
+  });
+}
+
 /**
  * @swagger
  * /api/pipeline/task-manifests/trigger:
@@ -3620,9 +3784,21 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
           retryable: false,
           reasonCode: 'task_manifest_dry_run_preview',
         }),
+        workspaceId: requestWorkspaceId,
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
         manifestHash: dryRunEnvelope.manifestHash,
+        responseIdentity: {
+          schemaVersion: 'rorca.task-manifest-response-identity.v1',
+          workspaceId: requestWorkspaceId,
+          runId: null,
+          manifestId: manifest.manifestId,
+          idempotencyKey: requestIdempotencyKey,
+          manifestHash: dryRunEnvelope.manifestHash,
+          syntheticSpecHash: dryRunArtifacts.syntheticSpecHash,
+          lineageIdentityHash: null,
+          artifactDigest: retryHash(dryRunArtifacts),
+        },
         artifacts: dryRunArtifacts,
         artifactRefs: dryRunArtifactRefs,
         manifestSource: buildManifestSourceFromRun({
@@ -3670,6 +3846,9 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     // branch/execution path is resumable and must not be mistaken for a terminal
     // idempotent replay after response loss.
     const existingIdempotentRun = await findTaskManifestRunByIdempotencyKey(requestWorkspaceId, requestIdempotencyKey);
+    if (existingIdempotentRun) {
+      assertExistingTaskManifestRunMatchesHash(existingIdempotentRun, plannedEnvelope.manifestHash, requestIdempotencyKey);
+    }
 
     const activeConflict = existingIdempotentRun
       ? null
@@ -3687,6 +3866,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
         }),
         activeRunId: activeConflict.activeRunId,
         reason: activeConflict.reason,
+        workspaceId: requestWorkspaceId,
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
         manifestHash: plannedEnvelope.manifestHash,
@@ -3748,12 +3928,8 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     if (reservation.kind === 'existing') {
       dispatchRunId = Number(reservation.row.id);
       await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
-      const resumableImmediateReservation = requestBody.queue !== true
-        && reservation.row.status === 'queued'
-        && !reservation.row.branch_name
-        && !reservation.row.execution_worktree_path;
-      if (!resumableImmediateReservation) {
-        res.status(200).json(buildTaskManifestReplayResponse({
+      if (reservation.row.status !== 'queued') {
+        res.status(200).json(await buildTaskManifestReplayResponse({
           row: reservation.row,
           manifest,
           manifestHash: envelope.manifestHash,
@@ -3768,6 +3944,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     }
 
     if (requestBody.queue === true) {
+      const responseIdentity = await taskManifestResponseIdentity(dispatchRunId, artifacts);
       res.status(202).json({
         ok: true,
         queued: true,
@@ -3778,6 +3955,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
           reasonCode: 'task_manifest_queued',
         }),
         runId: dispatchRunId,
+        workspaceId: requestWorkspaceId,
         queuePosition: reservation.kind === 'created' ? reservation.queuePosition : reservation.row.queue_position,
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
@@ -3790,9 +3968,47 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
           task_manifest_artifacts: artifacts,
           trigger_options: triggerOptions,
         }),
+        responseIdentity,
       });
       return;
     }
+
+    const publication = await claimTaskManifestPublication(dispatchRunId, requestWorkspaceId);
+    if (publication.outcome !== 'acquired') {
+      if (publication.outcome === 'published' && reservation.kind === 'existing') {
+        res.status(200).json(await buildTaskManifestReplayResponse({
+          row: reservation.row,
+          manifest,
+          manifestHash: envelope.manifestHash,
+          fallbackArtifacts: artifacts,
+          fallbackArtifactRefs: artifactRefs,
+        }));
+        return;
+      }
+      const responseIdentity = await taskManifestResponseIdentity(dispatchRunId, artifacts);
+      res.status(202).json({
+        ok: true,
+        queued: true,
+        runId: dispatchRunId,
+        workspaceId: requestWorkspaceId,
+        manifestId: manifest.manifestId,
+        idempotencyKey: requestIdempotencyKey,
+        manifestHash: envelope.manifestHash,
+        artifacts,
+        artifactRefs,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'pending_publication',
+          runId: dispatchRunId,
+          runStatus: 'queued',
+          replayed: true,
+          retryable: true,
+          reasonCode: 'task_manifest_publication_lease_held',
+        }),
+        responseIdentity,
+      });
+      return;
+    }
+    (req as Request & { _taskManifestPublication?: TaskManifestPublicationClaim })._taskManifestPublication = publication;
 
     req.body = {
       specPath: envelope.relativeSpecPath,
@@ -3839,6 +4055,8 @@ router.post('/task-manifests/trigger', validateBody(TaskManifestTriggerRequestSc
  * @swagger
  * /api/pipeline/context-preview:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Preview context routing for each story in a spec
  *     operationId: previewContextRouting
@@ -4033,6 +4251,8 @@ router.post('/context-preview', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/orchestration-preview:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Preview auto-orchestration mode for a spec
  *     operationId: previewOrchestrationMode
@@ -4096,6 +4316,8 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/quick-run:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Retired quick-run endpoint
  *     operationId: quickRunPipeline
@@ -4117,6 +4339,8 @@ router.post('/quick-run', (_req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Create a pipeline run record
  *     operationId: createPipelineRun
@@ -4249,6 +4473,8 @@ router.get('/runs', authRequired, async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/compare:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Compare two pipeline runs side-by-side
  *     operationId: comparePipelineRuns
@@ -6946,6 +7172,8 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
  * @swagger
  * /api/pipeline/runs/{runId}/retry-merge:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Retired manual merge retry actuator
  *     operationId: retryMerge
@@ -6974,6 +7202,8 @@ router.post('/runs/:runId/retry-merge', (req: Request, _res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/pause:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Pause a running pipeline
  *     operationId: pausePipelineRun
@@ -7054,6 +7284,8 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/resume:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Resume a paused pipeline
  *     operationId: resumePipelineRun
@@ -7122,6 +7354,8 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/context:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Inject context into a blocked (HITL) pipeline run and resume
  *     operationId: injectPipelineContext
@@ -7290,87 +7524,28 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     }
 
     const { status } = run;
-
-    // Already done — conflict
-    if (status !== 'queued' && status !== 'running' && status !== 'paused') {
+    if (!['queued', 'starting', 'running', 'paused'].includes(status)) {
       throw new ConflictError(`Run is already ${status} and cannot be cancelled`);
     }
 
-    if (status === 'queued') {
-      // ── Queued path ──────────────────────────────────────────────────────
-      // Attempt to remove the pg-boss job before the worker picks it up.
-      // pg-boss requires UUID job IDs — look up by payload runId.
-      const jobRow = await queryOne<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
-        [String(runId)]
-      );
-      if (jobRow) {
-        await getBoss().cancel('pipeline:run', jobRow.id);
+    // Persist application authority first under the run lock. pg-boss is only a
+    // notification transport; no job-table state can override this request.
+    await transaction(async (client) => {
+      const locked = (await client.query<{ status: string; workspace_id: string }>(
+        'SELECT status, workspace_id FROM pipeline_runs WHERE id = $1 FOR UPDATE', [runId],
+      )).rows[0];
+      if (!locked || locked.workspace_id !== run.workspace_id
+        || !['queued', 'starting', 'running', 'paused'].includes(locked.status)) {
+        throw new ConflictError(`Run changed to ${locked?.status ?? 'missing'} before cancellation authority was recorded`);
       }
-
-      // Re-read status: if the worker picked up the job between our check and
-      // cancel, the run may have already transitioned to 'running'. Fall through.
-      const refreshed = await queryOne<{ status: string }>(
-        'SELECT status FROM pipeline_runs WHERE id = $1',
-        [runId],
+      await client.query(
+        `INSERT INTO pipeline_run_cancellation_requests (run_id, workspace_id, requested_by, reason)
+         VALUES ($1,$2,$3,'operator_cancelled_run')
+         ON CONFLICT (run_id) DO NOTHING`,
+        [runId, run.workspace_id, req.user?.id ?? 'unknown'],
       );
-
-      if (refreshed && (refreshed.status === 'running' || refreshed.status === 'paused')) {
-        // Worker picked it up — delegate to the running path
-        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
-        res.json({ ok: true, runId, status: 'cancelling' });
-        return;
-      }
-
-      // Mark run as cancelled in DB (it's still queued or the job was removed)
-      await execute(
-        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queue_position = NULL WHERE id = $1`,
-        [runId],
-      );
-      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_cancel' });
-
-      // Recalculate queue positions for remaining queued runs
-      const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
-      recalculateQueuePositions(run.workspace_id);
-
-      // Emit WAL event
-      const walEvent = await queryOne<WalEvent>(
-        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
-        [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString() })],
-      );
-      if (walEvent) broadcastAll(walEvent);
-
-      res.json({ ok: true, runId, status: 'cancelled' });
-      return;
-    }
-
-    // ── Running / paused path ─────────────────────────────────────────────
-    // Deliver cancel job to the worker for SIGTERM/SIGKILL sequencing.
+    });
     await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
-
-    // If both the engine and its independently tracked PTY process are gone,
-    // finalize inline. A dead wrapper PID alone is not enough: the forkpty child
-    // may still be alive and must remain visible to the worker cancellation job.
-    const ptyHealth = await getRunPtySessionHealth(runId);
-    const pidAlive = run.pid ? isPidAlive(run.pid) : false;
-    if (mayFinalizePtyCancellationInline(pidAlive, ptyHealth?.status)) {
-      // Process is already gone — handle cancellation inline
-      await execute(
-        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,
-        [runId],
-      );
-      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'pid_not_alive' });
-      const walEvent = await queryOne<WalEvent>(
-        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
-        [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString(), reason: 'pid_not_alive' })],
-      );
-      if (walEvent) broadcastAll(walEvent);
-      res.json({ ok: true, runId, status: 'cancelled' });
-      return;
-    }
-
-    // The worker owns process-tree termination. Do not race it with a direct
-    // PID signal here: a stale/recycled PID must not be targeted by the API.
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
     // AppError subclasses are caught and serialized by the centralized error handler
@@ -7387,6 +7562,8 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Cancel a queued pipeline run
  *     operationId: cancelQueuedRun
@@ -7443,25 +7620,22 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
-    // Remove the pg-boss job before the worker picks it up.
-    // pg-boss requires UUID job IDs — look up by payload runId.
-    const jobRow = await queryOne<{ id: string }>(
-      `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
-      [String(runId)]
-    );
-    if (jobRow) {
-      await getBoss().cancel('pipeline:run', jobRow.id);
-    }
-
-    // Mark as cancelled
-    await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
-    await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_delete' });
-
-    // Recalculate positions for remaining queued runs
-    const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
-    recalculateQueuePositions(run.workspace_id);
-
-    res.json({ ok: true, runId });
+    await transaction(async (client) => {
+      const locked = (await client.query<{ status: string }>(
+        'SELECT status FROM pipeline_runs WHERE id = $1 FOR UPDATE', [runId],
+      )).rows[0];
+      if (!locked || locked.status !== 'queued') {
+        throw new ConflictError(`Run changed to '${locked?.status ?? 'missing'}' before queued cancellation was recorded`);
+      }
+      await client.query(
+        `INSERT INTO pipeline_run_cancellation_requests (run_id, workspace_id, requested_by, reason)
+         VALUES ($1,$2,$3,'operator_deleted_queued_run')
+         ON CONFLICT (run_id) DO NOTHING`,
+        [runId, run.workspace_id, req.user?.id ?? 'unknown'],
+      );
+    });
+    await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
+    res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Delete queued run');
   }
@@ -8691,6 +8865,8 @@ router.post('/story-result', gateLegacyStoryResultIngress, requireWorkspaceAdmin
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/tokens:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Record token usage for a story
  *     operationId: recordStoryTokenUsage
@@ -8762,6 +8938,8 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/output:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get last N lines of a story's output
  *     operationId: getStoryOutput
@@ -8945,6 +9123,8 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/log:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Stream per-story log output via SSE
  *     operationId: streamStoryLog
@@ -9186,6 +9366,8 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/stream:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Stream per-story prose output via SSE (DB-backed)
  *     operationId: streamStoryOutput
@@ -9343,6 +9525,8 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  * @swagger
  * /api/pipeline/stream:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Stream WAL events (SSE)
  *     operationId: streamPipelineEvents
@@ -9487,6 +9671,8 @@ export async function cleanupOldLogs(): Promise<number> {
  * @swagger
  * /api/pipeline/runs/{runId}/commits:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get git commits for a pipeline run's branch
  *     operationId: getPipelineRunCommits
@@ -9581,6 +9767,8 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/skills:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get per-story skill usage data for a specific pipeline run
  *     tags: [Pipeline]
  *     parameters:
@@ -9745,6 +9933,8 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/wal-events:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get all WAL events for a specific run
  *     tags: [Pipeline]
  *     parameters:
@@ -9890,6 +10080,8 @@ export async function cleanupOrphanRuns(): Promise<number> {
  * @swagger
  * /api/pipeline/queue:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Smart run trigger — start immediately or queue if a run is active
  *     description: >
  *       Checks for an active run in the workspace. If none, triggers the run immediately.
@@ -10028,6 +10220,8 @@ router.post('/queue', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{id}/dlq:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get DLQ entry for a run
  *     operationId: getRunDlq
@@ -10111,6 +10305,8 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{id}/dlq/retry:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Retry a run from the DLQ
  *     operationId: retryRunFromDlq
@@ -10629,6 +10825,8 @@ router.get('/worker/health', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/orphan-sweep:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Trigger immediate orphan process sweep
  *     description: Scans for pipeline runs with status='running' that belong to other workers or have no worker_id (orphaned), kills their processes, and marks runs as failed. Callable from API process (currentWorkerId is undefined, sweeps ALL stale runs).
  *     tags:
@@ -10809,6 +11007,8 @@ router.get('/queue/health', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/queue/failed-jobs:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List failed pg-boss jobs
  *     description: Returns a paginated list of failed pg-boss jobs from both pgboss.job (recent unarchived failures) and pgboss.archive (archived failures within the last 30 days). Each entry is enriched with the corresponding pipeline_runs row where the job's data.runId matches.
  *     tags:
@@ -10991,6 +11191,8 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/queue/failed-jobs/{jobId}/retry:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Re-enqueue a failed pg-boss job
  *     description: Reads the failed job from pgboss.archive or pgboss.job by its UUID, extracts the original queue name and payload, and re-inserts it as a fresh job via boss.send(). Used by operators to manually retry a failed job after fixing the underlying issue.
  *     tags:
@@ -11074,6 +11276,8 @@ router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Respons
  * @swagger
  * /api/pipeline/queue/health-history:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Queue health time-series data
  *     operationId: getQueueHealthHistory
@@ -11180,6 +11384,8 @@ router.get('/queue/health-history', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/queue/{workspaceId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get queue state for a workspace
  *     operationId: getWorkspaceQueueState

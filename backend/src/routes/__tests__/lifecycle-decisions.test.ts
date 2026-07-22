@@ -159,6 +159,20 @@ describe('lifecycle decision route authority boundary', () => {
     expect(mockRecord).not.toHaveBeenCalled();
   });
 
+  test('resolves a canonical signed-command target without recording authority', async () => {
+    const response = await request(appWithUser({
+      id: 'rorca-hermes-service', email: 'hermes@rorca.internal', supabaseId: 'auth-hermes', role: 'admin',
+    })).post('/api/lifecycle/decisions/target').send(body({
+      phaseId: 'merge', gateId: 'merge-gate', decisionType: 'merge_approval',
+      subject: { type: 'commit_sha', value: 'a'.repeat(40) },
+    }));
+    expect(response.status).toBe(200);
+    expect(response.body.targetHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(response.body.command).toBe(`approve lifecycle decision ${response.body.targetHash}`);
+    expect(mockVerifyProviderHuman).not.toHaveBeenCalled();
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
   test('records only the verified provider-human principal for Hermes-relayed authority', async () => {
     const humanApproval = {
       schemaVersion: 'provider-human-event.v1',

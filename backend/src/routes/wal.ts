@@ -34,6 +34,8 @@ interface WalEventRow {
  * @swagger
  * /api/wal:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [WAL]
  *     summary: Query WAL event log
  *     operationId: queryWalEvents

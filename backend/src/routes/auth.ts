@@ -16,6 +16,8 @@ const router = Router();
  * @swagger
  * /api/auth/csrf-token:
  *   get:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Auth]
  *     summary: Issue a browser CSRF token
  *     description: Browser-only local session bootstrap. This sensitive auth route is intentionally default-denied from native and MCP contract exposure.
@@ -33,6 +35,8 @@ router.get('/csrf-token', (_req: Request, res: Response) => {
  * @swagger
  * /api/auth/me:
  *   get:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Auth]
  *     summary: Read the current browser session principal
  *     description: Sensitive browser-session identity route; intentionally default-denied from native and MCP contract exposure.
@@ -50,6 +54,8 @@ router.get('/me', authRequired, async (req: Request, res: Response) => {
  * @swagger
  * /api/auth/resend-verification:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Auth]
  *     summary: Acknowledge the local-OSS verification compatibility action
  *     description: Sensitive auth compatibility route; intentionally default-denied from native and MCP contract exposure.

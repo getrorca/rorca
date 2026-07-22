@@ -91,6 +91,8 @@ function summarize(checks: DoctorCheck[]): DoctorResponse['summary'] {
  * @swagger
  * /api/doctor:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Health]
  *     summary: Comprehensive system health check
  *     operationId: getDoctor

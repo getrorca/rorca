@@ -515,6 +515,10 @@ async function authorize(delivery: DeliveryRow, evidence: GithubPrDeliveryEviden
         AND decision.principal_type = 'provider_human'
         AND decision.revoked_at IS NULL
         AND (decision.expires_at IS NULL OR decision.expires_at > NOW())
+        AND NOT EXISTS (
+          SELECT 1 FROM ssdlc_decisions other
+          WHERE other.provider_human_receipt_id = receipt.id AND other.id <> decision.id
+        )
       FOR SHARE OF decision, receipt
     `, [lifecycle.mergeDecisionId, delivery.workspace_id, delivery.spec_slug, delivery.current_head_sha])).rows[0];
     if (!decision) throw new ConflictError('Canonical Merge authorization changed before actuation');
@@ -640,7 +644,11 @@ async function assertMergeDecisionHumanAuthority(delivery: DeliveryRow): Promise
       AND lower(decision.subject_value) = $4
       AND decision.principal_type = 'provider_human'
       AND decision.revoked_at IS NULL
-      AND (decision.expires_at IS NULL OR decision.expires_at > NOW())`,
+      AND (decision.expires_at IS NULL OR decision.expires_at > NOW())
+      AND NOT EXISTS (
+        SELECT 1 FROM ssdlc_decisions other
+        WHERE other.provider_human_receipt_id = receipt.id AND other.id <> decision.id
+      )`,
     [delivery.merge_decision_id, delivery.workspace_id, delivery.spec_slug, delivery.current_head_sha],
   );
   if (!decision) throw new ConflictError('Exact provider-human Merge authorization is no longer active');
@@ -651,9 +659,31 @@ async function providerMerge(
   evidence: GithubPrDeliveryEvidence,
 ): Promise<{ mergedSha: string; responseHash: `sha256:${string}`; mergedAt: string }> {
   const releaseIdentity = await loadRunReleaseIdentity(Number(delivery.run_id), delivery.current_head_sha);
-  return withGithubReleaseActuation(releaseIdentity, 'merge', async ({ authority, credential }) => {
+  return withGithubReleaseActuation(releaseIdentity, 'merge', async ({ authority, credential }) => transaction(async (client) => {
+  // Hold the exact decision row through the provider actuation. Revocation
+  // blocks on this lock and can never overtake the final merge authority check.
+  const lockedDecision = (await client.query<{ id: string }>(`
+    SELECT decision.id::text
+    FROM ssdlc_decisions decision
+    JOIN provider_human_authority_receipts receipt
+      ON receipt.id = decision.provider_human_receipt_id
+     AND receipt.workspace_id = decision.workspace_id
+     AND receipt.purpose = 'lifecycle_decision'
+    WHERE decision.id = $1 AND decision.workspace_id = $2 AND decision.spec_slug = $3
+      AND decision.phase_id = 'merge' AND decision.subject_type = 'commit_sha'
+      AND lower(decision.subject_value) = $4
+      AND decision.principal_type = 'provider_human'
+      AND decision.revoked_at IS NULL
+      AND (decision.expires_at IS NULL OR decision.expires_at > NOW())
+      AND NOT EXISTS (
+        SELECT 1 FROM ssdlc_decisions other
+        WHERE other.provider_human_receipt_id = receipt.id AND other.id <> decision.id
+      )
+    FOR SHARE OF decision, receipt`,
+    [delivery.merge_decision_id, delivery.workspace_id, delivery.spec_slug, delivery.current_head_sha],
+  )).rows[0];
+  if (!lockedDecision) throw new ConflictError('Exact provider-human Merge authorization is no longer active');
   await revalidateRunReleaseIdentity(releaseIdentity);
-  await assertMergeDecisionHumanAuthority(delivery);
   if (authority.owner !== delivery.repo_owner || authority.name !== delivery.repo_name) {
     throw new ConflictError('Reviewed delivery repository differs from canonical release authority');
   }
@@ -722,7 +752,7 @@ async function providerMerge(
     ? extractGithubProviderError(response, 'GITHUB_EXACT_SHA_MERGE_FAILED')
     : sanitizeGithubProviderException(transportError, 'GITHUB_EXACT_SHA_MERGE_FAILED');
   throw new ConflictError(`GitHub exact-SHA merge could not be proven: ${formatGithubProviderError(providerError)}`);
-  });
+  }));
 }
 
 function dependencies(overrides: Partial<AutonomousDeliveryJobDependencies>): AutonomousDeliveryJobDependencies {

@@ -50,6 +50,8 @@ async function emitWalEvent(
  * @swagger
  * /api/workspaces/{id}/drift:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces, Drift]
  *     summary: Get the most recent graph-powered drift report for a workspace
  *     operationId: getWorkspaceDrift
@@ -151,6 +153,8 @@ router.get('/:id/drift', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{id}/drift/check:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces, Drift]
  *     summary: Manually trigger graph-powered drift detection
  *     operationId: checkWorkspaceDrift

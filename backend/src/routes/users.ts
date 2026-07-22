@@ -85,6 +85,8 @@ router.get('/me', async (req: Request, res: Response) => {
  * @swagger
  * /api/users/me:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Users]
  *     summary: Delete current Supabase user account
  *     operationId: deleteCurrentUser
@@ -127,6 +129,8 @@ interface AssignmentDbRow {
  * @swagger
  * /api/users/me/assigned:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Users]
  *     summary: Get specs and stories assigned to the current user
  *     operationId: getMyAssignments
@@ -248,6 +252,8 @@ router.get('/me/assigned', async (req: Request, res: Response) => {
  * @swagger
  * /api/users/workspace-members:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Users]
  *     summary: List users available for story assignment
  *     operationId: listWorkspaceMembers
@@ -308,6 +314,8 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
  * @swagger
  * /api/users/me:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Users]
  *     summary: Permanently delete user account
  *     operationId: deleteMyAccount

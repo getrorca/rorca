@@ -10,6 +10,7 @@ import { query, transaction } from '../db/index';
 import { ConflictError } from './errors';
 import type { RetryRunCloseoutEvidence } from './governed-story-retry';
 import { inspectRunHostAuthority } from './run-host-authority';
+import { assertTaskManifestHostFileScope } from './task-manifest-run-lineage';
 import {
   assertExactTrustedWalRow,
   insertTrustedWalEvent,
@@ -83,6 +84,19 @@ export async function prepareHostRunCloseout(input: {
   if (input.status === 'done' && !authority.releaseEligible) {
     throw new ConflictError('Successful closeout requires complete release-eligible host authority');
   }
+  const taskManifestRun = (await query<{ task_manifest_id: string | null }>(
+    'SELECT task_manifest_id FROM pipeline_runs WHERE id = $1', [input.runId],
+  ))[0];
+  if (taskManifestRun?.task_manifest_id) {
+    await assertTaskManifestHostFileScope({
+      runId: input.runId,
+      workspacePath: authority.repositoryTopLevel,
+      repositoryPath: authority.checkoutPath,
+      commitShas: authority.stories
+        .filter((story) => story.status === 'pass' && story.commitSha)
+        .map((story) => story.commitSha!),
+    });
+  }
   const dispatchIdentity = input.governedRetryDispatchIdentity ?? null;
   if (dispatchIdentity !== null && !/^sha256:[a-f0-9]{64}$/.test(dispatchIdentity)) {
     throw new ConflictError('Governed retry dispatch identity is invalid');
@@ -121,6 +135,30 @@ export async function insertPreparedHostRunCloseout(
   if (!run || run.workspace_id !== prepared.workspaceId) {
     throw new ConflictError('Prepared host closeout no longer owns the canonical run');
   }
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`run-host-authority:${prepared.runId}`]);
+
+  // The caller's snapshot is proposal-only. Re-derive DB/Git authority while
+  // the canonical run row is locked, compare every authority field, and bind
+  // the observed HEAD as an immutable checkout fence before writing closeout.
+  const canonical = await prepareHostRunCloseout({
+    runId: prepared.runId,
+    status: prepared.status,
+    governedRetryDispatchIdentity: prepared.payload.governed_retry_dispatch_identity,
+  });
+  if (!samePreparedHostCloseout(prepared, canonical)) {
+    throw new ConflictError('Host closeout authority changed before immutable publication');
+  }
+  const fenced = await client.query(
+    `UPDATE pipeline_runs
+     SET terminal_checkout_sha = COALESCE(terminal_checkout_sha, $2),
+         terminal_checkout_attested_at = COALESCE(terminal_checkout_attested_at, NOW())
+     WHERE id = $1 AND workspace_id = $3
+       AND (terminal_checkout_sha IS NULL OR terminal_checkout_sha = $2)
+     RETURNING id`,
+    [canonical.runId, canonical.payload.integrated_revision, canonical.workspaceId],
+  );
+  if (fenced.rowCount !== 1) throw new ConflictError('Canonical Git checkout fence changed before closeout');
+
   const inserted = await insertTrustedWalEvent(client, {
     eventType: 'run_closeout',
     workspaceId: prepared.workspaceId,
@@ -130,6 +168,14 @@ export async function insertPreparedHostRunCloseout(
     payload: prepared.payload as unknown as Record<string, unknown>,
   });
   const reference = trustedWalReference(inserted.row);
+  const finalCanonical = await prepareHostRunCloseout({
+    runId: canonical.runId,
+    status: canonical.status,
+    governedRetryDispatchIdentity: canonical.payload.governed_retry_dispatch_identity,
+  });
+  if (!samePreparedHostCloseout(canonical, finalCanonical)) {
+    throw new ConflictError('Host closeout DB/Git authority changed during immutable publication');
+  }
   if (run.host_closeout_event_id != null && Number(run.host_closeout_event_id) !== reference.id) {
     throw new ConflictError('Run already points to a different immutable host closeout');
   }
@@ -198,8 +244,12 @@ export async function persistHostRunCloseout(input: {
   governedRetryDispatchIdentity?: string | null;
   terminalizeRun: boolean;
 }): Promise<TrustedWalReference> {
-  const prepared = await prepareHostRunCloseout(input);
   return transaction(async (client) => {
+    // Establish the canonical run lock before deriving the proposal. The insert
+    // seam re-derives once more under the same lock to catch deterministic races.
+    const locked = await client.query('SELECT id FROM pipeline_runs WHERE id = $1 FOR UPDATE', [input.runId]);
+    if (locked.rowCount !== 1) throw new ConflictError('Run not found for host closeout');
+    const prepared = await prepareHostRunCloseout(input);
     if (input.terminalizeRun && prepared.status !== 'done') {
       return terminalizePreparedHostRunCloseout(client, prepared);
     }

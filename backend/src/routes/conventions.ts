@@ -50,6 +50,8 @@ interface ProposalRow {
  * @swagger
  * /api/conventions/drift/{workspaceId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Get latest convention drift report
  *     description: Returns the most recent drift report for this workspace. Currently a stub — convention drift detection is not yet implemented.
@@ -74,6 +76,8 @@ router.get('/drift/:workspaceId', (_req: Request, res: Response) => {
  * @swagger
  * /api/conventions/discover:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Discover conventions from workspace codebase
  *     description: Spawns an analysis agent that reads config files, source code, and existing context files to produce convention artifacts staged for human review.
@@ -161,6 +165,8 @@ router.post('/discover', async (req: Request, res: Response) => {
  * @swagger
  * /api/conventions/proposals/{workspaceId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: List convention proposals for a workspace
  *     parameters:
@@ -212,6 +218,8 @@ router.get('/proposals/:workspaceId', async (req: Request, res: Response) => {
  * @swagger
  * /api/conventions/proposals/{workspaceId}/{id}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Get a single convention proposal
  *     parameters:
@@ -259,6 +267,8 @@ router.get('/proposals/:workspaceId/:id', async (req: Request, res: Response) =>
  * @swagger
  * /api/conventions/proposals/{id}/approve:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Approve and apply a convention proposal
  *     description: Applies L3 direction layer, writes AGENTS.md, and creates skill files in .rorca/skills/
@@ -375,6 +385,8 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
  * @swagger
  * /api/conventions/proposals/{id}/reject:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Reject a convention proposal
  *     parameters:

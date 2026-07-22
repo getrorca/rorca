@@ -88,6 +88,7 @@ jest.mock('../../lib/pi-detector', () => ({
 jest.mock('../../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
   getBoss: jest.fn(() => mockBoss),
+  getPgBossSchemaSql: jest.fn(() => '"pgboss"'),
 }));
 
 jest.mock('../../lib/pty-manager', () => ({
@@ -244,6 +245,7 @@ let nextRunId = 9000;
 let taskManifestReservations: JsonRecord[] = [];
 let taskManifestLineages: JsonRecord[] = [];
 let pipelineRunInserts: JsonRecord[] = [];
+let taskManifestPublications: JsonRecord[] = [];
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -311,10 +313,37 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
     return Promise.resolve({ rows: [] });
   }
   if (text.includes('FROM pipeline_runs') && text.includes('idempotency_key') && text.includes('FOR UPDATE')) {
-    return Promise.resolve({ rows: [] });
+    const run = taskManifestReservations.find((row) => row.workspaceId === params[0] && row.idempotencyKey === params[1]);
+    return Promise.resolve({ rows: run ? [{
+      id: run.id, spec_path: run.specPath, status: 'queued', queue_position: run.queuePosition,
+      triggered_via: run.triggeredVia, branch_name: run.branchName ?? null,
+      execution_worktree_path: run.executionWorktreePath ?? null,
+      idempotency_key: run.idempotencyKey, task_manifest_id: run.manifestId,
+      task_manifest_artifacts: run.artifacts, trigger_options: run.triggerOptions,
+      effective_options: run.effectiveOptions, task_manifest_authority_version: 1,
+    }] : [] });
   }
   if (text.includes('SELECT COUNT(*) as count FROM pipeline_runs')) {
     return Promise.resolve({ rows: [{ count: '0' }] });
+  }
+  if (text.includes('SELECT status, workspace_id, task_manifest_id FROM pipeline_runs')) {
+    const run = taskManifestReservations.find((row) => row.id === params[0]);
+    return Promise.resolve({ rows: run ? [{ status: 'queued', workspace_id: run.workspaceId, task_manifest_id: run.manifestId }] : [] });
+  }
+  if (text.includes('FROM task_manifest_dispatch_publications') && text.includes('FOR UPDATE')) {
+    return Promise.resolve({ rows: taskManifestPublications.filter((row) => row.run_id === params[0]) });
+  }
+  if (text.includes('INSERT INTO task_manifest_dispatch_publications')) {
+    taskManifestPublications.push({ run_id: params[0], workspace_id: params[1], boss_job_id: params[2], state: 'preparing', lease_owner: params[3], lease_expires_at: '2099-01-01T00:00:00.000Z' });
+    return Promise.resolve({ rows: [] });
+  }
+  if (text.includes('UPDATE task_manifest_dispatch_publications') && text.includes('lease_expires_at')) {
+    const publication = taskManifestPublications.find((row) => row.run_id === params[0]);
+    if (publication) {
+      publication.lease_owner = params[1];
+      publication.lease_expires_at = '2099-01-01T00:00:00.000Z';
+    }
+    return Promise.resolve({ rows: [] });
   }
   if (text.includes('INSERT INTO task_manifest_run_lineage')) {
     const row = {
@@ -358,6 +387,7 @@ beforeEach(() => {
   taskManifestReservations = [];
   taskManifestLineages = [];
   pipelineRunInserts = [];
+  taskManifestPublications = [];
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hermes-bridge-'));
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(wsDir, { recursive: true });
@@ -374,7 +404,18 @@ beforeEach(() => {
   mockSimpleGitRaw.mockImplementation(async (args: string[]) => (
     execFileSync('git', args, { cwd: wsDir, encoding: 'utf8' })
   ));
-  mockExecute.mockResolvedValue({ rowCount: 1 });
+  mockExecute.mockImplementation(async (sql: unknown, params: unknown[] = []) => {
+    const text = sqlText(sql);
+    if (text.includes('UPDATE task_manifest_dispatch_publications') && text.includes("state = 'published'")) {
+      const publication = taskManifestPublications.find((row) => row.run_id === params[0]);
+      if (publication) {
+        publication.state = 'published';
+        publication.lease_owner = null;
+        publication.lease_expires_at = null;
+      }
+    }
+    return { rowCount: 1 };
+  });
   mockAssertExecutionEnvironmentReadyForRun.mockResolvedValue({
     id: 'remote-rorca',
     label: 'Remote Rorca worker',
@@ -396,6 +437,13 @@ beforeEach(() => {
   });
   mockQueryOne.mockImplementation(async (sql: unknown, params: unknown[] = []) => {
     const text = sqlText(sql);
+    if (text.includes('FROM task_manifest_run_lineage WHERE run_id')) {
+      return taskManifestLineages.find((row) => row.run_id === params[0]);
+    }
+    if (text.includes('SELECT effective_options FROM pipeline_runs')) {
+      const run = taskManifestReservations.find((row) => row.id === params[0]);
+      return run ? { effective_options: run.effectiveOptions } : undefined;
+    }
     if (text.includes('FROM task_manifest_run_lineage lineage')) {
       const lineage = taskManifestLineages.find((row) => row.run_id === params[0]);
       const run = taskManifestReservations.find((row) => row.id === params[0]);
@@ -425,7 +473,15 @@ beforeEach(() => {
       return undefined;
     }
     if (text.includes('FROM pipeline_runs') && text.includes('idempotency_key = $2')) {
-      return undefined;
+      const run = taskManifestReservations.find((row) => row.workspaceId === params[0] && row.idempotencyKey === params[1]);
+      return run ? {
+        id: run.id, spec_path: run.specPath, status: 'queued', queue_position: run.queuePosition,
+        triggered_via: run.triggeredVia, branch_name: run.branchName ?? null,
+        execution_worktree_path: run.executionWorktreePath ?? null,
+        idempotency_key: run.idempotencyKey, task_manifest_id: run.manifestId,
+        task_manifest_artifacts: run.artifacts, trigger_options: run.triggerOptions,
+        effective_options: run.effectiveOptions, task_manifest_authority_version: 1,
+      } : undefined;
     }
     if (text.includes('SELECT pipeline_config FROM workspaces')) {
       return { pipeline_config: '{}' };
@@ -474,6 +530,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.RORCA_TASK_MANIFEST_FAILPOINT;
   if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -597,6 +654,31 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       runId: expect.any(Number),
     }) });
     expect(taskManifestReservations).toHaveLength(1);
+    expect(mockBoss.send).toHaveBeenCalledTimes(1);
+  });
+
+  test('replays prepared-before-send loss to one run and one pg-boss publication', async () => {
+    const app = makeApp();
+    const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;
+    (manifest.policy as JsonRecord).dryRun = false;
+    const body = { workspaceId: 'ws-hermes', idempotencyKey: manifest.idempotencyKey, manifest, queue: false, autoWorktree: true, mergeStrategy: 'draft-pr', agentOverride: 'claude' };
+    process.env.RORCA_TASK_MANIFEST_FAILPOINT = 'after_preparation_before_send';
+    const lost = await request(app).post('/api/pipeline/task-manifests/trigger').send(body);
+    delete process.env.RORCA_TASK_MANIFEST_FAILPOINT;
+    expect(lost.status).toBeGreaterThanOrEqual(500);
+    expect(taskManifestReservations).toHaveLength(1);
+    expect(mockBoss.send).not.toHaveBeenCalled();
+    taskManifestPublications[0].lease_expires_at = '2000-01-01T00:00:00.000Z';
+
+    const replay = await request(app).post('/api/pipeline/task-manifests/trigger').send(body);
+    expect(replay.status).toBe(201);
+    expect(replay.body.runId).toBe(taskManifestReservations[0].id);
+    expect(mockBoss.send).toHaveBeenCalledTimes(1);
+    expect(taskManifestPublications[0].state).toBe('published');
+
+    const responseLostReplay = await request(app).post('/api/pipeline/task-manifests/trigger').send(body);
+    expect(responseLostReplay.status).toBe(200);
+    expect(responseLostReplay.body.runId).toBe(replay.body.runId);
     expect(mockBoss.send).toHaveBeenCalledTimes(1);
   });
 

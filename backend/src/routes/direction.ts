@@ -82,6 +82,8 @@ async function getTeamLayers(workspaceId: string): Promise<{ teamL1?: string; te
  *                 preferredModel: { type: string, nullable: true, description: "Only returned for L3" }
  *       400: { description: "Invalid layer" }
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: Upsert a direction layer
  *     operationId: upsertDirectionLayer
@@ -302,6 +304,8 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
  * @swagger
  * /api/direction/all:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: Fetch all direction layers for a workspace
  *     operationId: getAllDirectionLayers
@@ -364,6 +368,8 @@ router.get('/all', async (req: Request, res: Response, next: NextFunction) => {
  * @swagger
  * /api/direction/models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: List supported LLM models
  *     operationId: listDirectionModels
@@ -499,6 +505,8 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
  * @swagger
  * /api/direction/models/test:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: Test a specific model by sending a minimal prompt
  *     operationId: testDirectionModel
@@ -596,6 +604,8 @@ router.post('/models/test', async (req: Request, res: Response, _next: NextFunct
  * @swagger
  * /api/direction/preview:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: Preview synthesized direction stack
  *     operationId: previewDirectionStack
@@ -802,6 +812,8 @@ router.post('/synthesize', async (req: Request, res: Response, next: NextFunctio
  * @swagger
  * /api/direction/wizard:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: AI Setup Wizard for direction stack
  *     operationId: runDirectionWizard

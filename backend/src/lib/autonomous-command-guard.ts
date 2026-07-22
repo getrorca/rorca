@@ -123,6 +123,40 @@ case "$cmd_name" in
     echo "[Rorca autonomous command guard] Remote mutation command is host-owned and blocked." >&2
     exit 126
     ;;
+  mkfs|sudo)
+    echo "[Rorca autonomous command guard] Privileged/destructive host command is blocked." >&2
+    exit 126
+    ;;
+  dd)
+    if [[ "$args_joined" =~ [[:space:]]if= ]]; then
+      echo "[Rorca autonomous command guard] Raw device/data copy command is blocked." >&2
+      exit 126
+    fi
+    ;;
+  docker)
+    if [[ "$args_joined" =~ [[:space:]]login([[:space:]]|$) ]]; then
+      echo "[Rorca autonomous command guard] Docker credential mutation is blocked." >&2
+      exit 126
+    fi
+    ;;
+  kubectl)
+    if [[ "$args_joined" =~ [[:space:]](apply|delete)([[:space:]]|$) ]]; then
+      echo "[Rorca autonomous command guard] Cluster mutation is blocked." >&2
+      exit 126
+    fi
+    ;;
+  terraform)
+    if [[ "$args_joined" =~ [[:space:]]apply([[:space:]]|$) ]]; then
+      echo "[Rorca autonomous command guard] Infrastructure apply is blocked." >&2
+      exit 126
+    fi
+    ;;
+  rm)
+    if [[ "$args_joined" =~ [[:space:]](-[^[:space:]]*r[^[:space:]]*f|-rf|-fr)([[:space:]]+--no-preserve-root)?[[:space:]]+/([[:space:]]|$) ]]; then
+      echo "[Rorca autonomous command guard] Filesystem-root deletion is blocked." >&2
+      exit 126
+    fi
+    ;;
   curl|wget)
     # Autonomous shells do not receive general network mutation authority.
     # Read-only HTTP is also denied because method inference, redirects, upload
@@ -221,6 +255,7 @@ export function createAutonomousCommandGuard(options: AutonomousCommandGuardOpti
   const commands = [
     'npm', 'npx', 'jest', 'yarn', 'pnpm',
     'git', 'gh', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync',
+    'rm', 'mkfs', 'dd', 'sudo', 'docker', 'kubectl', 'terraform',
   ];
 
   for (const command of commands) {

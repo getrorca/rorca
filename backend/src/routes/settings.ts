@@ -338,6 +338,8 @@ router.get('/worker', async (_req: Request, res: Response) => {
  * @swagger
  * /api/settings/worker:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Settings]
  *     summary: Update worker settings
  *     operationId: updateWorkerSettings

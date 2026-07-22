@@ -36,7 +36,12 @@ describe('planGate exact OpenAPI default-deny', () => {
     expect(response.status).toBe(204);
   });
 
-  test('denies a documented operation with no exposure tier', async () => {
+  test('passes an explicitly classified native operation to its route-level authority', async () => {
+    const response = await request(gatedApp()).post('/api/workspaces');
+    expect(response.status).toBe(204);
+  });
+
+  test('denies an explicitly classified sensitive operation', async () => {
     const response = await request(gatedApp()).get('/api/auth/me');
     expect(response.status).toBe(404);
     expect(response.body).toEqual({ error: 'Not found' });

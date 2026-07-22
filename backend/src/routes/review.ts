@@ -71,6 +71,8 @@ function findSpecFile(workspacePath: string, specId: string): string | null {
  * @swagger
  * /api/specs/{specId}/review-link:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Generate a shareable review link for a spec
  *     operationId: createSpecReviewLink
@@ -178,6 +180,8 @@ specReviewRouter.post('/:specId/review-link', async (req: Request, res: Response
  * @swagger
  * /api/review/{token}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Review]
  *     summary: Get spec content and comments via review token
  *     operationId: getReviewSpec
@@ -300,6 +304,8 @@ publicReviewRouter.get('/:token', async (req: Request, res: Response) => {
  * @swagger
  * /api/review/{token}/comments:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Review]
  *     summary: Add a guest comment via review token
  *     operationId: addReviewComment
@@ -421,6 +427,8 @@ publicReviewRouter.post('/:token/comments', async (req: Request, res: Response) 
  * @swagger
  * /api/review/comment:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Review]
  *     summary: Store an adversarial review comment from the execution engine
  *     operationId: addInternalReviewComment

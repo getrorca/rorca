@@ -22,6 +22,8 @@ const VALID_EVENT_TYPES = [
  * @swagger
  * /api/workspaces/{workspaceId}/agent-hooks:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Hooks]
  *     summary: List agent hooks for a workspace
  *     operationId: listAgentHooks
@@ -64,6 +66,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-hooks:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Hooks]
  *     summary: Create a new agent hook
  *     operationId: createAgentHook
@@ -129,6 +133,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-hooks/{hookId}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Hooks]
  *     summary: Update an agent hook
  *     operationId: updateAgentHook
@@ -204,6 +210,8 @@ router.put('/:hookId', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-hooks/{hookId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Hooks]
  *     summary: Delete an agent hook
  *     operationId: deleteAgentHook

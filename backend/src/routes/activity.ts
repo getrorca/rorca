@@ -174,6 +174,8 @@ const ACTIVITY_EVENT_TYPES = [
  * @swagger
  * /api/activity:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Get paginated activity feed
  *     operationId: getActivityFeed

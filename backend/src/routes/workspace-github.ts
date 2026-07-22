@@ -733,6 +733,8 @@ router.put('/:id/github/auto-pr', requireWorkspaceAdmin(), async (_req: Request,
  * @swagger
  * /api/workspaces/{id}/github/workflow-config:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [GitHub]
  *     summary: Legacy workflow dispatch configuration is retired
  *     operationId: getWorkspaceGithubWorkflowConfig
@@ -903,6 +905,8 @@ router.post('/:id/github/pr-template-preview', async (req: Request, res: Respons
  * @swagger
  * /api/workspaces/{id}/github/actions-yaml:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [GitHub]
  *     summary: Autonomous GitHub Actions workflow generation is retired
  *     operationId: getWorkspaceGithubActionsYaml

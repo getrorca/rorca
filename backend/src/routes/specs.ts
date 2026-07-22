@@ -74,6 +74,7 @@ import {
   type SpecJob,
 } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
+import { durableAtomicWriteFile, fsyncDirectory } from '../lib/run-spec-snapshot';
 import {
   buildPersistPostSaveStages,
   getEffectiveGenerationLog,
@@ -5637,6 +5638,8 @@ router.post('/lifecycle/backfill', validateBody(BackfillLifecyclePlansSchema), a
  * @swagger
  * /api/specs/generate/job/{jobId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Poll async spec generation job status
  *     operationId: getSpecGenerationJobStatus
@@ -6793,6 +6796,8 @@ router.get('/kanban', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{id}/mark-done:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Manually mark a spec as done in the kanban board
  *     operationId: markSpecDone
@@ -6857,6 +6862,8 @@ router.post('/:id/mark-done', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{id}/unmark-done:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Remove the manual done mark from a spec
  *     operationId: unmarkSpecDone
@@ -6922,6 +6929,8 @@ const MAX_CUSTOM_COLUMNS = 8;
  * @swagger
  * /api/specs/kanban/columns:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: List custom kanban columns for a workspace
  *     operationId: listKanbanColumns
@@ -6978,6 +6987,8 @@ router.get('/kanban/columns', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Create a custom kanban column
  *     operationId: createKanbanColumn
@@ -7053,6 +7064,8 @@ router.post('/kanban/columns', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns/{id}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Update a custom kanban column
  *     operationId: updateKanbanColumn
@@ -7148,6 +7161,8 @@ router.put('/kanban/columns/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Delete a custom kanban column
  *     operationId: deleteKanbanColumn
@@ -7218,6 +7233,8 @@ router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns/assign:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Assign or unassign a spec to a custom kanban column
  *     operationId: assignSpecToKanbanColumn
@@ -8885,6 +8902,8 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/versions/{version}/restore:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Restore a historical spec version
  *     operationId: restoreSpecVersion
@@ -9175,6 +9194,8 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
  * @swagger
  * /api/specs/{specId}/stories/{storyId}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Update a single story
  *     operationId: updateStory
@@ -9450,6 +9471,8 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/rewrite:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: AI-assisted story rewrite
  *     operationId: rewriteStory
@@ -9597,6 +9620,8 @@ Rewrite the story following the user instructions. Keep the same scope unless to
  * @swagger
  * /api/specs/tags/autocomplete:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Autocomplete tag names
  *     operationId: autocompleteSpecTags
@@ -9746,6 +9771,8 @@ router.get('/:specId', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/fork:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Fork (deep copy) a spec with a new slug
  *     operationId: forkSpec
@@ -10217,15 +10244,18 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
         walPayload: { workspaceId, providerApproval },
       };
     }
-    fs.writeFileSync(pendingFile, `${JSON.stringify(pendingContent, null, 2)}\n`, 'utf8');
-    const fileDescriptor = fs.openSync(pendingFile, 'r');
-    try { fs.fsyncSync(fileDescriptor); } finally { fs.closeSync(fileDescriptor); }
+    // Publish the updated pending bytes through an exclusive temp file, file
+    // fsync, rename, and source-directory fsync before crossing directories.
+    durableAtomicWriteFile(pendingFile, `${JSON.stringify(pendingContent, null, 2)}\n`);
 
-    // Create approved/ if needed and move the file
+    // A durable cross-directory rename requires both directory entries to be
+    // flushed. Recovery therefore observes either the exact pending artifact or
+    // the exact approved artifact, never a torn in-place rewrite.
     fs.mkdirSync(approvedDir, { recursive: true });
+    fsyncDirectory(approvedDir);
     fs.renameSync(pendingFile, approvedFile);
-    const approvedDirFd = fs.openSync(approvedDir, fs.constants.O_RDONLY);
-    try { fs.fsyncSync(approvedDirFd); } finally { fs.closeSync(approvedDirFd); }
+    fsyncDirectory(pendingDir);
+    fsyncDirectory(approvedDir);
     authoringMutationFailpoint('approve_after_rename');
     if (claim && claim.state !== 'artifact_written' && claim.state !== 'wal_written') {
       await markAuthoringMutationStage({
@@ -10748,6 +10778,8 @@ router.post('/:specId/workflow/stages/:stageKey/retry', async (req: Request, res
  * @swagger
  * /api/specs/{specId}/check:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Validate a spec's structure and story integrity
  *     operationId: checkSpec
@@ -10950,6 +10982,8 @@ router.get('/:specId/check', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/score:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Compute quality score for a spec's acceptance criteria
  *     operationId: scoreSpec
@@ -11113,6 +11147,8 @@ router.get('/:specId/score', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Delete a spec
  *     operationId: deleteSpec
@@ -11195,6 +11231,8 @@ const VALID_REVIEW_STATUSES: ReviewStatus[] = ['draft', 'review_requested', 'app
  * @swagger
  * /api/specs/{specId}/request-review:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Submit spec for review
  *     operationId: requestSpecReview
@@ -11280,6 +11318,8 @@ router.post('/:specId/request-review', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/review:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Approve or request changes on a spec review
  *     operationId: reviewSpec
@@ -11472,6 +11512,8 @@ function computeParallelGroups(stories: UserStory[]): string[][] {
  * @swagger
  * /api/specs/{specId}/stories/bulk:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Bulk story actions (exclude, include, delete, set_priority)
  *     operationId: bulkStoryAction
@@ -11911,6 +11953,8 @@ interface DependencySuggestion {
  * @swagger
  * /api/specs/{specId}/detect-dependencies:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: AI-powered dependency detection
  *     operationId: detectDependencies
@@ -12118,6 +12162,8 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
  * @swagger
  * /api/specs/{specId}/apply-dependencies:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Accept and apply suggested dependencies
  *     operationId: applyDependencies
@@ -12255,6 +12301,8 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
  * @swagger
  * /api/specs/{specId}/tags:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Add tags to a spec
  *     operationId: addSpecTags
@@ -12336,6 +12384,8 @@ router.post('/:specId/tags', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/tags/{tag}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Remove a tag from a spec
  *     operationId: removeSpecTag
@@ -12417,6 +12467,8 @@ interface StoryCommitRow {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/commits:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: List git commits for a story
  *     operationId: listStoryCommits
@@ -12482,6 +12534,8 @@ router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Respon
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/branch:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Create a git branch for a story
  *     operationId: createStoryBranch
@@ -12624,6 +12678,8 @@ function renderPrTemplate(template: string, vars: Record<string, string>): strin
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/pr-body:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Generate PR body for a story
  *     operationId: generateStoryPrBody
@@ -12850,6 +12906,8 @@ function githubIssueToStory(
  * @swagger
  * /api/specs/{specId}/import/github-issues:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Import GitHub issues as stories
  *     operationId: importGithubIssues
@@ -13186,6 +13244,8 @@ interface ImportRequestBody {
  * @swagger
  * /api/specs/{specId}/import:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Unified issue import from Linear or GitHub
  *     operationId: importIssues
@@ -13398,6 +13458,8 @@ interface StoryCommentRow {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/comments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: List comments for a story
  *     operationId: listStoryComments
@@ -13460,6 +13522,8 @@ router.get('/:specId/stories/:storyId/comments', async (req: Request, res: Respo
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/comments:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Create a comment on a story
  *     operationId: createStoryComment
@@ -13573,6 +13637,8 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/comments/{commentId}/resolve:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Resolve a story comment
  *     operationId: resolveStoryComment
@@ -13652,6 +13718,8 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', async (req:
  * @swagger
  * /api/specs/{specId}/comments/counts:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Get unresolved comment counts per story
  *     operationId: getCommentCounts
@@ -13702,6 +13770,8 @@ router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/assign:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Assign or unassign a spec to a user
  *     operationId: assignSpec
@@ -13835,6 +13905,8 @@ router.put('/:specId/assign', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/assign:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Assign or unassign a story to a user
  *     operationId: assignStory
@@ -13986,6 +14058,8 @@ router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Respons
  * @swagger
  * /api/specs/{specId}/assignments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Get all assignments for a spec
  *     operationId: getSpecAssignments
@@ -14074,6 +14148,8 @@ router.get('/:specId/assignments', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/enhance-criteria:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: AI-suggest additional acceptance criteria
  *     operationId: enhanceStoryCriteria
@@ -14241,6 +14317,8 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/accept-criteria:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Accept and apply suggested acceptance criteria
  *     operationId: acceptStoryCriteria
@@ -14351,6 +14429,8 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
  * @swagger
  * /api/specs/{specId}/match-skills:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: LLM-driven skill matching for a spec
  *     operationId: matchSkills
@@ -14738,6 +14818,8 @@ router.post('/:specId/match-skills/async', async (req: Request, res: Response) =
  * @swagger
  * /api/specs/{specId}/suggest-models:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: LLM-driven model suggestion for each story in a spec
  *     operationId: suggestModels
@@ -14910,6 +14992,8 @@ ${storyList}`;
  * @swagger
  * /api/specs/{specId}/validate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: LLM-powered deep spec review
  *     operationId: validateSpec
@@ -15101,6 +15185,8 @@ Respond with ONLY valid JSON, no markdown fences, no prose. Format:
  * @swagger
  * /api/specs/{specId}/suggest-skills:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Run skill matching for a spec via the skill-matcher module
  *     operationId: suggestSkills
@@ -15285,6 +15371,8 @@ router.post('/:specId/suggest-skills/async', async (req: Request, res: Response)
  * @swagger
  * /api/specs/{specId}/fix:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Apply automated structural fixes to a spec
  *     operationId: fixSpec
@@ -15441,6 +15529,8 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/attachments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List all attachments for a spec
  *     tags: [Specs]
  *     parameters:
@@ -15547,6 +15637,8 @@ router.get('/:specId/attachments', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/attachments/{attachmentId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Download a specific attachment for a spec
  *     tags: [Specs]
  *     parameters:
@@ -15631,6 +15723,8 @@ const attachmentUpload = multer({
  * @swagger
  * /api/specs/{specId}/attachments:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Upload a file attachment for a spec
  *     tags: [Specs]
  *     parameters:
@@ -15742,6 +15836,8 @@ router.post(
  * @swagger
  * /api/specs/{specId}/attachments/{attachmentId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Delete a specific attachment for a spec
  *     tags: [Specs]
  *     parameters:
@@ -16350,6 +16446,8 @@ router.post('/:specId/enrich/async', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{id}/assign-models:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Assign per-story model tiers based on complexity scoring
  *     description: >
  *       Scores each story via the complexity scorer and assigns a model tier

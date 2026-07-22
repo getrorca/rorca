@@ -45,7 +45,7 @@ export function deriveRunSpecPath(options: RunSpecPathOptions): string {
   return snapshot;
 }
 
-function fsyncDirectory(directory: string): void {
+export function fsyncDirectory(directory: string): void {
   const fd = fs.openSync(directory, 'r');
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
@@ -59,6 +59,10 @@ export function durableAtomicWriteFile(filePath: string, content: string): void 
   try {
     fd = fs.openSync(temporary, 'wx', 0o600);
     fs.writeFileSync(fd, content, 'utf8');
+    if (process.env.NODE_ENV === 'test'
+      && process.env.RORCA_DURABLE_ATOMIC_WRITE_FAILPOINT === 'after_temp_write_before_fsync') {
+      throw new Error('durable_atomic_write_failpoint:after_temp_write_before_fsync');
+    }
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;

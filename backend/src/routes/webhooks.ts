@@ -187,6 +187,8 @@ async function auditRejectedGithubDelivery(
  * @swagger
  * /api/webhooks/github:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Webhooks]
  *     summary: Receive GitHub webhook events
  *     operationId: receiveGithubWebhook
@@ -441,6 +443,8 @@ interface DlqRow {
  * @swagger
  * /api/webhooks/dlq:
  *   get:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Webhooks]
  *     summary: List webhook dead letter queue events
  *     operationId: listWebhookDlq
@@ -531,6 +535,8 @@ webhookAdminRouter.get('/dlq', requirePlatformAdmin, requireDlqWorkspaceRole('me
  * @swagger
  * /api/webhooks/dlq/{id}/retry:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Webhooks]
  *     summary: Retry a webhook DLQ event
  *     operationId: retryWebhookDlqEvent
@@ -610,6 +616,8 @@ webhookAdminRouter.post('/dlq/:id/retry', requireProviderMutationAuthority, requ
  * @swagger
  * /api/webhooks/linear:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Webhooks]
  *     summary: Receive Linear webhook events
  *     operationId: receiveLinearWebhook
@@ -642,6 +650,8 @@ webhookAdminRouter.post('/dlq/:id/retry', requireProviderMutationAuthority, requ
  * @swagger
  * /api/webhooks/vercel:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Webhooks]
  *     summary: Receive Vercel webhook events
  *     operationId: receiveVercelWebhook
@@ -661,6 +671,8 @@ webhookAdminRouter.post('/dlq/:id/retry', requireProviderMutationAuthority, requ
  * @swagger
  * /api/webhooks/slack:
  *   post:
+ *     x-rorca-intentionally-denied: true
+ *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
  *     tags: [Webhooks]
  *     summary: Receive Slack webhook events
  *     operationId: receiveSlackWebhook

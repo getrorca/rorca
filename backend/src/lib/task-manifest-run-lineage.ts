@@ -8,6 +8,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { PoolClient } from 'pg';
 import { queryOne } from '../db/index';
 import { ConflictError } from './errors';
@@ -76,6 +77,15 @@ function containedFile(workspacePath: string, relativePath: string): string {
   const relative = path.relative(root, absolute);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new ConflictError('TaskManifest lineage path escapes workspace authority');
+  }
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment);
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink()) throw new ConflictError('TaskManifest lineage path contains a symlink');
+  }
+  if (!fs.lstatSync(absolute).isFile() || fs.realpathSync(absolute) !== absolute) {
+    throw new ConflictError('TaskManifest lineage authority must be a regular contained file');
   }
   return absolute;
 }
@@ -223,6 +233,42 @@ async function loadVerified(
     }
   }
   return { lineage, manifest, syntheticSpec };
+}
+
+function scopeContains(scope: string, candidate: string): boolean {
+  const root = scope.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  const pathValue = candidate.replace(/\\/g, '/').replace(/^\.\//, '');
+  return pathValue === root || pathValue.startsWith(`${root}/`);
+}
+
+/** Recheck exact committed file scope at host closeout; prose is never authority. */
+export async function assertTaskManifestHostFileScope(input: {
+  runId: number;
+  workspacePath: string;
+  repositoryPath: string;
+  commitShas: string[];
+}): Promise<void> {
+  const verified = await loadVerified(input.runId, input.workspacePath, new Set<number>());
+  const allowed = verified.manifest.boundedScope.allowedPaths;
+  const forbidden = verified.manifest.boundedScope.forbiddenPaths;
+  if (allowed.length === 0) throw new ConflictError('TaskManifest host file scope is empty');
+  const changed = new Set<string>();
+  for (const sha of input.commitShas) {
+    const output = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', sha], {
+      cwd: input.repositoryPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    for (const file of output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) changed.add(file);
+  }
+  for (const file of changed) {
+    if (forbidden.some((scope) => scopeContains(scope, file))) {
+      throw new ConflictError(`TaskManifest changed forbidden path '${file}'`);
+    }
+    if (!allowed.some((scope) => scopeContains(scope, file))) {
+      throw new ConflictError(`TaskManifest changed path outside host-enforced scope '${file}'`);
+    }
+  }
 }
 
 export async function loadAndVerifyTaskManifestRunLineage(

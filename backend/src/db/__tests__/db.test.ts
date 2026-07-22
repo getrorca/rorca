@@ -30,7 +30,7 @@ test('SELECT 1 succeeds (pool is connected)', async () => {
 test('all core tables exist in pg_tables', async () => {
   const { rows } = await pool.query(`
     SELECT tablename FROM pg_tables
-    WHERE schemaname = 'public'
+    WHERE schemaname = 'rorca'
       AND tablename != 'schema_migrations'
     ORDER BY tablename
   `);
@@ -138,6 +138,28 @@ test('running migrations again is idempotent', async () => {
   // Import and re-run — should not throw
   const { runPgMigrations } = require('../pg-index');
   await expect(runPgMigrations(pool)).resolves.not.toThrow();
+});
+
+test('prepareLiteSkippedMigrationsForReplay waits for the canonical migration session lock', async () => {
+  const version = 99999999999998;
+  await pool.query(
+    `INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode)
+     VALUES ($1, '050_knowledge_graph.sql [skipped: extension unavailable]', TRUE)
+     ON CONFLICT (version) DO UPDATE SET skipped_in_lite_mode=TRUE`, [version],
+  );
+  const lockClient = await pool.connect();
+  await lockClient.query('SELECT pg_advisory_lock($1)', [8_244_250_520_000]);
+  let completed = false;
+  const { prepareLiteSkippedMigrationsForReplay } = require('../pg-index');
+  const replay = prepareLiteSkippedMigrationsForReplay(pool).then((versions: number[]) => {
+    completed = true;
+    return versions;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(completed).toBe(false);
+  await lockClient.query('SELECT pg_advisory_unlock($1)', [8_244_250_520_000]);
+  lockClient.release();
+  await expect(replay).resolves.toContain(version);
 });
 
 test('prepareLiteSkippedMigrationsForReplay removes lite-skipped rows so they can be replayed', async () => {

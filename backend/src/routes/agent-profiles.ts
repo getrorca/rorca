@@ -36,6 +36,8 @@ function formatProfile(row: AgentProfileRow) {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-profiles:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Profiles]
  *     summary: List agent profiles for a workspace
  *     operationId: listAgentProfiles
@@ -81,6 +83,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-profiles/active:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Profiles]
  *     summary: Get the active agent profile for a workspace
  *     operationId: getActiveAgentProfile
@@ -113,6 +117,8 @@ router.get('/active', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-profiles:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Profiles]
  *     summary: Create a new agent profile
  *     operationId: createAgentProfile
@@ -201,6 +207,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-profiles/{profileId}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Profiles]
  *     summary: Update an agent profile
  *     operationId: updateAgentProfile
@@ -280,6 +288,8 @@ router.put('/:profileId', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/agent-profiles/{profileId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agent Profiles]
  *     summary: Delete an agent profile
  *     operationId: deleteAgentProfile

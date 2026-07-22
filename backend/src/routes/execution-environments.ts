@@ -93,6 +93,8 @@ async function authenticateRunnerRequest(req: Request) {
  * @swagger
  * /api/execution-environments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List execution environments
  *     responses:
  *       200: { description: OK }
@@ -115,6 +117,8 @@ router.get('/', async (_req: Request, res: Response) => {
  * @swagger
  * /api/execution-environments/{id}/readiness:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get execution environment readiness
  *     responses:
  *       200: { description: OK }
@@ -131,6 +135,8 @@ router.get('/:id/readiness', async (req: Request, res: Response) => {
  * @swagger
  * /api/execution-environments/{id}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Upsert an execution environment
  *     responses:
  *       200: { description: OK }
@@ -148,6 +154,8 @@ router.put('/:id', validateBody(UpsertEnvironmentSchema), async (req: Request, r
  * @swagger
  * /api/execution-environments/{id}/runner-token:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Set runner token for an execution environment
  *     responses:
  *       200: { description: OK }
@@ -171,6 +179,8 @@ router.post('/:id/runner-token', validateBody(RunnerTokenSchema), async (req: Re
  * @swagger
  * /api/execution-environments/{id}/runner/heartbeat:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Runner heartbeat and capability report
  *     responses:
  *       200: { description: OK }
@@ -190,6 +200,8 @@ router.post('/:id/runner/heartbeat', validateBody(RunnerHeartbeatSchema), async 
  * @swagger
  * /api/execution-environments/{id}/runner/poll:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Claim next job for an outbound runner
  *     responses:
  *       200: { description: OK }
@@ -208,6 +220,8 @@ router.post('/:id/runner/poll', validateBody(RunnerPollSchema), async (req: Requ
  * @swagger
  * /api/execution-environments/{id}/runner/jobs/{jobId}/running:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Mark a claimed runner job as running
  *     responses:
  *       200: { description: OK }
@@ -263,6 +277,8 @@ router.post('/:id/runner/jobs/:jobId/revalidate', validateBody(RunnerPollSchema)
  * @swagger
  * /api/execution-environments/{id}/runner/jobs/{jobId}/complete:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Complete a runner job
  *     responses:
  *       200: { description: OK }

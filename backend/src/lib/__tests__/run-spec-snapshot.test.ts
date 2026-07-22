@@ -12,10 +12,26 @@ import { PipelineRetryJobPayload, PipelineRunJobPayload } from '../pg-boss-schem
 import {
   assertRunSpecAuthorityProjection,
   deriveRunSpecPath,
+  durableAtomicWriteFile,
   prepareRunSpecSnapshot,
 } from '../run-spec-snapshot';
 
 describe('prepareRunSpecSnapshot', () => {
+  test('partial temp-file failure preserves the prior authoritative bytes', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-atomic-write-'));
+    const target = path.join(root, 'pending.json');
+    fs.writeFileSync(target, '{"version":1}\n');
+    process.env.RORCA_DURABLE_ATOMIC_WRITE_FAILPOINT = 'after_temp_write_before_fsync';
+    try {
+      expect(() => durableAtomicWriteFile(target, '{"version":2}\n')).toThrow(/durable_atomic_write_failpoint/);
+      expect(fs.readFileSync(target, 'utf8')).toBe('{"version":1}\n');
+      expect(fs.readdirSync(root)).toEqual(['pending.json']);
+    } finally {
+      delete process.env.RORCA_DURABLE_ATOMIC_WRITE_FAILPOINT;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('copies worktree runs to an isolated mutable artifact', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-run-spec-'));
     try {

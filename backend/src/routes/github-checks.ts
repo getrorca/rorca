@@ -31,6 +31,8 @@ interface RunBindingRow {
  * @swagger
  * /api/github/checks/{sha}:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [GitHub]
  *     summary: Post a non-governing manual status for a canonically bound run and PR
  *     operationId: updateGithubManualCheckStatus

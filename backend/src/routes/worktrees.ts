@@ -105,6 +105,8 @@ function parsePorcelain(output: string): GitWorktree[] {
  * @swagger
  * /api/worktrees:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: List git worktrees for a workspace
  *     operationId: listWorktrees
@@ -127,6 +129,8 @@ function parsePorcelain(output: string): GitWorktree[] {
  *                   items: { $ref: '#/components/schemas/GitWorktree' }
  *       404: { description: "Workspace not found" }
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Create a new git worktree
  *     operationId: createWorktree
@@ -196,6 +200,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/worktrees:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Create a new git worktree
  *     operationId: createWorktree
@@ -310,6 +316,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/worktrees/{encodedPath}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Remove a git worktree
  *     operationId: removeWorktree
@@ -373,6 +381,8 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
  * @swagger
  * /api/worktrees/merge/preview:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Retired canonical-workspace merge preview
  *     operationId: previewWorktreeMerge
@@ -401,6 +411,8 @@ router.post('/merge/preview', (_req: Request, res: Response) => {
  * @swagger
  * /api/worktrees/merge:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Retired arbitrary worktree merge actuator
  *     operationId: mergeWorktree
@@ -430,6 +442,8 @@ router.post('/merge', (_req: Request, res: Response) => {
  * @swagger
  * /api/worktrees/status:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Get worktree branch status
  *     operationId: getWorktreeStatus

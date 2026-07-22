@@ -21,6 +21,8 @@ const router = Router();
  * @swagger
  * /api/workspace/file-watch-status:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Get file watcher health and watched file list
  *     operationId: getFileWatchStatus

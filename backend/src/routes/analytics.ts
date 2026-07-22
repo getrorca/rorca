@@ -278,6 +278,8 @@ function mapOntologyHotspotItems(rows: OntologyHotspotRow[], scopeType: Ontology
  * @swagger
  * /api/analytics/usage:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Get token usage analytics
  *     operationId: getTokenUsage
@@ -502,6 +504,8 @@ interface PeriodCostRow {
  * @swagger
  * /api/analytics/costs:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Get cost analytics
  *     operationId: getCostAnalytics
@@ -727,6 +731,8 @@ interface ModelPricingFullRow {
  * @swagger
  * /api/analytics/pricing:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: List all model pricing entries
  *     operationId: listModelPricing
@@ -781,6 +787,8 @@ router.get('/pricing', async (_req: Request, res: Response) => {
  * @swagger
  * /api/analytics/pricing/{modelId}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Update or create model pricing
  *     operationId: upsertModelPricing
@@ -894,6 +902,8 @@ router.put('/pricing/:modelId', async (req: Request, res: Response) => {
  * @swagger
  * /api/analytics/pricing/{modelId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Remove model pricing entry
  *     operationId: deleteModelPricing
@@ -957,6 +967,8 @@ interface ModelComparisonRow {
  * @swagger
  * /api/analytics/models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Model comparison metrics
  *     operationId: getModelComparison
@@ -1086,6 +1098,8 @@ interface VelocityWeek {
  * @swagger
  * /api/analytics/velocity:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Weekly story completion velocity
  *     operationId: getVelocity
@@ -1278,6 +1292,8 @@ interface CompletionGroup {
  * @swagger
  * /api/analytics/completion-rates:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Pass/fail/skip rates by complexity and tag
  *     operationId: getCompletionRates
@@ -1709,6 +1725,8 @@ async function buildCompletionExport(from: string, to: string, workspaceId?: str
  * @swagger
  * /api/analytics/export:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Export analytics data (CSV or JSON)
  *     operationId: exportAnalyticsData
@@ -3836,6 +3854,8 @@ interface SkillEffectivenessResult {
  * @swagger
  * /api/analytics/skills/effectiveness:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Skill effectiveness analytics
  *     operationId: getSkillEffectiveness

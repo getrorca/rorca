@@ -92,6 +92,8 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
  * @swagger
  * /api/config:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get agent configuration
  *     operationId: getAgentConfig
  *     description: Returns the current agent type, model, API key status, and detected CLI binaries.
@@ -221,6 +223,8 @@ async function detectOllama(): Promise<OllamaStatus> {
  * @swagger
  * /api/config/ollama:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Detect Ollama availability and list locally installed models
  *     operationId: detectOllamaModels
  *     description: Probes the local Ollama API and returns available models with their sizes.
@@ -238,6 +242,8 @@ router.get('/ollama', async (_req: Request, res: Response) => {
  * @swagger
  * /api/config/opencode-models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get available OpenCode models grouped by provider
  *     operationId: listOpenCodeModels
  *     description: Returns the full OpenCode model catalog with dynamic Ollama discovery, grouped by provider.
@@ -353,6 +359,8 @@ async function resolveOpenRouterKey(): Promise<string | null> {
  * @swagger
  * /api/config/openrouter-models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get OpenRouter model catalog (cached 1h)
  *     operationId: listOpenRouterModels
  *     description: Fetches the OpenRouter model catalog (cached for one hour) and returns models grouped by provider family.
@@ -461,6 +469,8 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
  * @swagger
  * /api/config/openrouter-test:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Test OpenRouter API key connection
  *     operationId: testOpenRouterConnection
  *     description: Validates an OpenRouter API key by making a test request and returns latency and model count.
@@ -542,6 +552,8 @@ router.post('/openrouter-test', async (req: Request, res: Response) => {
  * @swagger
  * /api/config/agent:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Update active agent configuration in memory
  *     operationId: updateAgentConfig
  *     description: Switches the active execution engine and model without restarting the backend. This is in-memory only and reverts to .env values on restart.
@@ -680,6 +692,8 @@ async function resolveWorkspacePath(workspaceId: string | undefined): Promise<st
  * @swagger
  * /api/config/orchestration:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get the full orchestration config for a workspace (merged with defaults)
  *     operationId: getOrchestrationConfig
  *     description: Returns the orchestration configuration for a workspace including routing, thresholds, and task settings.
@@ -716,6 +730,8 @@ router.get('/orchestration', async (req: Request, res: Response) => {
  * @swagger
  * /api/config/orchestration:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Update orchestration config in .rorca/config.json
  *     operationId: updateOrchestrationConfig
  *     description: Writes the orchestration configuration to the workspace .rorca/config.json file after validation.
@@ -798,6 +814,8 @@ router.put('/orchestration', async (req: Request, res: Response) => {
  * @swagger
  * /api/config/claude-auth:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get Claude subscription auth state (no raw token exposed)
  *     operationId: getClaudeAuthState
  *     description: Returns the current Claude CLI authentication status including connection state and account details.
@@ -815,6 +833,8 @@ router.get('/claude-auth', (_req: Request, res: Response) => {
  * @swagger
  * /api/config/claude-auth/login:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Trigger Claude CLI auth login (opens browser for PKCE OAuth)
  *     operationId: triggerClaudeLogin
  *     description: Spawns the Claude CLI login flow which opens the user's browser for PKCE OAuth authentication.
@@ -838,6 +858,8 @@ router.post('/claude-auth/login', (_req: Request, res: Response) => {
  * @swagger
  * /api/config/claude-auth/logout:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Trigger Claude CLI auth logout
  *     operationId: triggerClaudeLogout
  *     description: Removes the stored Claude CLI credentials and disconnects the account.
@@ -863,6 +885,8 @@ router.post('/claude-auth/logout', async (_req: Request, res: Response) => {
  * @swagger
  * /api/config/codex-auth:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get Codex CLI (ChatGPT) auth state
  *     operationId: getCodexAuthState
  *     description: Returns the current Codex CLI authentication status including connection state and ChatGPT plan details.
@@ -880,6 +904,8 @@ router.get('/codex-auth', (_req: Request, res: Response) => {
  * @swagger
  * /api/config/codex-auth/login:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Trigger Codex CLI login (opens browser for ChatGPT OAuth)
  *     operationId: triggerCodexLogin
  *     description: Spawns the Codex CLI login flow which opens the user's browser for ChatGPT OAuth authentication.
@@ -903,6 +929,8 @@ router.post('/codex-auth/login', (_req: Request, res: Response) => {
  * @swagger
  * /api/config/codex-auth/logout:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Trigger Codex CLI logout (remove stored credentials)
  *     operationId: triggerCodexLogout
  *     description: Removes the stored Codex CLI credentials and disconnects the ChatGPT account.
@@ -928,6 +956,8 @@ router.post('/codex-auth/logout', async (_req: Request, res: Response) => {
  * @swagger
  * /api/config/embedding-provider:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get active embedding provider info
  *     operationId: getEmbeddingProvider
  *     description: Returns the currently active embedding provider, model, dimensions, and resolution source (config, env, vault, or local).
@@ -962,6 +992,8 @@ router.get('/embedding-provider', async (req: Request, res: Response) => {
  * @swagger
  * /api/config/embedding-provider:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Set embedding provider (persisted to .rorca/config.json)
  *     operationId: setEmbeddingProvider
  *     description: Sets the active embedding provider in the workspace config. Use 'auto' to revert to auto-detection.
@@ -1050,6 +1082,8 @@ function getOpenRouterMetadataFromCache(modelId: string): OpenRouterModelMetadat
  * @swagger
  * /api/config/model-capability:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get reasoning capability for any model ID
  *     operationId: getModelCapability
  *     description: |
@@ -1231,6 +1265,8 @@ router.get('/model-capability', async (req: Request, res: Response) => {
  * @swagger
  * /api/config/pi-models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get available Pi CLI models
  *     description: Detects the local Pi CLI installation and returns the available models from `pi --list-models`. Results are cached in memory for 60 seconds.
  *     tags: [Config]
@@ -1273,6 +1309,8 @@ router.get('/pi-models', (_req: Request, res: Response) => {
  * @swagger
  * /api/config/codex-models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get available Codex models from local cache
  *     description: Reads ~/.codex/models_cache.json and returns all visible models with their reasoning levels.
  *     responses:

@@ -45,6 +45,7 @@ jest.mock('../../lib/codex-auth', () => ({
 // In test mode server.ts never calls initBoss(), so we stub the whole module.
 jest.mock('../../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
+  getPgBossSchemaSql: jest.fn(() => '"pgboss"'),
   getBoss: jest.fn().mockReturnValue({
     createQueue: jest.fn().mockResolvedValue(undefined),
     send: jest.fn().mockResolvedValue('mock-job-id'),
@@ -224,8 +225,9 @@ function cloneTaskManifestFixture(): Record<string, any> {
   const manifest = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Record<string, any>;
   manifest.workspaceId = 'ws-pipe';
   manifest.source.rorca.specPath = 'forge/specs/approved/source-spec.json';
+  manifest.boundedScope.allowedPaths.push('forge/specs/approved/source-spec.json');
   manifest.execution.agentOverride = 'pi';
-  manifest.execution.modelOverride = 'claude-sonnet-4-5-20250929';
+  manifest.execution.modelOverride = 'gpt-5.4';
   manifest.execution.terminalMode = 'ansi-html';
   return manifest;
 }
@@ -3063,6 +3065,23 @@ describe('GET /api/pipeline/runs/:runId/context-inspector-events — retrievalTe
 // ─── POST /api/pipeline/task-manifests/trigger ───────────────────────────────
 
 describe('POST /api/pipeline/task-manifests/trigger', () => {
+  beforeEach(() => {
+    const piDetector = require('../../lib/pi-detector') as typeof import('../../lib/pi-detector');
+    jest.spyOn(piDetector, 'detectPi').mockReturnValue({ piInstalled: true, piVersion: '0.67.2', piBinPath: '/usr/local/bin/pi' });
+    jest.spyOn(piDetector, 'listPiModels').mockReturnValue([
+      { provider: 'openai-codex', model: 'gpt-5.4', contextTokens: 272000, maxOutTokens: 128000, thinking: true, images: true },
+    ]);
+    const openCodeDetector = require('../../lib/opencode-detector') as typeof import('../../lib/opencode-detector');
+    jest.spyOn(openCodeDetector, 'detectOpenCode').mockReturnValue({ opencodeInstalled: true, opencodeVersion: '1.2.3', opencodeBinPath: '/usr/bin/true' });
+    const environmentRegistry = require('../../lib/execution-environment-registry') as typeof import('../../lib/execution-environment-registry');
+    jest.spyOn(environmentRegistry, 'assertExecutionEnvironmentReadyForRun').mockResolvedValue({
+      id: 'remote-rorca', label: 'Remote Rorca worker', kind: 'remote-rorca', enabled: true,
+      ready: true, networkMode: 'local', lastHeartbeatAt: null,
+      supportedAgents: ['claude', 'codex', 'opencode', 'pi'], secretProfileId: null,
+      agents: {},
+    });
+  });
+
   test('dry-run validates, writes artifacts, returns estimated plan, and does not enqueue', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
@@ -3128,7 +3147,7 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       autoWorktree: false,
       mergeStrategy: 'branch-only',
       agentOverride: 'pi',
-      modelOverride: 'claude-sonnet-4-5-20250929',
+      modelOverride: 'gpt-5.4',
       effortLevel: 'high',
       terminal_mode: 'ansi-html',
       executionEnvironment: 'local-worktree',
@@ -3150,15 +3169,9 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       idempotencyKey: body.idempotencyKey,
       artifacts: expect.objectContaining({ specPath: expect.stringContaining('hermes-task-manifest') }),
     }));
-    if (executionEnvironmentSupported) {
-      expect(res.body).toEqual(expect.objectContaining({
-        executionEnvironment: 'local-worktree',
-        executionEnvironmentId: 'tm-test-env',
-      }));
-    } else {
-      expect(res.body.executionEnvironment).toBeUndefined();
-      expect(res.body.executionEnvironmentId).toBeUndefined();
-    }
+    expect(executionEnvironmentSupported).toBe(true);
+    expect(res.body.executionEnvironment).toBe('remote-rorca');
+    expect(res.body.executionEnvironmentId).toBeUndefined();
 
     const run = await queryOne<{
       idempotency_key: string | null;
@@ -3216,15 +3229,8 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       expect.objectContaining({ retryLimit: 0 }),
     );
     const [, jobPayload] = (getBoss().send as jest.Mock).mock.calls.at(-1) as [string, Record<string, unknown>];
-    if (executionEnvironmentSupported) {
-      expect(jobPayload).toEqual(expect.objectContaining({
-        executionEnvironment: 'local-worktree',
-        executionEnvironmentId: 'tm-test-env',
-      }));
-    } else {
-      expect(jobPayload.executionEnvironment).toBeUndefined();
-      expect(jobPayload.executionEnvironmentId).toBeUndefined();
-    }
+    expect(jobPayload.executionEnvironment).toBe('remote-rorca');
+    expect(jobPayload.executionEnvironmentId).toBeUndefined();
   });
 
   test('request agentOverride=codex beats manifest agentOverride=pi for queued execution', async () => {

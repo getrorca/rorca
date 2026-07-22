@@ -76,6 +76,8 @@ export interface RorcaTierOperationLike {
   'x-rorca-rationale'?: string;
   'x-rorca-public-api'?: boolean;
   'x-rorca-capability'?: string;
+  'x-rorca-native-api'?: boolean;
+  'x-rorca-intentionally-denied'?: boolean;
 }
 
 export interface RorcaTierSummary {
@@ -115,7 +117,9 @@ function buildMatchers(spec: OpenApiTierSpecLike): RouteMatcher[] {
     for (const [method, operation] of Object.entries(methods)) {
       if (!operation) continue;
       const rawTier = operation['x-rorca-tier'];
-      if (rawTier !== 'public' && rawTier !== 'auth' && rawTier !== 'paid' && rawTier !== 'admin') {
+      if (rawTier !== 'public' && rawTier !== 'auth' && rawTier !== 'paid' && rawTier !== 'admin'
+        && operation['x-rorca-native-api'] !== true
+        && operation['x-rorca-intentionally-denied'] !== true) {
         continue;
       }
 

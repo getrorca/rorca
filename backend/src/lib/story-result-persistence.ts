@@ -105,6 +105,8 @@ export interface LegacyStoryAccountingInput {
 
 interface RunProjectionRow {
   workspace_id: string;
+  status: string;
+  host_closeout_event_id: number | null;
   spec_path: string;
   branch_name: string | null;
   execution_workspace_path: string | null;
@@ -594,7 +596,7 @@ function assertSameAccounting(
 
 async function loadRunProjection(client: PoolClient, input: CanonicalStoryResultInput): Promise<RunProjectionRow> {
   const projection = rows(await client.query<RunProjectionRow>(`
-    SELECT pr.workspace_id, pr.spec_path, pr.branch_name,
+    SELECT pr.workspace_id, pr.status, pr.host_closeout_event_id, pr.spec_path, pr.branch_name,
            pr.execution_workspace_path, pr.execution_worktree_path,
            sem.manifest_hash, sem.spec_revision, sem.story_revision,
            scd.decision_id AS closeout_decision_id,
@@ -616,6 +618,10 @@ async function loadRunProjection(client: PoolClient, input: CanonicalStoryResult
     WHERE pr.id = $1
   `, [input.runId, input.storyId]))[0];
   if (!projection) throw new NotFoundError('Pipeline run not found');
+  if (projection.host_closeout_event_id != null
+    || ['done', 'failed', 'partial_failure', 'cancelled'].includes(projection.status)) {
+    throw new ConflictError('Story result cannot mutate a terminalized run authority snapshot');
+  }
   if (input.expectedWorkspaceId && projection.workspace_id !== input.expectedWorkspaceId) {
     throw new ConflictError('Fallback story result does not belong to the replay workspace');
   }
@@ -834,6 +840,7 @@ async function persistCanonicalStoryResultInternal(
 ): Promise<CanonicalStoryResultOutcome> {
   validateInput(input, authority, { requireWriteRole });
   return transaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`run-host-authority:${input.runId}`]);
     const integrationState = await lockWaveIntegrationFinalization(client, input, options);
     const projection = await loadRunProjection(client, input);
     const specId = path.basename(projection.spec_path, '.json');

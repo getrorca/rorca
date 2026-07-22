@@ -28,6 +28,20 @@ import { logger } from './logger';
 let bossInstance: PgBoss | null = null;
 let bossInitPromise: Promise<void> | null = null;
 
+/** One validated authority for pg-boss configuration and internal evidence reads. */
+export function getPgBossSchemaName(): string {
+  const configuredSchema = process.env.RORCA_PGBOSS_SCHEMA?.trim() || 'pgboss';
+  if (!/^pgboss(?:_[a-z0-9_]{1,48})?$/.test(configuredSchema)) {
+    throw new Error('[pg-boss] RORCA_PGBOSS_SCHEMA must be pgboss or a bounded pgboss_* identifier');
+  }
+  return configuredSchema;
+}
+
+/** SQL identifier safe only because getPgBossSchemaName applies a closed grammar. */
+export function getPgBossSchemaSql(): string {
+  return `"${getPgBossSchemaName()}"`;
+}
+
 /**
  * initBoss — create and start the pg-boss singleton.
  *
@@ -50,10 +64,7 @@ export async function initBoss(): Promise<void> {
       throw new Error('[pg-boss] DATABASE_URL is not set — cannot initialise pg-boss');
     }
 
-    const configuredSchema = process.env.RORCA_PGBOSS_SCHEMA?.trim() || 'pgboss';
-    if (!/^pgboss(?:_[a-z0-9_]{1,48})?$/.test(configuredSchema)) {
-      throw new Error('[pg-boss] RORCA_PGBOSS_SCHEMA must be pgboss or a bounded pgboss_* identifier');
-    }
+    const configuredSchema = getPgBossSchemaName();
     const boss = new PgBoss({
       connectionString,
       // pg-boss alone creates/migrates this schema. The override exists for

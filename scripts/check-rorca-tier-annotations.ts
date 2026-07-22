@@ -57,6 +57,8 @@ type Operation = {
   'x-rorca-capability'?: string;
   'x-rorca-rationale'?: string;
   'x-rorca-public-api'?: boolean;
+  'x-rorca-native-api'?: boolean;
+  'x-rorca-intentionally-denied'?: boolean;
 };
 
 type SpecPaths = Record<string, Record<string, Operation | undefined> | undefined>;
@@ -120,6 +122,17 @@ function main(): void {
     if (metadata.tier === 'denied') {
       if (metadata.publicApi === true) {
         errors.push(`Default-denied route ${key} must not include x-rorca-public-api: true`);
+      }
+      const nativeApi = operation['x-rorca-native-api'] === true;
+      const intentionallyDenied = operation['x-rorca-intentionally-denied'] === true;
+      if (nativeApi === intentionallyDenied) {
+        errors.push(`Default-denied route ${key} must declare exactly one of x-rorca-native-api:true or x-rorca-intentionally-denied:true`);
+      }
+      if (!operation['x-rorca-rationale']) {
+        errors.push(`Classified native/default-denied route ${key} is missing x-rorca-rationale`);
+      }
+      if (nativeApi && isSensitiveRoute(key)) {
+        errors.push(`Sensitive route must remain intentionally denied: ${key}`);
       }
       continue;
     }

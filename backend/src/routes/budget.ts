@@ -130,6 +130,8 @@ export async function checkBudgetThresholds(workspaceId: string): Promise<{
  * @swagger
  * /api/workspaces/{workspaceId}/budget:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Budget]
  *     summary: Create or update budget configuration
  *     operationId: upsertBudgetConfig
@@ -263,6 +265,8 @@ router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) =>
  * @swagger
  * /api/workspaces/{workspaceId}/budget:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Budget]
  *     summary: Get budget configuration and current spending
  *     operationId: getBudgetConfig
@@ -343,6 +347,8 @@ router.get('/', requireWorkspaceMember(), async (req: Request, res: Response) =>
  * @swagger
  * /api/workspaces/{workspaceId}/budget:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Budget]
  *     summary: Remove budget configuration
  *     operationId: deleteBudgetConfig

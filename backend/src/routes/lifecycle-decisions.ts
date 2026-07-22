@@ -84,6 +84,75 @@ function decisionSubject(value: unknown): DecisionSubject | null | undefined {
   return { type: subject.type, value: subject.value };
 }
 
+function lifecycleDecisionInput(body: Record<string, unknown>, sourceId = 'target-resolution'): RecordSsdlcDecisionInput {
+  if (typeof body.decisionType !== 'string'
+    || !SSDLC_DECISION_TYPES.includes(body.decisionType as (typeof SSDLC_DECISION_TYPES)[number])) {
+    throw new ValidationError('decisionType is not a caller-authorized lifecycle decision type', { field: 'decisionType' });
+  }
+  return {
+    workspaceId: optionalString(body.workspaceId) ?? '',
+    specSlug: optionalString(body.specSlug) ?? '',
+    specVersion: body.specVersion as string | number | null | undefined,
+    runId: body.runId === undefined || body.runId === null ? body.runId as null | undefined : Number(body.runId),
+    storyId: optionalString(body.storyId),
+    phaseId: optionalString(body.phaseId) ?? '',
+    gateId: optionalString(body.gateId),
+    decisionType: body.decisionType as RecordSsdlcDecisionInput['decisionType'],
+    rationale: optionalString(body.rationale) ?? '',
+    expiresAt: body.expiresAt as string | null | undefined,
+    evidenceGap: optionalString(body.evidenceGap),
+    subject: decisionSubject(body.subject),
+    sourceRequestId: sourceId,
+  };
+}
+
+export function lifecycleDecisionProviderTarget(input: RecordSsdlcDecisionInput): string {
+  return providerHumanActionHash({
+    purpose: 'lifecycle_decision',
+    workspaceId: input.workspaceId,
+    specSlug: input.specSlug,
+    specVersion: input.specVersion ?? null,
+    runId: input.runId ?? null,
+    storyId: input.storyId ?? null,
+    phaseId: input.phaseId,
+    gateId: input.gateId ?? null,
+    decisionType: input.decisionType,
+    rationale: input.rationale,
+    expiresAt: input.expiresAt ?? null,
+    evidenceGap: input.evidenceGap ?? null,
+    subject: input.subject ?? null,
+  });
+}
+
+/**
+ * @swagger
+ * /api/lifecycle/decisions/target:
+ *   post:
+ *     tags: [Lifecycle Decisions]
+ *     summary: Resolve the exact provider-human lifecycle decision target
+ *     operationId: resolveLifecycleDecisionTarget
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Returns the canonical hash a provider human must sign; it grants no decision authority and performs no mutation."
+ *     responses:
+ *       200: { description: Canonical provider-human target hash }
+ */
+router.post('/decisions/target', async (req, res, next) => {
+  try {
+    const body = bodyObject(req);
+    rejectActorClaims(body);
+    requestPrincipal(req);
+    const input = lifecycleDecisionInput(body);
+    res.json({
+      ok: true,
+      workspaceId: input.workspaceId,
+      targetHash: lifecycleDecisionProviderTarget(input),
+      command: `approve lifecycle decision ${lifecycleDecisionProviderTarget(input)}`,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /**
  * @swagger
  * /api/lifecycle/decisions:
@@ -128,25 +197,7 @@ router.post('/decisions', async (req, res, next) => {
     const body = bodyObject(req);
     rejectActorClaims(body);
     requestPrincipal(req);
-    if (typeof body.decisionType !== 'string'
-      || !SSDLC_DECISION_TYPES.includes(body.decisionType as (typeof SSDLC_DECISION_TYPES)[number])) {
-      throw new ValidationError('decisionType is not a caller-authorized lifecycle decision type', { field: 'decisionType' });
-    }
-    const input: RecordSsdlcDecisionInput = {
-      workspaceId: optionalString(body.workspaceId) ?? '',
-      specSlug: optionalString(body.specSlug) ?? '',
-      specVersion: body.specVersion as string | number | null | undefined,
-      runId: body.runId === undefined || body.runId === null ? body.runId as null | undefined : Number(body.runId),
-      storyId: optionalString(body.storyId),
-      phaseId: optionalString(body.phaseId) ?? '',
-      gateId: optionalString(body.gateId),
-      decisionType: body.decisionType as RecordSsdlcDecisionInput['decisionType'],
-      rationale: optionalString(body.rationale) ?? '',
-      expiresAt: body.expiresAt as string | null | undefined,
-      evidenceGap: optionalString(body.evidenceGap),
-      subject: decisionSubject(body.subject),
-      sourceRequestId: sourceRequestId(req),
-    };
+    const input = lifecycleDecisionInput(body, sourceRequestId(req));
     const event = body.humanApproval === undefined
       ? null
       : ProviderHumanEventSchema.parse(body.humanApproval);
@@ -155,21 +206,7 @@ router.post('/decisions', async (req, res, next) => {
     }
     const principal = event
       ? await (async () => {
-        const targetHash = providerHumanActionHash({
-          purpose: 'lifecycle_decision',
-          workspaceId: input.workspaceId,
-          specSlug: input.specSlug,
-          specVersion: input.specVersion ?? null,
-          runId: input.runId ?? null,
-          storyId: input.storyId ?? null,
-          phaseId: input.phaseId,
-          gateId: input.gateId ?? null,
-          decisionType: input.decisionType,
-          rationale: input.rationale,
-          expiresAt: input.expiresAt ?? null,
-          evidenceGap: input.evidenceGap ?? null,
-          subject: input.subject ?? null,
-        });
+        const targetHash = lifecycleDecisionProviderTarget(input);
         const receipt = await verifyAndPersistProviderHumanAuthority({
           workspaceId: input.workspaceId,
           purpose: 'lifecycle_decision',

@@ -51,7 +51,7 @@ import {
 // RORCA_PROCESS_ROLE=engine children to perform system-owned orchestration jobs,
 // so it must bypass per-request JWT RLS scoping.
 import { initDb, query, queryOne, execute, transaction, closePool } from './db/index';
-import { initBoss, getBoss } from './lib/pg-boss';
+import { initBoss, getBoss, getPgBossSchemaSql } from './lib/pg-boss';
 import { registerSchedulesWithBoss, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
 import { registerHydrationWorker } from './lib/hydration-worker';
@@ -539,9 +539,11 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
       execution_workspace_path: string | null;
       execution_worktree_path: string | null;
       task_manifest_id: string | null;
+      effective_options: unknown;
     }>(
       `SELECT workspace_id, parallelism, branch_name, worktree_path,
-              execution_workspace_path, execution_worktree_path, task_manifest_id
+              execution_workspace_path, execution_worktree_path, task_manifest_id,
+              effective_options
          FROM pipeline_runs WHERE id = $1`,
       [runId],
     );
@@ -551,6 +553,10 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
     if (!runRow.branch_name) throw new Error('Pipeline run has no frozen canonical branch');
+    const cancellationRequested = await queryOne<{ run_id: number }>(
+      'SELECT run_id FROM pipeline_run_cancellation_requests WHERE run_id = $1', [runId],
+    );
+    if (cancellationRequested) throw new Error('operator_cancellation_requested_before_engine_launch');
     if ((worktreePath ?? null) !== (runRow.worktree_path ?? null)) {
       throw new Error('Queue payload worktreePath differs from pipeline_runs.worktree_path');
     }
@@ -563,8 +569,18 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     const cwd = frozenExecution.worktreePath;
     if (runRow.task_manifest_id) {
       const lineage = await loadAndVerifyTaskManifestRunLineage(runId, frozenExecution.workspacePath);
-      if (payload.manifestId !== lineage.lineage.manifestId || payload.safetyOptions.deploy !== false) {
-        throw new Error('TaskManifest run payload differs from immutable lineage/no-deploy authority');
+      const effective = typeof runRow.effective_options === 'string'
+        ? JSON.parse(runRow.effective_options) as Record<string, any>
+        : runRow.effective_options as Record<string, any> | null;
+      const frozenSafety = effective?.safety;
+      if (payload.manifestId !== lineage.lineage.manifestId
+        || payload.safetyOptions.deploy !== false
+        || frozenSafety?.deploy !== payload.safetyOptions.deploy
+        || frozenSafety?.externalSend !== payload.safetyOptions.externalSend
+        || frozenSafety?.policyLocked !== payload.safetyOptions.policyLocked
+        || effective?.merge?.strategy !== payload.mergeStrategy
+        || effective?.merge?.autoMerge !== payload.autoMerge) {
+        throw new Error('TaskManifest run payload differs from immutable lineage/safety authority');
       }
     }
     if (!await enforceWorkerWavePolicy({
@@ -768,12 +784,10 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
           outcome: 'denied',
         }).catch(() => undefined);
       }
-      await execute(
-        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), summary = 'wave_policy_revalidation_denied' WHERE id = $1`,
-        [runId],
-      );
       logger.error({ runId, error }, '[worker] governed pre-spawn policy denied execution');
-      return;
+      // Reject into the shared fresh-run terminalizer. It binds interrupted
+      // story evidence, lifecycle, immutable closeout/outbox, and queue advance.
+      throw new Error(`wave_policy_revalidation_denied:${error instanceof Error ? error.message : 'unknown'}`);
     }
 
     const launchGateToken = crypto.randomUUID();
@@ -2474,7 +2488,7 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
     );
     const governedNeedsTerminalization = governedState
       && !['finalized', 'failed', 'manual_review_required', 'cancelled'].includes(governedState.state);
-    if (!['queued', 'running', 'paused'].includes(run.status) && !governedNeedsTerminalization) {
+    if (!['queued', 'starting', 'running', 'paused'].includes(run.status) && !governedNeedsTerminalization) {
       logger.info({ jobId: job.id, runId, status: run.status }, '[worker] pipeline:cancel — run already terminal');
       continue;
     }
@@ -2540,15 +2554,17 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
     }
 
     await execute(
-      `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), pid = NULL, worker_id = NULL
-       WHERE id = $1 AND status IN ('running', 'paused')`,
-      [runId],
-    );
-    await execute(
       `UPDATE run_pty_sessions
        SET status = 'killed', exit_signal = COALESCE(exit_signal, 'SIGTERM'),
            exited_at = COALESCE(exited_at, NOW()), updated_at = NOW()
        WHERE run_id = $1 AND status IN ('starting', 'active')`,
+      [runId],
+    );
+    await synthesizeAllMissingFrozenStoryFailures(runId, run.workspace_id, 'worker_cancel_crash_recovery');
+    await persistHostRunCloseout({ runId, status: 'cancelled', terminalizeRun: true });
+    await execute(
+      `UPDATE pipeline_run_cancellation_requests
+       SET terminalized_at = COALESCE(terminalized_at, NOW()) WHERE run_id = $1`,
       [runId],
     );
     await transitionRunLifecycle(runId, 'cancelled', { owner: 'worker_cancel', process: 'crash_recovery_terminalized' });
@@ -2557,6 +2573,7 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
       cancelledAt: new Date().toISOString(),
       source: 'worker_crash_recovery',
     });
+    await advanceQueue(run.workspace_id);
   }
 }
 
@@ -2748,6 +2765,7 @@ async function reconcileStaleGovernedRetry(runId: number): Promise<'not-governed
 }
 
 export async function recoverStaleJobs(): Promise<void> {
+  const pgBossSchema = getPgBossSchemaSql();
   type StaleJobRow = {
     id: string;
     name: string;
@@ -2761,7 +2779,7 @@ export async function recoverStaleJobs(): Promise<void> {
     // would mark a first worker's legitimate active jobs as stale.
     staleJobs = await query<StaleJobRow>(
       `SELECT j.id, j.name, j.data
-       FROM pgboss.job j
+       FROM ${pgBossSchema}.job j
        WHERE j.name IN ('pipeline:run', 'pipeline:retry')
          AND j.state = 'active'
          AND j.started_on < $1
@@ -3109,6 +3127,7 @@ const RECONCILE_INTERVAL_MS = 60_000;
 
 async function reconcileState(): Promise<void> {
   logger.info('[worker] reconcileState — starting check');
+  const pgBossSchema = getPgBossSchemaSql();
 
   // ── Case A: pipeline_runs stuck in 'running' with no live pgboss job ──
   // NOTE: 'queued' runs are excluded — they intentionally have no pg-boss job.
@@ -3132,7 +3151,7 @@ async function reconcileState(): Promise<void> {
        WHERE pr.status = 'running'
          AND NOT EXISTS (SELECT 1 FROM pipeline_run_release_intents ri WHERE ri.run_id = pr.id)
          AND NOT EXISTS (
-           SELECT 1 FROM pgboss.job j
+           SELECT 1 FROM ${pgBossSchema}.job j
            WHERE j.name IN ('pipeline:run', 'pipeline:retry')
              AND j.state IN ('created', 'active', 'retry')
              AND (j.data->>'runId')::bigint = pr.id
@@ -3208,7 +3227,7 @@ async function reconcileState(): Promise<void> {
   try {
     orphanJobs = await query<OrphanJobRow>(
       `SELECT j.id, j.name, (j.data->>'runId')::bigint AS run_id
-       FROM pgboss.job j
+       FROM ${pgBossSchema}.job j
        WHERE j.name IN ('pipeline:run', 'pipeline:retry')
          AND j.state = 'active'
          AND (j.data->>'runId') IS NOT NULL
@@ -3808,6 +3827,8 @@ async function start(): Promise<void> {
     })();
   }, WORKER_SETTINGS_POLL_MS);
 
+  const pgBossSchema = getPgBossSchemaSql();
+
   // 4b-monitor. Capture pg-boss monitor-states snapshots to queue_health_snapshots table.
   // pg-boss emits 'monitor-states' every monitorStateIntervalSeconds (60s, set in US-001).
   // Shape: { [queueName]: { created, retry, active, completed, cancelled, failed } }
@@ -3842,7 +3863,7 @@ async function start(): Promise<void> {
              AVG(EXTRACT(EPOCH FROM (started_on - created_on)))                                                         AS avg_pickup_seconds,
              PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on)))               AS p95_pickup_seconds,
              COUNT(*)::text                                                                                              AS sample_count
-           FROM pgboss.archive
+           FROM ${pgBossSchema}.archive
            WHERE started_on IS NOT NULL
              AND created_on IS NOT NULL
              AND archived_on > NOW() - INTERVAL '24 hours'
@@ -3927,7 +3948,7 @@ async function start(): Promise<void> {
       type DlqRow = { id: string; name: string; output: unknown; retry_count: number; archived_on: string; data: Record<string, unknown> };
       const rows = await query<DlqRow>(
         `SELECT id, name, output, retry_count, archived_on, data
-         FROM pgboss.archive
+         FROM ${pgBossSchema}.archive
          WHERE name IN ('pipeline:run', 'pipeline:retry')
            AND state = 'failed'
            AND archived_on > NOW() - INTERVAL '1 day'

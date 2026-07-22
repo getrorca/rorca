@@ -40,6 +40,25 @@ export function planGate(): RequestHandler {
         return;
       }
 
+      const nativeApi = operation['x-rorca-native-api'] === true;
+      const intentionallyDenied = operation['x-rorca-intentionally-denied'] === true;
+      if (nativeApi && intentionallyDenied) {
+        logger.error({ method: req.method, path: req.path }, '[plan-gate] contradictory native route classification');
+        res.status(500).json({ error: 'Server misconfiguration', code: 'NATIVE_ROUTE_MISCONFIGURED' });
+        return;
+      }
+      if (intentionallyDenied) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      if (nativeApi) {
+        // Native operations are explicitly classified out of generated CLI/MCP
+        // surfaces. Preserve their route-level HTTP authorization semantics;
+        // this gate must not silently strengthen existing native contracts.
+        next();
+        return;
+      }
+
       const { tier, capability } = getRorcaTier(operation);
 
       if (tier === 'public') {
