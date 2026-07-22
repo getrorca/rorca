@@ -16,9 +16,9 @@ describe('MCP OAuth removal', () => {
   let tmpHome: string;
   let originalHome: string | undefined;
 
-  beforeEach(() => {
+  beforeAll(() => {
     jest.resetModules();
-    jest.mock('../lib/llm-client', () => ({
+    jest.doMock('../lib/llm-client', () => ({
       chatComplete: jest.fn(),
       getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
       isValidModel: jest.fn().mockReturnValue(true),
@@ -27,7 +27,7 @@ describe('MCP OAuth removal', () => {
       getModelInfo: jest.fn().mockReturnValue(undefined),
       SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
     }));
-    jest.mock('../lib/pi-detector', () => ({
+    jest.doMock('../lib/pi-detector', () => ({
       detectPi: jest.fn().mockReturnValue({
         piInstalled: false,
         piVersion: null,
@@ -44,7 +44,7 @@ describe('MCP OAuth removal', () => {
     app = serverMod.default as Express;
   });
 
-  afterEach(() => {
+  afterAll(() => {
     if (originalHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -78,6 +78,8 @@ describe('MCP OAuth removal', () => {
     const res = await request(app)
       .post('/mcp')
       .set('Authorization', `Bearer ${tokens.publicToken}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .set('Content-Type', 'application/json')
       .send({
         jsonrpc: '2.0',
         id: 1,

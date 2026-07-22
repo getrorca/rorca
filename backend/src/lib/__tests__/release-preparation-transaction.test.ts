@@ -32,6 +32,15 @@ jest.mock('../github-app-credential-provider', () => ({ fetchGithubWithTimeout: 
 jest.mock('../github-rate-limiter', () => ({ githubRateLimiter: { execute: jest.fn() } }));
 jest.mock('../github-provider-error', () => ({ githubProviderError: jest.fn() }));
 jest.mock('../trusted-wal', () => ({ persistTrustedWalEvent: jest.fn(), relayTrustedWalEvent: jest.fn(), trustedWalReference: jest.fn() }));
+jest.mock('../run-closeout-authority', () => ({
+  loadHostRunCloseoutReference: jest.fn(async () => ({
+    reference: { id: 9001, identityHash: `sha256:${'9'.repeat(64)}` },
+    payload: { status: 'done', integrated_revision: currentCloseoutSha, accepted_story_ids: [] },
+    ready: true,
+  })),
+}));
+
+let currentCloseoutSha = '';
 
 import { prepareRunReleaseIntent } from '../release-authority';
 
@@ -62,6 +71,7 @@ beforeEach(() => {
   git(worktree, 'add', 'story.txt');
   git(worktree, 'commit', '-q', '-m', 'story');
   sha = git(worktree, 'rev-parse', 'HEAD');
+  currentCloseoutSha = sha;
   queryOne.mockResolvedValue({
     workspace_id: 'ws-prepare', spec_path: 'forge/specs/approved/prepare.json', branch_name: 'run/prepare',
     worktree_path: fs.realpathSync(worktree), execution_workspace_path: fs.realpathSync(workspace), execution_worktree_path: fs.realpathSync(worktree),
@@ -90,6 +100,7 @@ function input() {
       runId: 101, workspaceId: 'ws-prepare', specId: 'prepare', releaseEligible: true,
       finalCommitSha: sha, branchName: 'run/prepare', repositoryTopLevel: workspace,
       checkoutPath: worktree,
+      expectedStoryIds: [],
     },
     mergeStrategy: 'branch-only' as const, autoMerge: false, externalSend: false,
   };

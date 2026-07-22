@@ -20,7 +20,7 @@ describe('CLI-019: pi RPC retry context', () => {
     expect(sendCommand).toHaveBeenNthCalledWith(2, { type: 'get_state' });
   });
 
-  test('uses clone on retry attempts greater than zero and captures sessionId', async () => {
+  test('uses a fresh session on retry attempts and captures sessionId without stale planning context', async () => {
     const sendCommand = jest.fn()
       .mockResolvedValueOnce({ success: true, data: { cancelled: false } })
       .mockResolvedValueOnce({ success: true, data: { sessionId: 'session-2' } });
@@ -28,11 +28,11 @@ describe('CLI-019: pi RPC retry context', () => {
     const sessionId = await preparePiRpcSession(sendCommand, { isRetry: true, attempt: 1 });
 
     expect(sessionId).toBe('session-2');
-    expect(sendCommand).toHaveBeenNthCalledWith(1, { type: 'clone' });
+    expect(sendCommand).toHaveBeenNthCalledWith(1, { type: 'new_session' });
     expect(sendCommand).toHaveBeenNthCalledWith(2, { type: 'get_state' });
   });
 
-  test('three attempts produce three distinct session IDs: one new session then two clones', async () => {
+  test('three attempts produce three distinct fresh session IDs without cloning stale context', async () => {
     const sessionIds = ['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333'];
     let stateIndex = 0;
     const commands: object[] = [];
@@ -56,9 +56,9 @@ describe('CLI-019: pi RPC retry context', () => {
     expect(commands).toEqual([
       { type: 'new_session' },
       { type: 'get_state' },
-      { type: 'clone' },
+      { type: 'new_session' },
       { type: 'get_state' },
-      { type: 'clone' },
+      { type: 'new_session' },
       { type: 'get_state' },
     ]);
   });

@@ -16,7 +16,10 @@ jest.mock('../../db/index', () => ({
   query: (...args: unknown[]) => query(...args),
   queryOne: (...args: unknown[]) => queryOne(...args),
   transaction: async (fn: (client: { query: jest.Mock }) => Promise<unknown>) => fn({
-    query: jest.fn().mockResolvedValue({ rowCount: 1, rows: [{ id: 81 }] }),
+    query: jest.fn(async (sql: string) => ({
+      rowCount: sql.includes('UPDATE wal_events') ? 2 : 1,
+      rows: [{ id: 81 }],
+    })),
   }),
 }));
 jest.mock('../merge-handler', () => ({ performMerge: jest.fn() }));
@@ -33,6 +36,18 @@ jest.mock('../github-repository-authority', () => ({
 jest.mock('../github-app-credential-provider', () => ({ fetchGithubWithTimeout: jest.fn() }));
 jest.mock('../github-rate-limiter', () => ({ githubRateLimiter: { execute: jest.fn() } }));
 jest.mock('../github-provider-error', () => ({ githubProviderError: jest.fn() }));
+jest.mock('../run-closeout-authority', () => ({
+  loadHostRunCloseoutReference: jest.fn().mockResolvedValue({
+    reference: {
+      id: 401,
+      runId: 81,
+      workspaceId: 'ws-restart',
+      ingestKey: 'host-closeout-81',
+      identityHash: 'e'.repeat(64),
+    },
+    payload: { status: 'done', integrated_revision: 'a'.repeat(40) },
+  }),
+}));
 jest.mock('../trusted-wal', () => ({
   persistTrustedWalEvent: (...args: unknown[]) => persistTerminal(...args),
   relayTrustedWalEvent: (...args: unknown[]) => relayTerminal(...args),
@@ -66,6 +81,8 @@ const intent = {
   integration_checkout_path: '/integration',
   merge_commit_sha: null,
   terminal_event_id: null,
+  host_closeout_event_id: 401,
+  host_closeout_identity_hash: 'e'.repeat(64),
 };
 const reference = { id: 501, runId: 81, identityHash: 'c'.repeat(64) };
 

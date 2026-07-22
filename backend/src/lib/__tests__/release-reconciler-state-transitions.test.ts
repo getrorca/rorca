@@ -92,6 +92,8 @@ beforeEach(() => {
     base_branch: 'main', base_sha: base, provider_release_ref: null,
     integration_checkout_path: path.join(fs.realpathSync(root), 'integration'), merge_commit_sha: sha,
     terminal_event_id: 501,
+    host_closeout_event_id: 502,
+    host_closeout_identity_hash: 'c'.repeat(64),
   };
   queryOne.mockImplementation(async (sqlValue: unknown) => {
     const sql = String(sqlValue);
@@ -115,7 +117,11 @@ beforeEach(() => {
     return { rowCount: 1, rows: [{ id: 121 }] };
   });
   transaction.mockImplementation(async (fn: (client: { query: jest.Mock }) => Promise<unknown>) => fn({
-    query: jest.fn().mockResolvedValue({ rowCount: 1, rows: [{ id: 121 }] }),
+    query: jest.fn().mockImplementation(async (sqlValue: unknown) => (
+      String(sqlValue).includes('UPDATE wal_events')
+        ? { rowCount: 2, rows: [{ id: 501 }, { id: 502 }] }
+        : { rowCount: 1, rows: [{ id: 121 }] }
+    )),
   }));
   relay.mockResolvedValue(undefined);
 });

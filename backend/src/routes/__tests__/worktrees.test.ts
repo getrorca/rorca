@@ -31,60 +31,72 @@ jest.mock('simple-git', () => ({
 
 let app: Express;
 let tmpDir: string;
-let _dbPath: string;
 let authToken: string;
 
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  const serverMod = require('../../server');
+  app = serverMod.default;
+  authToken = await getAuthToken(app);
+});
+
 beforeEach(async () => {
-  jest.resetModules();
   jest.clearAllMocks();
-
-  // Re-apply the mock after resetModules
-  jest.doMock('simple-git', () => ({
-    __esModule: true,
-    default: (p: string) => mockGit(p),
-  }));
-
-  // Reset merge mock default (resolves cleanly)
   mockMerge.mockResolvedValue({});
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-wt-test-'));
-  _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+  await execute(
+    `INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    ['ws-1', 'Test Workspace', tmpDir, '["frontend"]'],
+  );
 
-  const serverMod = require('../../server');
-  app = serverMod.default;
-// Seed a workspace for tests
-  await execute(`INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'Test Workspace', tmpDir, '["frontend"]']);
-
-  authToken = await getAuthToken(app);
-
-  // Clear WAL events from user registration so tests start with a clean slate
-  await execute(`DELETE FROM wal_events`);
+  // Delete only unreferenced events owned by this fixture. Host-closeout WAL
+  // rows are immutable authority and may never be removed by suite cleanup.
+  await execute(
+    `DELETE FROM wal_events event
+      WHERE event.workspace_id = 'ws-1'
+        AND NOT EXISTS (SELECT 1 FROM pipeline_runs run WHERE run.host_closeout_event_id = event.id)`,
+  );
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+afterEach(() => {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
   try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  delete process.env.NODE_ENV;
 });
 
 // ─── GET /api/worktrees ─────────────────────────────────────────────────────
 
-const PORCELAIN_OUTPUT = [
-  'worktree /home/user/project',
-  'HEAD abc1234567890',
-  'branch refs/heads/main',
-  '',
-  'worktree /home/user/project-feat-auth',
-  'HEAD def9876543210',
-  'branch refs/heads/feat/auth',
-  'locked',
-  '',
-].join('\n');
+function materializeWorktree(name: string, options: { bare?: boolean } = {}): string {
+  const worktreePath = path.join(tmpDir, name);
+  fs.mkdirSync(worktreePath, { recursive: true });
+  if (options.bare) {
+    fs.writeFileSync(path.join(worktreePath, 'HEAD'), 'ref: refs/heads/main\n');
+    fs.mkdirSync(path.join(worktreePath, 'objects'));
+  } else {
+    fs.writeFileSync(path.join(worktreePath, '.git'), 'gitdir: fixture\n');
+  }
+  return worktreePath;
+}
 
 test('GET /api/worktrees parses porcelain output correctly', async () => {
-  mockRaw.mockResolvedValue(PORCELAIN_OUTPUT);
+  const mainPath = materializeWorktree('project');
+  const featurePath = materializeWorktree('project-feat-auth');
+  mockRaw.mockResolvedValue([
+    `worktree ${mainPath}`,
+    'HEAD abc1234567890',
+    'branch refs/heads/main',
+    '',
+    `worktree ${featurePath}`,
+    'HEAD def9876543210',
+    'branch refs/heads/feat/auth',
+    'locked',
+    '',
+  ].join('\n'));
 
   const res = await request(app).get('/api/worktrees?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
@@ -92,7 +104,7 @@ test('GET /api/worktrees parses porcelain output correctly', async () => {
   expect(res.body.worktrees).toHaveLength(2);
 
   expect(res.body.worktrees[0]).toEqual({
-    path: '/home/user/project',
+    path: mainPath,
     branch: 'main',
     headSha: 'abc1234567890',
     isLocked: false,
@@ -100,7 +112,7 @@ test('GET /api/worktrees parses porcelain output correctly', async () => {
   });
 
   expect(res.body.worktrees[1]).toEqual({
-    path: '/home/user/project-feat-auth',
+    path: featurePath,
     branch: 'feat/auth',
     headSha: 'def9876543210',
     isLocked: true,
@@ -112,12 +124,14 @@ test('GET /api/worktrees parses porcelain output correctly', async () => {
 });
 
 test('GET /api/worktrees parses bare and detached worktrees', async () => {
+  const barePath = materializeWorktree('project.git', { bare: true });
+  const detachedPath = materializeWorktree('detached-wt');
   const output = [
-    'worktree /home/user/project.git',
+    `worktree ${barePath}`,
     'HEAD aaa111',
     'bare',
     '',
-    'worktree /home/user/detached-wt',
+    `worktree ${detachedPath}`,
     'HEAD bbb222',
     'detached',
     '',
@@ -225,11 +239,11 @@ test('POST /api/worktrees emits WAL event', async () => {
     branchName: 'feat/wal-test',
   });
 
-  const events = await query("SELECT * FROM wal_events WHERE event_type = 'worktree_created'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
+  const events = await query("SELECT * FROM wal_events WHERE workspace_id = 'ws-1' AND event_type = 'worktree_created'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe('ws-1');
-  const payload = JSON.parse(events[0].payload);
+  const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
   expect(payload.branchName).toBe('feat/wal-test');
   expect(payload.worktreePath).toBeDefined();
 });
@@ -285,11 +299,11 @@ test('DELETE /api/worktrees/:path emits WAL event', async () => {
 
   await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`).set('Authorization', `Bearer ${authToken}`);
 
-  const events = await query("SELECT * FROM wal_events WHERE event_type = 'worktree_removed'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
+  const events = await query("SELECT * FROM wal_events WHERE workspace_id = 'ws-1' AND event_type = 'worktree_removed'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe('ws-1');
-  const payload = JSON.parse(events[0].payload);
+  const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
   expect(payload.worktreePath).toBe(wtPath);
 });
 
@@ -304,7 +318,9 @@ test('GET /api/worktrees/status returns git status for worktree', async () => {
     modified: ['src/index.ts', 'README.md'],
   });
 
-  const wtPath = encodeURIComponent('/home/user/project-feat-auth');
+  const actualPath = materializeWorktree('project-feat-auth');
+  mockRaw.mockResolvedValue(`worktree ${actualPath}\nHEAD abc123\nbranch refs/heads/feat/auth\n`);
+  const wtPath = encodeURIComponent(actualPath);
   const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
@@ -326,7 +342,9 @@ test('GET /api/worktrees/status returns clean status', async () => {
     modified: [],
   });
 
-  const wtPath = encodeURIComponent('/home/user/project');
+  const actualPath = materializeWorktree('project');
+  mockRaw.mockResolvedValue(`worktree ${actualPath}\nHEAD abc123\nbranch refs/heads/main\n`);
+  const wtPath = encodeURIComponent(actualPath);
   const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
@@ -348,21 +366,25 @@ describe('Integration: full round-trip', () => {
     // 1. POST — create a new worktree
     mockRaw.mockResolvedValueOnce(''); // git worktree add succeeds
 
+    const roundTripPath = path.join(tmpDir, 'round-trip');
     const createRes = await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({
       workspaceId: 'ws-1',
       branchName: 'feat/round-trip',
       baseBranch: 'main',
+      worktreePath: roundTripPath,
     });
 
     expect(createRes.status).toBe(201);
     expect(createRes.body.ok).toBe(true);
     const createdPath = createRes.body.worktreePath;
-    expect(createdPath).toContain('feat-round-trip');
+    expect(createdPath).toBe(roundTripPath);
+    materializeWorktree('round-trip');
+    const mainPath = materializeWorktree('project');
 
     // 2. GET — list should include the new worktree
-    mockRaw.mockResolvedValueOnce(
+    mockRaw.mockResolvedValueOnce('').mockResolvedValueOnce(
       [
-        'worktree /home/user/project',
+        `worktree ${mainPath}`,
         'HEAD aaa111',
         'branch refs/heads/main',
         '',
@@ -397,9 +419,9 @@ describe('Integration: full round-trip', () => {
     expect(deleteRes.body.ok).toBe(true);
 
     // 4. GET — list should no longer include the removed worktree
-    mockRaw.mockResolvedValueOnce(
+    mockRaw.mockResolvedValueOnce('').mockResolvedValueOnce(
       [
-        'worktree /home/user/project',
+        `worktree ${mainPath}`,
         'HEAD aaa111',
         'branch refs/heads/main',
         '',
@@ -413,7 +435,7 @@ describe('Integration: full round-trip', () => {
     expect(listAfterDelete.body.worktrees[0].branch).toBe('main');
 
     // Verify WAL events were emitted for both create and delete
-    const events = await query('SELECT * FROM wal_events ORDER BY id ASC') as Array<{ event_type: string; workspace_id: string; payload: string }>;
+    const events = await query("SELECT * FROM wal_events WHERE workspace_id = 'ws-1' ORDER BY id ASC") as Array<{ event_type: string; workspace_id: string; payload: string }>;
 
     expect(events).toHaveLength(2);
     expect(events[0].event_type).toBe('worktree_created');
@@ -431,7 +453,9 @@ describe('Integration: /api/worktrees/status response shape', () => {
       modified: ['src/app.ts', 'package.json', 'README.md'],
     });
 
-    const wtPath = encodeURIComponent('/home/user/project-feat-status');
+    const actualPath = materializeWorktree('project-feat-status');
+    mockRaw.mockResolvedValue(`worktree ${actualPath}\nHEAD abc123\nbranch refs/heads/feat/status-shape\n`);
+    const wtPath = encodeURIComponent(actualPath);
     const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
@@ -464,7 +488,9 @@ describe('Integration: /api/worktrees/status response shape', () => {
       modified: [],
     });
 
-    const wtPath = encodeURIComponent('/home/user/project');
+    const actualPath = materializeWorktree('project');
+    mockRaw.mockResolvedValue(`worktree ${actualPath}\nHEAD abc123\nbranch refs/heads/main\n`);
+    const wtPath = encodeURIComponent(actualPath);
     const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
@@ -478,147 +504,44 @@ describe('Integration: /api/worktrees/status response shape', () => {
 // ─── POST /api/worktrees/merge/preview ─────────────────────────────────────
 
 describe('POST /api/worktrees/merge/preview', () => {
-  test('returns canMerge=true when no conflicts', async () => {
-    // diff --stat for filesChanged
-    mockRaw.mockResolvedValueOnce(' 3 files changed, 10 insertions(+), 2 deletions(-)');
-    // merge --no-commit --no-ff succeeds
-    const mockMerge = jest.fn().mockResolvedValue({});
-    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
-
+  test.each([
+    ['clean branch', { workspaceId: 'ws-1', branchName: 'feat/clean' }],
+    ['conflicting branch', { workspaceId: 'ws-1', branchName: 'feat/conflicting' }],
+    ['missing branch', { workspaceId: 'ws-1' }],
+    ['unknown workspace', { workspaceId: 'no-such', branchName: 'feat/test' }],
+  ])('fails closed without Git effects for %s', async (_label, body) => {
     const res = await request(app)
       .post('/api/worktrees/merge/preview')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1', branchName: 'feat/clean' });
+      .send(body);
 
-    expect(res.status).toBe(200);
-    expect(res.body.canMerge).toBe(true);
-    expect(res.body.hasConflicts).toBe(false);
-    expect(res.body.conflictFiles).toEqual([]);
-    expect(res.body.filesChanged).toBe(3);
-  });
-
-  test('returns hasConflicts=true with conflict files', async () => {
-    // diff --stat for filesChanged
-    mockRaw.mockResolvedValueOnce(' 2 files changed');
-    // diff --name-only --diff-filter=U for conflict file list
-    mockRaw.mockResolvedValueOnce('src/index.ts\nREADME.md\n');
-
-    const mockMerge = jest.fn()
-      .mockRejectedValueOnce(new Error('CONFLICT (content): Merge conflict in src/index.ts'))
-      .mockResolvedValueOnce({}); // merge --abort
-
-    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
-
-    const res = await request(app)
-      .post('/api/worktrees/merge/preview')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1', branchName: 'feat/conflicting' });
-
-    expect(res.status).toBe(200);
-    expect(res.body.canMerge).toBe(false);
-    expect(res.body.hasConflicts).toBe(true);
-    expect(res.body.conflictFiles).toHaveLength(2);
-    expect(res.body.conflictFiles[0].path).toBe('src/index.ts');
-    expect(res.body.conflictFiles[1].path).toBe('README.md');
-  });
-
-  test('returns 400 without required fields', async () => {
-    const res = await request(app)
-      .post('/api/worktrees/merge/preview')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toContain('branchName');
-  });
-
-  test('returns 404 for nonexistent workspace', async () => {
-    const res = await request(app)
-      .post('/api/worktrees/merge/preview')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'no-such', branchName: 'feat/test' });
-
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('RELEASE_INTENT_REQUIRED');
+    expect(mockGit).not.toHaveBeenCalled();
   });
 });
 
-// ─── POST /api/worktrees/merge (enhanced) ──────────────────────────────────
+// ─── POST /api/worktrees/merge (retired Release-1 actuator) ────────────────
 
 describe('POST /api/worktrees/merge', () => {
-  test('successful merge returns mergeCommitSha', async () => {
-    const mockMerge = jest.fn().mockResolvedValue({});
-    mockRaw.mockResolvedValueOnce('abc123def456\n'); // rev-parse HEAD
-    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
-
+  test.each([
+    ['ordinary merge', { workspaceId: 'ws-1', branchName: 'feat/with-sha' }],
+    ['would-be WAL merge', { workspaceId: 'ws-1', branchName: 'feat/wal-sha' }],
+    ['forced merge', { workspaceId: 'ws-1', branchName: 'feat/force', force: true }],
+    ['conflicting merge', { workspaceId: 'ws-1', branchName: 'feat/conflict' }],
+    ['missing branch', { workspaceId: 'ws-1' }],
+  ])('fails closed without Git or WAL effects for %s', async (_label, body) => {
     const res = await request(app)
       .post('/api/worktrees/merge')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1', branchName: 'feat/with-sha' });
-
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.mergeCommitSha).toBe('abc123def456');
-  });
-
-  test('successful merge emits WAL event with branchName and mergeCommitSha', async () => {
-    const mockMerge = jest.fn().mockResolvedValue({});
-    mockRaw.mockResolvedValueOnce('sha789\n'); // rev-parse HEAD
-    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
-
-    await request(app)
-      .post('/api/worktrees/merge')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1', branchName: 'feat/wal-sha' });
-
-    const events = await query("SELECT * FROM wal_events WHERE event_type = 'worktree_merged'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
-
-    expect(events).toHaveLength(1);
-    const payload = JSON.parse(events[0].payload);
-    expect(payload.branchName).toBe('feat/wal-sha');
-    expect(payload.mergeCommitSha).toBe('sha789');
-  });
-
-  test('force merge uses -X theirs strategy', async () => {
-    const mockMerge = jest.fn().mockResolvedValue({});
-    mockRaw.mockResolvedValueOnce('forced123\n'); // rev-parse HEAD
-    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
-
-    const res = await request(app)
-      .post('/api/worktrees/merge')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1', branchName: 'feat/force', force: true });
-
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(mockMerge).toHaveBeenCalledWith(['feat/force', '--no-ff', '-X', 'theirs']);
-  });
-
-  test('conflict returns 409 with conflictFiles', async () => {
-    mockRaw.mockResolvedValueOnce('src/app.ts\n'); // diff --name-only --diff-filter=U
-
-    const mockMerge = jest.fn()
-      .mockRejectedValueOnce(new Error('CONFLICT (content): Merge conflict in src/app.ts'))
-      .mockResolvedValueOnce({}); // merge --abort
-
-    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
-
-    const res = await request(app)
-      .post('/api/worktrees/merge')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1', branchName: 'feat/conflict' });
+      .send(body);
 
     expect(res.status).toBe(409);
-    expect(res.body.conflict).toBe(true);
-    expect(res.body.conflictFiles).toBeDefined();
-  });
-
-  test('returns 400 without required fields', async () => {
-    const res = await request(app)
-      .post('/api/worktrees/merge')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ workspaceId: 'ws-1' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toContain('branchName');
+    expect(res.body.error).toBe('RELEASE_INTENT_REQUIRED');
+    expect(mockGit).not.toHaveBeenCalled();
+    const events = await query(
+      "SELECT id FROM wal_events WHERE workspace_id = 'ws-1' AND event_type = 'worktree_merged'",
+    );
+    expect(events).toEqual([]);
   });
 });

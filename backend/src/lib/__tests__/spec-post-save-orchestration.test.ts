@@ -165,7 +165,8 @@ describe('PSE-009: stage skip reason tracking', () => {
       'durable_job_enqueued_after_dependency',
       'blocked_by_required_stage_failed',
     ];
-    expect(allReasons).toHaveLength(24);
+    expect(allReasons).toHaveLength(23);
+    expect(new Set(allReasons).size).toBe(allReasons.length);
     for (const reason of allReasons) {
       expect(typeof reason).toBe('string');
       expect(reason.length).toBeGreaterThan(0);

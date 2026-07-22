@@ -114,25 +114,6 @@ function parseWorkspace(row: WorkspaceRow) {
  *                 workspace: { $ref: '#/components/schemas/Workspace' }
  *       400: { description: "Missing fields or path not found" }
  *       409: { description: "Workspace already exists" }
- *   get:
- *     tags: [Workspaces]
- *     summary: List all registered workspaces
- *     operationId: listWorkspaces
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only workspace discovery is required by the standalone capture sidecar to resolve a local repo to a Rorca workspace via the stable API-only contract."
- *     x-rorca-public-api: true
- *     description: Returns a paginated list of all registered workspaces ordered by creation date descending.
- *     responses:
- *       200:
- *         description: List of workspaces
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 workspaces:
- *                   type: array
- *                   items: { $ref: '#/components/schemas/Workspace' }
  */
 const CreateWorkspaceSchema = z.object({
   id: z.string().min(1),
@@ -747,51 +728,6 @@ router.get('/:id/files', async (req, res, next) => {
  *               properties:
  *                 workspace: { $ref: '#/components/schemas/Workspace' }
  *       404: { description: "Workspace not found" }
- *   patch:
- *     x-rorca-native-api: true
- *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     tags: [Workspaces]
- *     summary: Update workspace settings
- *     operationId: updateWorkspace
- *     description: >
- *       Updates one or more workspace fields (label, path, domains, pr_template).
- *       Only provided fields are updated; omitted fields remain unchanged.
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               pr_template: { type: string, nullable: true }
- *     responses:
- *       200:
- *         description: Updated workspace
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 workspace: { $ref: '#/components/schemas/Workspace' }
- *       404: { description: "Workspace not found" }
- *   delete:
- *     x-rorca-native-api: true
- *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     tags: [Workspaces]
- *     summary: Delete a workspace
- *     operationId: deleteWorkspace
- *     description: Deletes a workspace record by ID and emits a workspace_delete WAL event.
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       204: { description: "Deleted" }
  */
 router.get('/:id', async (req, res, next) => {
   try {

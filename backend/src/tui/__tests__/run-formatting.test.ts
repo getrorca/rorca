@@ -22,7 +22,7 @@ describe('runFormatting', () => {
         payload: JSON.stringify({ run_id: 42, story_id: 'US-001', story_title: 'Build CLI harness' }),
       },
       { run_id: 42, story_id: 'US-001', story_title: 'Build CLI harness' },
-      new Date('2026-05-02T12:34:56Z'),
+      new Date(2026, 4, 2, 12, 34, 56),
     );
 
     expect(line).toEqual({
@@ -32,7 +32,7 @@ describe('runFormatting', () => {
   });
 
   test('formats pass, fail, and retry lifecycle lines', () => {
-    const ts = new Date('2026-05-02T12:34:56Z');
+    const ts = new Date(2026, 4, 2, 12, 34, 56);
 
     expect(formatWalLifecycleLine(
       { event_type: 'story_passed', spec_id: 'demo', story_id: 'US-001', payload: null },

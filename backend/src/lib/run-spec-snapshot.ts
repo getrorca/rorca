@@ -50,6 +50,37 @@ export function fsyncDirectory(directory: string): void {
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+/**
+ * Create a directory hierarchy and durably publish every new directory entry.
+ * fsyncing a new child is insufficient: the parent containing its name is the
+ * metadata authority that must reach stable storage before success is exposed.
+ */
+export function durableEnsureDirectory(directory: string): void {
+  const target = path.resolve(directory);
+  const missing: string[] = [];
+  let cursor = target;
+  while (!fs.existsSync(cursor)) {
+    missing.push(cursor);
+    const parent = path.dirname(cursor);
+    if (parent === cursor) throw new Error(`Cannot resolve durable directory parent for ${target}`);
+    cursor = parent;
+  }
+  if (!fs.statSync(cursor).isDirectory()) {
+    throw new Error(`Durable directory ancestor is not a directory: ${cursor}`);
+  }
+
+  for (const nextDirectory of missing.reverse()) {
+    try {
+      fs.mkdirSync(nextDirectory);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST' || !fs.statSync(nextDirectory).isDirectory()) throw error;
+    }
+    fsyncDirectory(nextDirectory);
+    fsyncDirectory(path.dirname(nextDirectory));
+  }
+}
+
 /** Atomically replace and durably flush a bounded local JSON projection. */
 export function durableAtomicWriteFile(filePath: string, content: string): void {
   const directory = path.dirname(filePath);

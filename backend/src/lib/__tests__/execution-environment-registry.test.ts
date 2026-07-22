@@ -5,20 +5,19 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { execute } from '../../db/index';
 import { getExecutionEnvironmentReadiness, hashRunnerToken, listExecutionEnvironments } from '../execution-environment-registry';
 
 describe('execution-environment-registry', () => {
-  it('seeds default remote and local execution environments', async () => {
+  it('seeds only the Release-1 remote Rorca execution environment', async () => {
     const envs = await listExecutionEnvironments();
-    expect(envs.map((env) => env.id)).toEqual(expect.arrayContaining(['remote-rorca', 'local-user']));
+    expect(envs.map((env) => env.id)).toContain('remote-rorca');
+    expect(envs.map((env) => env.id)).not.toContain('local-user');
   });
 
-  it('marks deprecated local-user unavailable regardless of runner heartbeat', async () => {
-    await execute(`UPDATE execution_environments SET last_heartbeat_at = NULL, metadata = '{}'::jsonb WHERE id = 'local-user'`);
-    const readiness = await getExecutionEnvironmentReadiness('local-user');
-    expect(readiness.ready).toBe(false);
-    expect(readiness.reason).toBe('LOCAL_USER_EXECUTION_UNAVAILABLE');
+  it('does not synthesize a deprecated local-user bridge from runtime state', async () => {
+    await expect(getExecutionEnvironmentReadiness('local-user')).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
   });
 
   it('hashes runner tokens deterministically without returning the token', () => {

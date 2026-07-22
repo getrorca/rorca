@@ -77,6 +77,7 @@ export interface RorcaTierOperationLike {
   'x-rorca-public-api'?: boolean;
   'x-rorca-capability'?: string;
   'x-rorca-native-api'?: boolean;
+  'x-rorca-native-authority'?: 'local-admin';
   'x-rorca-intentionally-denied'?: boolean;
 }
 

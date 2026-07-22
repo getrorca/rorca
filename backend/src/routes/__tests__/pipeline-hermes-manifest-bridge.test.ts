@@ -326,22 +326,23 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
   if (text.includes('SELECT COUNT(*) as count FROM pipeline_runs')) {
     return Promise.resolve({ rows: [{ count: '0' }] });
   }
-  if (text.includes('SELECT status, workspace_id, task_manifest_id FROM pipeline_runs')) {
-    const run = taskManifestReservations.find((row) => row.id === params[0]);
-    return Promise.resolve({ rows: run ? [{ status: 'queued', workspace_id: run.workspaceId, task_manifest_id: run.manifestId }] : [] });
+  if (text.includes('SELECT workspace_id, status, dispatch_request_hash FROM pipeline_runs')) {
+    const run = [...taskManifestReservations, ...pipelineRunInserts].find((row) => row.id === params[0]);
+    return Promise.resolve({ rows: run ? [{ workspace_id: run.workspaceId, status: 'queued', dispatch_request_hash: run.dispatchRequestHash ?? null }] : [] });
   }
-  if (text.includes('FROM task_manifest_dispatch_publications') && text.includes('FOR UPDATE')) {
-    return Promise.resolve({ rows: taskManifestPublications.filter((row) => row.run_id === params[0]) });
-  }
-  if (text.includes('INSERT INTO task_manifest_dispatch_publications')) {
-    taskManifestPublications.push({ run_id: params[0], workspace_id: params[1], boss_job_id: params[2], state: 'preparing', lease_owner: params[3], lease_expires_at: '2099-01-01T00:00:00.000Z' });
+  if (text.includes('FROM pipeline_run_cancellation_requests')) {
     return Promise.resolve({ rows: [] });
   }
-  if (text.includes('UPDATE task_manifest_dispatch_publications') && text.includes('lease_expires_at')) {
+  if (text.includes('FROM pipeline_dispatch_publications') && text.includes('FOR UPDATE')) {
+    return Promise.resolve({ rows: taskManifestPublications.filter((row) => row.run_id === params[0]) });
+  }
+  if (text.includes('UPDATE pipeline_dispatch_publications') && text.includes("state = 'preparing'")) {
     const publication = taskManifestPublications.find((row) => row.run_id === params[0]);
     if (publication) {
+      publication.state = 'preparing';
       publication.lease_owner = params[1];
       publication.lease_expires_at = '2099-01-01T00:00:00.000Z';
+      publication.request_hash = publication.request_hash ?? params[2];
     }
     return Promise.resolve({ rows: [] });
   }
@@ -373,9 +374,20 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
       artifacts: jsonParam(params[13]),
       triggerOptions: jsonParam(params[14]),
       effectiveOptions: jsonParam(params[15]),
+      dispatchRequestHash: params[16],
       taskManifestAuthorityVersion: 1,
     };
     taskManifestReservations.push(row);
+    taskManifestPublications.push({
+      run_id: row.id,
+      workspace_id: row.workspaceId,
+      boss_job_id: `00000000-0000-5000-a000-${String(row.id).padStart(12, '0')}`,
+      state: 'reserved',
+      request_hash: row.dispatchRequestHash,
+      lease_owner: null,
+      lease_expires_at: null,
+      updated_at: '2000-01-01T00:00:00.000Z',
+    });
     return Promise.resolve({ rows: [{ id: row.id, queue_position: row.queuePosition }] });
   }
   return Promise.resolve({ rows: [] });
@@ -399,19 +411,22 @@ beforeEach(() => {
   execFileSync('git', ['commit', '-m', 'fixture'], { cwd: wsDir, stdio: 'ignore' });
 
   mockBoss.createQueue.mockResolvedValue(undefined);
-  mockBoss.send.mockResolvedValue('mock-job-id');
+  mockBoss.send.mockImplementation(async (_name: string, _payload: unknown, options?: { id?: string }) => options?.id ?? 'mock-job-id');
   mockSimpleGitBranchLocal.mockResolvedValue({ all: [] });
   mockSimpleGitRaw.mockImplementation(async (args: string[]) => (
     execFileSync('git', args, { cwd: wsDir, encoding: 'utf8' })
   ));
   mockExecute.mockImplementation(async (sql: unknown, params: unknown[] = []) => {
     const text = sqlText(sql);
-    if (text.includes('UPDATE task_manifest_dispatch_publications') && text.includes("state = 'published'")) {
-      const publication = taskManifestPublications.find((row) => row.run_id === params[0]);
-      if (publication) {
-        publication.state = 'published';
-        publication.lease_owner = null;
-        publication.lease_expires_at = null;
+    if (text.includes("UPDATE pipeline_runs SET status = 'queued'") && text.includes('worktree_path')) {
+      const run = taskManifestReservations.find((row) => row.id === params[10]);
+      if (run) {
+        run.branchName = params[4];
+        run.worktreePath = params[5];
+        run.executionWorktreePath = params[5];
+        run.autoWorktree = params[8];
+        run.mergeStrategy = params[11];
+        run.terminalMode = params[12];
       }
     }
     return { rowCount: 1 };
@@ -440,9 +455,39 @@ beforeEach(() => {
     if (text.includes('FROM task_manifest_run_lineage WHERE run_id')) {
       return taskManifestLineages.find((row) => row.run_id === params[0]);
     }
+    if (text.includes('SELECT workspace_id, spec_path, status, effective_options') && text.includes('FROM pipeline_runs WHERE id = $1')) {
+      const run = taskManifestReservations.find((row) => row.id === params[0]);
+      return run ? {
+        workspace_id: run.workspaceId,
+        spec_path: run.specPath,
+        status: 'queued',
+        effective_options: run.effectiveOptions,
+      } : undefined;
+    }
     if (text.includes('SELECT effective_options FROM pipeline_runs')) {
       const run = taskManifestReservations.find((row) => row.id === params[0]);
       return run ? { effective_options: run.effectiveOptions } : undefined;
+    }
+    if (text.includes('UPDATE pipeline_dispatch_publications') && text.includes('payload_hash = COALESCE')) {
+      const publication = taskManifestPublications.find((row) => row.run_id === params[0] && row.lease_owner === params[1]);
+      if (!publication) return undefined;
+      publication.request_hash = publication.request_hash ?? params[2];
+      publication.effective_options_hash = publication.effective_options_hash ?? params[3];
+      publication.payload_hash = publication.payload_hash ?? params[4];
+      publication.payload = publication.payload ?? jsonParam(params[5]);
+      return { boss_job_id: publication.boss_job_id };
+    }
+    if (text.includes('SELECT id::text FROM') && text.includes('.job WHERE id = $1')) {
+      return undefined;
+    }
+    if (text.includes('UPDATE pipeline_dispatch_publications') && text.includes("state = 'published'")) {
+      const publication = taskManifestPublications.find((row) => row.run_id === params[0]);
+      if (!publication) return undefined;
+      publication.state = 'published';
+      publication.lease_owner = null;
+      publication.lease_expires_at = null;
+      publication.updated_at = new Date().toISOString();
+      return { run_id: publication.run_id };
     }
     if (text.includes('FROM task_manifest_run_lineage lineage')) {
       const lineage = taskManifestLineages.find((row) => row.run_id === params[0]);
@@ -512,8 +557,19 @@ beforeEach(() => {
         manifestId: params[17],
         artifacts: params[18] ? jsonParam(params[18]) : null,
         triggerOptions: params[19] ? jsonParam(params[19]) : null,
+        dispatchRequestHash: params[20] ?? null,
       };
       pipelineRunInserts.push(row);
+      taskManifestPublications.push({
+        run_id: row.id,
+        workspace_id: row.workspaceId,
+        boss_job_id: `00000000-0000-5000-a000-${String(row.id).padStart(12, '0')}`,
+        state: 'reserved',
+        request_hash: row.dispatchRequestHash,
+        lease_owner: null,
+        lease_expires_at: null,
+        updated_at: '2000-01-01T00:00:00.000Z',
+      });
       return { id: row.id };
     }
     if (text.includes('INSERT INTO wal_events')) {
@@ -720,8 +776,8 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
         idempotencyKey: manifest.idempotencyKey,
         manifest,
         dryRun: true,
-        autoWorktree: false,
-        mergeStrategy: 'branch-only',
+        autoWorktree: true,
+        mergeStrategy: 'draft-pr',
       });
 
     expect(response.status).toBe(200);
@@ -732,7 +788,7 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       manifestId: manifest.manifestId,
       idempotencyKey: manifest.idempotencyKey,
       estimatedExecutionPlan: expect.objectContaining({
-        mergeStrategy: 'branch-only',
+        mergeStrategy: 'draft-pr',
         executionEnvironmentSupported: true,
         executionEnvironmentId: null,
       }),
@@ -743,8 +799,8 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
   test.each([
     ['missing idempotencyKey', (body: JsonRecord) => { delete body.idempotencyKey; }, 400, 'TASK_MANIFEST_IDEMPOTENCY_KEY_REQUIRED'],
     ['autoMerge=true', (body: JsonRecord) => { body.autoMerge = true; }, 422, 'TASK_MANIFEST_AUTO_MERGE_REJECTED'],
-    ['mergeStrategy=direct', (body: JsonRecord) => { body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_DIRECT_MERGE_REJECTED'],
-    ['autoMerge=true plus mergeStrategy=direct', (body: JsonRecord) => { body.autoMerge = true; body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR'],
+    ['mergeStrategy=direct', (body: JsonRecord) => { body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH'],
+    ['autoMerge=true plus mergeStrategy=direct', (body: JsonRecord) => { body.autoMerge = true; body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH'],
     ['high-risk direct-repair route', (body: JsonRecord) => { (body.manifest as JsonRecord).routeDecision = { route: 'hermes.direct-repair', reason: 'Bypass route' }; }, 400, 'TASK_MANIFEST_HIGH_RISK_ROUTE'],
     ['unsafe artifact path', (body: JsonRecord) => { ((body.manifest as JsonRecord).evidence as JsonRecord[])[0].path = '../dirty-artifacts/outside.patch'; }, 400, 'TASK_MANIFEST_UNSAFE_ARTIFACT_PATH'],
     ['oversized context', (body: JsonRecord) => {
@@ -760,8 +816,8 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       workspaceId: 'ws-hermes',
       idempotencyKey: manifest.idempotencyKey,
       manifest,
-      autoWorktree: false,
-      mergeStrategy: 'branch-only',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     };
     mutate(body);
 
@@ -850,7 +906,7 @@ describe('POST /api/pipeline/trigger legacy Hermes compatibility guard', () => {
         mergeStrategy: 'pr',
         agentOverride: 'opencode',
       }),
-      expect.not.objectContaining({ id: expect.any(String) }),
+      expect.objectContaining({ id: expect.stringMatching(/^[0-9a-f-]{36}$/), retryLimit: 0 }),
     );
   });
 });

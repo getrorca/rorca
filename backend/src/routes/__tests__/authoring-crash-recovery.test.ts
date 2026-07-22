@@ -275,6 +275,18 @@ describe('governed authoring crash roll-forward', () => {
         ok: true,
         mutationReceipt: expect.objectContaining({ receiptId: expect.any(String), requestHash: expect.stringMatching(/^sha256:/) }),
         providerApproval: expect.objectContaining({ receiptId: expect.any(String), targetHash: target.body.targetHash }),
+        responseIdentity: expect.objectContaining({
+          schemaVersion: 'rorca.spec-approval-response-identity.v1',
+          workspaceId: fixture.workspaceId,
+          specId: fixture.slug,
+          idempotencyKey: approvalKey,
+          targetHash: target.body.targetHash,
+          actorId: expect.any(String),
+          acceptedPlanHash: fixture.acceptedPlanHash,
+          acceptedPreflightHash: fixture.acceptedPreflightHash,
+          persistReceiptId: mutationReceipt.receiptId,
+          persistRequestHash: mutationReceipt.requestHash,
+        }),
       }));
       const replay = await request(app()).post(`/api/specs/${fixture.slug}/approve`).set('Idempotency-Key', approvalKey).send(approvalBody);
       expect(replay.status).toBe(200);

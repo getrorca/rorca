@@ -42,6 +42,7 @@ import {
   upsertContextCaptureControlState,
 } from '../lib/context-capture-controls';
 import { getBoss } from '../lib/pg-boss';
+import { getPgBossTableSql } from '../lib/pg-boss-schema';
 import {
   applyMemoryCandidateReviewAction,
   approveMemoryCandidate,
@@ -723,7 +724,7 @@ router.post('/:workspaceId/resume', async (req, res) => {
  */
 router.post('/:workspaceId/uninstall', async (req, res) => {
   const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
-  const jobs = await query<{ id: string }>("SELECT id::text FROM pgboss.job WHERE name = 'context:capture' AND COALESCE(data->>'workspaceId', data->'data'->>'workspaceId') = $1 AND state IN ('created', 'retry')", [workspace.id]).catch(() => []);
+  const jobs = await query<{ id: string }>(`SELECT id::text FROM ${getPgBossTableSql('job')} WHERE name = 'context:capture' AND COALESCE(data->>'workspaceId', data->'data'->>'workspaceId') = $1 AND state IN ('created', 'retry')`, [workspace.id]).catch(() => []);
   let cancelled = 0;
   const boss = getBoss();
   for (const job of jobs) {

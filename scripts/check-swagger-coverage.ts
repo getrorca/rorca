@@ -65,26 +65,35 @@ function documentedRoutes(content: string): Route[] {
   const blockRegex = /\/\*\*[\s\S]*?@swagger[\s\S]*?\*\//g;
   for (const match of content.matchAll(blockRegex)) {
     const block = match[0];
-    const lines = block.split('\n').map((line) => line.replace(/^\s*\* ?/, ''));
+    const rawLines = block.split('\n');
+    const lines = rawLines.map((line) => line.replace(/^\s*\* ?/, ''));
+    const prefixLine = content.slice(0, match.index ?? 0).split('\n').length;
     let documentedPath: string | undefined;
+    let operationIndent: number | undefined;
+
     for (let index = 0; index < lines.length; index += 1) {
-      const pathMatch = lines[index]!.match(/^\s*(\/[^\s]+):\s*$/);
+      const line = lines[index]!;
+      const pathMatch = line.match(/^\s*(\/[^\s]+):\s*$/);
       if (pathMatch) {
         documentedPath = pathMatch[1];
+        operationIndent = undefined;
         continue;
       }
-      const methodMatch = lines[index]!.match(/^\s{2,}(get|post|put|patch|delete):\s*$/i);
-      if (documentedPath && methodMatch) {
-        const prefix = content.slice(0, match.index ?? 0);
-        routes.push({
-          method: methodMatch[1]!.toUpperCase(),
-          path: documentedPath.replace(/\/$/, '') || '/',
-          line: prefix.split('\n').length + index,
-          position: (match.index ?? 0) + block.split('\n').slice(0, index + 1).join('\n').length,
-          source: 'openapi',
-        });
-        break;
-      }
+
+      const methodMatch = line.match(/^(\s*)(get|post|put|patch|delete):\s*$/i);
+      if (!documentedPath || !methodMatch) continue;
+      const indent = methodMatch[1]!.length;
+      if (operationIndent === undefined) operationIndent = indent;
+      // Nested schema/example keys named after HTTP verbs are not operations.
+      if (indent !== operationIndent) continue;
+
+      routes.push({
+        method: methodMatch[2]!.toUpperCase(),
+        path: documentedPath.replace(/\/$/, '') || '/',
+        line: prefixLine + index,
+        position: (match.index ?? 0) + rawLines.slice(0, index + 1).join('\n').length,
+        source: 'openapi',
+      });
     }
   }
   return routes;
@@ -94,11 +103,27 @@ function routeKey(route: Pick<Route, 'method' | 'path'>): string {
   return `${route.method} ${route.path}`;
 }
 
+function duplicateFindings(filePath: string, routes: Route[], label: string): Finding[] {
+  const byKey = new Map<string, Route[]>();
+  for (const route of routes) {
+    const group = byKey.get(routeKey(route)) ?? [];
+    group.push(route);
+    byKey.set(routeKey(route), group);
+  }
+  return [...byKey.entries()].flatMap(([key, group]) => group.length > 1
+    ? group.slice(1).map((route) => ({
+      file: filePath,
+      route,
+      message: `duplicate ${label} operation ${key}; first declaration is at line ${group[0]!.line}`,
+    }))
+    : []);
+}
+
 function checkFile(filePath: string): Finding[] {
   const content = fs.readFileSync(filePath, 'utf8');
   const runtime = runtimeRoutes(filePath, content);
   const docs = documentedRoutes(content);
-  const findings: Finding[] = [];
+  const findings: Finding[] = duplicateFindings(filePath, runtime, 'Express');
   const usedDocs = new Set<number>();
 
   for (const route of runtime.sort((left, right) => left.position - right.position)) {
@@ -119,7 +144,22 @@ function main(): void {
   const files = fs.readdirSync(ROUTES_DIR)
     .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts') && name !== 'auth-e2e.ts')
     .map((name) => path.join(ROUTES_DIR, name));
-  const findings = files.flatMap(checkFile);
+  const allDocumentedRoutes = files.flatMap((file) => documentedRoutes(fs.readFileSync(file, 'utf8'))
+    .map((route) => ({ file, route })));
+  const documentedByKey = new Map<string, Array<{ file: string; route: Route }>>();
+  for (const entry of allDocumentedRoutes) {
+    const group = documentedByKey.get(routeKey(entry.route)) ?? [];
+    group.push(entry);
+    documentedByKey.set(routeKey(entry.route), group);
+  }
+  const duplicateDocumentedFindings = [...documentedByKey.entries()].flatMap(([key, group]) => group.length > 1
+    ? group.slice(1).map(({ file, route }) => ({
+      file,
+      route,
+      message: `duplicate OpenAPI operation ${key}; first declaration is at ${path.relative(process.cwd(), group[0]!.file)}:${group[0]!.route.line}`,
+    }))
+    : []);
+  const findings = [...files.flatMap(checkFile), ...duplicateDocumentedFindings];
   if (findings.length === 0) {
     console.log(`[swagger-coverage] Exact Express/OpenAPI parity passed for ${files.length} route files. ✓`);
     return;

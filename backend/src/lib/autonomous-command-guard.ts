@@ -25,6 +25,7 @@ export interface AutonomousCommandGuardOptions {
   cwd: string;
   env: Record<string, string>;
   profile?: 'general' | 'conflict-resolution';
+  commandDenylist?: string[];
 }
 
 export interface AutonomousCommandGuardResult {
@@ -98,7 +99,12 @@ function writeExecutable(filePath: string, content: string): void {
   fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o755 });
 }
 
-function buildWrapper(command: string, realCommand: string | null, profile: 'general' | 'conflict-resolution'): string {
+function buildWrapper(
+  command: string,
+  realCommand: string | null,
+  profile: 'general' | 'conflict-resolution',
+  commandDenylist: string[],
+): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 
@@ -111,7 +117,17 @@ autonomous_jest_db_url="\${RORCA_AUTONOMOUS_BACKEND_JEST_DATABASE_URL:-}"
 pwd_now="$(pwd -P)"
 args_joined=" $* "
 profile=${shellQuote(profile)}
-
+${commandDenylist.length > 0 ? `manifest_denylist=(${commandDenylist.map(shellQuote).join(' ')})
+full_command="$cmd_name $*"
+full_command_lower="${'${full_command,,}'}"
+for denied in "${'${manifest_denylist[@]}'}"; do
+  denied_lower="${'${denied,,}'}"
+  if [[ -n "$denied_lower" && "$full_command_lower" == *"$denied_lower"* ]]; then
+    echo "[Rorca autonomous command guard] Command blocked by host-frozen TaskManifest command denylist." >&2
+    exit 126
+  fi
+done
+` : ''}
 case "$cmd_name" in
   npm|npx|yarn|pnpm)
     if [[ "$args_joined" =~ (^|[[:space:]])(gh|git|ssh|scp|sftp|rsync|curl|wget)([[:space:]]|$) ]]; then
@@ -250,16 +266,25 @@ export function sanitizeAutonomousAgentEnv(env: Record<string, string>): Record<
 export function createAutonomousCommandGuard(options: AutonomousCommandGuardOptions): AutonomousCommandGuardResult {
   const guardBinDir = fs.mkdtempSync(path.join(os.tmpdir(), GUARD_DIR_PREFIX));
   const profile = options.profile ?? 'general';
+  const commandDenylist = [...new Set((options.commandDenylist ?? [])
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean))];
   // Both profiles deny ambient provider/network authority. Conflict resolution
   // additionally denies host-owned local history mutation.
-  const commands = [
+  const commands = [...new Set([
     'npm', 'npx', 'jest', 'yarn', 'pnpm',
     'git', 'gh', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync',
     'rm', 'mkfs', 'dd', 'sudo', 'docker', 'kubectl', 'terraform',
-  ];
+    ...commandDenylist
+      .map((pattern) => pattern.split(/\s+/)[0] ?? '')
+      .filter((command) => /^[A-Za-z0-9._+-]+$/.test(command)),
+  ])];
 
   for (const command of commands) {
-    writeExecutable(path.join(guardBinDir, command), buildWrapper(command, resolveRealCommand(command, options.env.PATH), profile));
+    writeExecutable(
+      path.join(guardBinDir, command),
+      buildWrapper(command, resolveRealCommand(command, options.env.PATH), profile, commandDenylist),
+    );
   }
 
   const autonomousBackendJestEnv = deriveAutonomousBackendJestEnv(options.env);

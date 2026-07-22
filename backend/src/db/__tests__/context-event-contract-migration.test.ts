@@ -7,7 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execute } from '../index';
+import { transaction } from '../index';
 import { checkDuplicatePrefixes } from '../pg-index';
 
 const migrationFile = '20260705160123_unified_context_event_contract.sql';
@@ -23,8 +23,12 @@ describe('UCC-007 context event contract migration', () => {
     expect(migrationFile).toMatch(/^20260705160123_/);
   });
 
-  test('can be applied a second time as a brownfield no-op', async () => {
-    await expect(execute(sql)).resolves.toBeDefined();
+  test('historical migration SQL remains executable without mutating the shared current schema', async () => {
+    const rollback = new Error('rollback historical migration probe');
+    await expect(transaction(async (client) => {
+      await client.query(sql);
+      throw rollback;
+    })).rejects.toBe(rollback);
   });
 
   test('is brownfield/idempotency friendly for existing rows and reruns', () => {

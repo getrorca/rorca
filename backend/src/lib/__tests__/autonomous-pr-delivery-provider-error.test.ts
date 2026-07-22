@@ -189,7 +189,7 @@ describe('autonomous exact-SHA merge provider errors', () => {
           }
           if (sql.includes('SELECT id FROM autonomous_delivery_policies')) return { rows: [{ id: policyId }] };
           if (sql.includes('SELECT id FROM github_pr_delivery_evidence')) return { rows: [{ id: evidence.id }] };
-          if (sql.includes('SELECT id::text FROM ssdlc_decisions')) return { rows: [{ id: lifecycle.mergeDecisionId }] };
+          if (sql.includes('FROM ssdlc_decisions decision')) return { rows: [{ id: lifecycle.mergeDecisionId }] };
           return { rows: [] };
         }),
       };

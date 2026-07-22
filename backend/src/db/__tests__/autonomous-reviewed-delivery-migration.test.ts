@@ -14,7 +14,7 @@ import {
 } from '../../lib/autonomous-delivery-policy';
 import { createCanonicalEvidence, persistCanonicalEvidence } from '../../lib/ssdlc-evidence';
 
-const workspaceId = 'ws-autonomous-reviewed-delivery';
+let workspaceId: string;
 const policyIdPattern = /^[0-9a-f-]{36}$/;
 const headSha = 'a'.repeat(40);
 const baseSha = 'b'.repeat(40);
@@ -22,7 +22,7 @@ const mergedSha = 'c'.repeat(40);
 const principal = { principalId: 'operator-1', displayLabel: 'operator@example.test' };
 
 beforeEach(async () => {
-  await execute('TRUNCATE TABLE workspaces CASCADE');
+  workspaceId = `ws-autonomous-reviewed-delivery-${crypto.randomUUID()}`;
   await execute(
     `INSERT INTO workspaces (id, label, path, domains)
      VALUES ($1, 'Reviewed delivery migration', '/tmp/reviewed-delivery', '[]')`,
@@ -85,13 +85,13 @@ async function seedAuthority() {
   await execute(`
     INSERT INTO github_pr_delivery_evidence (
       id, workspace_id, run_id, policy_id, policy_digest, repo_owner, repo_name,
-      pr_number, pr_url, pr_state, draft, merged, head_ref, base_ref, head_sha,
+      repository_authority_source, pr_number, pr_url, pr_state, draft, merged, head_ref, base_ref, head_sha,
       base_sha, mergeable, mergeable_state, comparison_status, ahead_by, behind_by,
       branch_fresh, checks, reviews, check_summary, review_summary,
       provider_observed_at, observed_by_principal_id, observed_by_display_label,
       payload_hash
     ) VALUES (
-      $1, $2, $3, $4, $5, 'getrorca', 'rorca', 42,
+      $1, $2, $3, $4, $5, 'getrorca', 'rorca', 'pat-oauth-fallback', 42,
       'https://github.com/getrorca/rorca/pull/42', 'open', FALSE, FALSE,
       'run/reviewed-delivery', 'main', $6, $7, TRUE, 'clean', 'ahead', 2, 0,
       TRUE, '[]', '[]', '{"allRequiredPassed":true}', '{"reviewSatisfied":true}',

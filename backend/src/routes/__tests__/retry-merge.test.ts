@@ -15,69 +15,58 @@ import { queryOne, execute } from '../../db/index';
 
 jest.setTimeout(90_000);
 
+const mockBossSend = jest.fn().mockResolvedValue('mock-merge-job-id');
+
+jest.mock('../../lib/llm-client', () => ({
+  chatComplete: jest.fn(),
+  getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+  isValidModel: jest.fn().mockReturnValue(true),
+  DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
+  SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+}));
+
+jest.mock('../../lib/pg-boss', () => ({
+  initBoss: jest.fn().mockResolvedValue(undefined),
+  getBoss: jest.fn().mockReturnValue({
+    send: mockBossSend,
+    work: jest.fn(),
+    stop: jest.fn().mockResolvedValue(undefined),
+  }),
+}));
+
 let app: Express;
 let tmpDir: string;
 let wsDir: string;
+let workspaceId: string;
 let authToken: string;
-let mockBossSend: jest.Mock;
 
-beforeEach(async () => {
-  jest.resetModules();
-
-  mockBossSend = jest.fn().mockResolvedValue('mock-merge-job-id');
-
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockReturnValue(true),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-  }));
-
-  jest.mock('../../lib/pg-boss', () => ({
-    initBoss: jest.fn().mockResolvedValue(undefined),
-    getBoss: jest.fn().mockReturnValue({
-      send: mockBossSend,
-      work: jest.fn(),
-      stop: jest.fn().mockResolvedValue(undefined),
-    }),
-  }));
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-retry-merge-test-'));
+beforeAll(async () => {
   process.env.NODE_ENV = 'test';
-
   const serverMod = require('../../server');
   app = serverMod.default;
   authToken = await getAuthToken(app);
+});
 
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
-
+beforeEach(async () => {
+  jest.clearAllMocks();
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-retry-merge-test-'));
   wsDir = path.join(tmpDir, 'workspace');
+  workspaceId = `ws-merge-${path.basename(tmpDir)}`;
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
-
-  // Clean up
-  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-merge')`);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-merge')`);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-merge'`);
-  await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-merge'`);
-
   await execute(
-    `INSERT INTO users (id, email, display_name, password_hash, plan)
-     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
-     ON CONFLICT (id) DO UPDATE SET plan = 'pro'`,
-  );
-
-  await execute(
-    `INSERT INTO workspaces (id, label, path) VALUES ('ws-merge', 'Merge WS', $1)
-     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
-    [wsDir],
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Merge WS', $2)`,
+    [workspaceId, wsDir],
   );
 });
 
 afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
   delete process.env.NODE_ENV;
 });
 
@@ -97,7 +86,7 @@ async function seedRunWithMerge(overrides: {
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
     [
       'forge/specs/approved/test-spec.json',
-      'ws-merge',
+      workspaceId,
       overrides.status ?? 'done',
       overrides.branch_name === undefined ? 'feat/test-branch-123' : overrides.branch_name,
       overrides.worktree_path === undefined ? '/tmp/worktree-test' : overrides.worktree_path,
@@ -112,14 +101,15 @@ async function seedRunWithMerge(overrides: {
 }
 
 describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
-  test('returns 404 when run does not exist', async () => {
+  test('retires the actuator before looking up a nonexistent run', async () => {
     const res = await request(app)
       .post('/api/pipeline/runs/999999/retry-merge')
       .set('Authorization', `Bearer ${authToken}`)
       .send();
 
-    expect(res.status).toBe(404);
-    expect(res.body.error).toContain('not found');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Manual retry-merge is retired');
+    expect(mockBossSend).not.toHaveBeenCalled();
   });
 
   test('returns 409 when merge_status is null', async () => {
@@ -131,7 +121,8 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .send();
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toContain('null');
+    expect(res.body.error).toContain('Manual retry-merge is retired');
+    expect(mockBossSend).not.toHaveBeenCalled();
   });
 
   test('returns 409 when merge_status is merged', async () => {
@@ -143,7 +134,8 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .send();
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toContain('merged');
+    expect(res.body.error).toContain('Manual retry-merge is retired');
+    expect(mockBossSend).not.toHaveBeenCalled();
   });
 
   test('returns 409 when merge_status is merging', async () => {
@@ -155,7 +147,8 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .send();
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toContain('merging');
+    expect(res.body.error).toContain('Manual retry-merge is retired');
+    expect(mockBossSend).not.toHaveBeenCalled();
   });
 
   test('returns 409 when run has no branch_name', async () => {
@@ -167,7 +160,8 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .send();
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toContain('branch_name');
+    expect(res.body.error).toContain('Manual retry-merge is retired');
+    expect(mockBossSend).not.toHaveBeenCalled();
   });
 
   test('rejects branch-only and no-auto-merge runs without queueing a base merge', async () => {
@@ -178,11 +172,11 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .send();
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toContain('autoMerge=true direct');
+    expect(res.body.error).toContain('Manual retry-merge is retired');
     expect(mockBossSend).not.toHaveBeenCalled();
   });
 
-  test('succeeds: resets merge_status to merging and enqueues job', async () => {
+  test('does not reset failed merge state or enqueue the retired actuator', async () => {
     const runId = await seedRunWithMerge({ merge_status: 'failed' });
 
     const res = await request(app)
@@ -190,30 +184,15 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send();
 
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, runId: Number(runId), queued: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Manual retry-merge is retired');
 
-    // Verify merge_status was reset to 'merging'
     const run = await queryOne<{ merge_status: string }>(
       'SELECT merge_status FROM pipeline_runs WHERE id = $1',
       [runId],
     );
-    expect(run!.merge_status).toBe('merging');
-
-    // Verify pg-boss send was called with correct queue and payload
-    expect(mockBossSend).toHaveBeenCalledWith(
-      'pipeline:merge',
-      {
-        runId: Number(runId),
-        branch: 'feat/test-branch-123',
-        workspaceId: 'ws-merge',
-        posture: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', source: 'manual-retry' },
-      },
-      expect.objectContaining({
-        retryLimit: 0,
-        expireInSeconds: 3600,
-      }),
-    );
+    expect(run!.merge_status).toBe('failed');
+    expect(mockBossSend).not.toHaveBeenCalled();
   });
 
   test('returns 400 for invalid runId', async () => {

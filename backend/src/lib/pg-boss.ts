@@ -24,23 +24,11 @@
 
 import PgBoss from 'pg-boss';
 import { logger } from './logger';
+import { getPgBossSchemaName } from './pg-boss-schema';
+export { getPgBossSchemaName, getPgBossSchemaSql, getPgBossTableSql } from './pg-boss-schema';
 
 let bossInstance: PgBoss | null = null;
 let bossInitPromise: Promise<void> | null = null;
-
-/** One validated authority for pg-boss configuration and internal evidence reads. */
-export function getPgBossSchemaName(): string {
-  const configuredSchema = process.env.RORCA_PGBOSS_SCHEMA?.trim() || 'pgboss';
-  if (!/^pgboss(?:_[a-z0-9_]{1,48})?$/.test(configuredSchema)) {
-    throw new Error('[pg-boss] RORCA_PGBOSS_SCHEMA must be pgboss or a bounded pgboss_* identifier');
-  }
-  return configuredSchema;
-}
-
-/** SQL identifier safe only because getPgBossSchemaName applies a closed grammar. */
-export function getPgBossSchemaSql(): string {
-  return `"${getPgBossSchemaName()}"`;
-}
 
 /**
  * initBoss — create and start the pg-boss singleton.

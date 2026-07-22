@@ -49,6 +49,46 @@ test('maxPool=1 fenced queries reuse the lock session without deadlock', async (
   } finally { await closeDb(db); }
 });
 
+test('maxPool=1 transaction helpers reuse the transaction session without deadlock', async () => {
+  const db = await loadDb(1);
+  try {
+    const result = await db.transaction(async client => {
+      const direct = await client.query<{ pid: number }>('SELECT pg_backend_pid()::int AS pid');
+      const helper = await db.queryOne<{ pid: number }>('SELECT pg_backend_pid()::int AS pid');
+      return { direct: direct.rows[0].pid, helper: helper?.pid };
+    });
+    expect(result.helper).toBe(result.direct);
+
+    await db.execute('CREATE TEMP TABLE managed_transaction_probe(value int)');
+    await expect(db.transaction(async () => {
+      await db.execute('INSERT INTO managed_transaction_probe VALUES (7)');
+      expect(await db.queryOne<{ value: number }>('SELECT value FROM managed_transaction_probe'))
+        .toEqual({ value: 7 });
+      await expect(db.transaction(async () => undefined)).rejects.toThrow(/Nested managed transactions/);
+      await expect(db.withPgAdvisoryLock('managed-transaction-nesting', async () => undefined))
+        .rejects.toThrow(/inside managed transactions/);
+      throw new Error('managed-rollback-probe');
+    })).rejects.toThrow('managed-rollback-probe');
+    expect(await db.queryOne<{ count: string }>('SELECT COUNT(*)::text AS count FROM managed_transaction_probe'))
+      .toEqual({ count: '0' });
+    await db.execute('DROP TABLE managed_transaction_probe');
+  } finally { await closeDb(db); }
+});
+
+test('managed transaction descendants fail closed after their transaction completes', async () => {
+  const db = await loadDb(1);
+  let descendant: Promise<number> | undefined;
+  try {
+    await db.transaction(async () => {
+      descendant = new Promise((resolve, reject) => setTimeout(() => {
+        db.queryOne<{ value: number }>('SELECT 9::int AS value').then(row => resolve(row!.value), reject);
+      }, 50));
+    });
+    await expect(descendant!).rejects.toThrow(/after its managed transaction completed/);
+    expect(await db.queryOne<{ value: number }>('SELECT 10::int AS value')).toEqual({ value: 10 });
+  } finally { await closeDb(db); }
+});
+
 test('same key serializes while different keys may progress concurrently', async () => {
   const db = await loadDb(4);
   try {

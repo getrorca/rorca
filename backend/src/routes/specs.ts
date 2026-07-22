@@ -74,7 +74,8 @@ import {
   type SpecJob,
 } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
-import { durableAtomicWriteFile, fsyncDirectory } from '../lib/run-spec-snapshot';
+import { getPgBossTableSql } from '../lib/pg-boss-schema';
+import { durableAtomicWriteFile, durableEnsureDirectory, fsyncDirectory } from '../lib/run-spec-snapshot';
 import {
   buildPersistPostSaveStages,
   getEffectiveGenerationLog,
@@ -9927,6 +9928,31 @@ const SpecApprovalTargetRequestSchema = z.object({
   persistRequestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
 }).strict();
 
+function governedSpecApprovalResponseIdentity(input: {
+  workspaceId: string;
+  specId: string;
+  idempotencyKey: string;
+  approval: z.infer<typeof SpecHumanApprovalSchema>;
+  providerApproval: { receiptId: string; actorId: string; targetHash: string };
+  mutationReceipt: { receiptId: string; requestHash: string };
+}) {
+  return {
+    schemaVersion: 'rorca.spec-approval-response-identity.v1',
+    workspaceId: input.workspaceId,
+    specId: input.specId,
+    idempotencyKey: input.idempotencyKey,
+    targetHash: input.providerApproval.targetHash,
+    actorId: input.providerApproval.actorId,
+    providerHumanReceiptId: input.providerApproval.receiptId,
+    acceptedPlanHash: input.approval.acceptedPlanHash,
+    acceptedPreflightHash: input.approval.acceptedPreflightHash,
+    persistReceiptId: input.approval.persistReceiptId,
+    persistRequestHash: input.approval.persistRequestHash,
+    mutationReceiptId: input.mutationReceipt.receiptId,
+    mutationRequestHash: input.mutationReceipt.requestHash,
+  };
+}
+
 /**
  * @swagger
  * /api/specs/{specId}/approval-target:
@@ -9941,8 +9967,21 @@ const SpecApprovalTargetRequestSchema = z.object({
  *         name: specId
  *         required: true
  *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, acceptedPlanHash, acceptedPreflightHash, persistReceiptId, persistRequestHash]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               acceptedPlanHash: { type: string }
+ *               acceptedPreflightHash: { type: string }
+ *               persistReceiptId: { type: string, format: uuid }
+ *               persistRequestHash: { type: string }
  *     responses:
- *       200: { description: Exact approval target and readiness fingerprint }
+ *       200: { description: rorca.spec-approval-target.v1 exact approval target and request/material/readiness identity }
  *       409: { description: Persisted authoring identity mismatch }
  */
 router.post('/:specId/approval-target', validateBody(SpecApprovalTargetRequestSchema), async (req: Request, res: Response) => {
@@ -10021,7 +10060,17 @@ router.post('/:specId/approval-target', validateBody(SpecApprovalTargetRequestSc
  *               workspaceId: { type: string }
  *               readinessOverride:
  *                 type: boolean
- *                 description: Explicitly approve despite readiness blockers; usage is logged to WAL for auditability.
+ *                 enum: [false]
+ *                 description: Governed approval never permits readiness override.
+ *               humanApproval:
+ *                 type: object
+ *                 description: Exact accepted authoring identity plus signed provider-human attestation for governed specs.
+ *                 properties:
+ *                   acceptedPlanHash: { type: string }
+ *                   acceptedPreflightHash: { type: string }
+ *                   persistReceiptId: { type: string, format: uuid }
+ *                   persistRequestHash: { type: string }
+ *                   attestation: { type: object }
  *     responses:
  *       200:
  *         description: Spec approved
@@ -10031,7 +10080,13 @@ router.post('/:specId/approval-target', validateBody(SpecApprovalTargetRequestSc
  *               type: object
  *               properties:
  *                 ok: { type: boolean }
- *                 specPath: { type: string }
+ *                 approvedPath: { type: string }
+ *                 readiness: { type: object }
+ *                 providerApproval: { type: object }
+ *                 mutationReceipt: { type: object }
+ *                 responseIdentity:
+ *                   type: object
+ *                   description: rorca.spec-approval-response-identity.v1 exact request/target/receipt binding
  *       404: { description: "Spec not found in pending/" }
  */
 router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (req: Request, res: Response) => {
@@ -10126,6 +10181,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
             readiness: approvalResult.readiness,
             ...(approvalResult.providerApproval ? { providerApproval: approvalResult.providerApproval } : {}),
             mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
+            ...(approvalResult.responseIdentity ? { responseIdentity: approvalResult.responseIdentity } : {}),
           };
           await completeAuthoringMutation({
             receiptId: claim.receiptId,
@@ -10228,6 +10284,17 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
       throw new ForbiddenError('Service principals must relay exact provider-human approval authority');
     }
 
+    const responseIdentity = input.humanApproval && providerApproval && claim && idempotencyKey
+      ? governedSpecApprovalResponseIdentity({
+        workspaceId,
+        specId,
+        idempotencyKey,
+        approval: input.humanApproval,
+        providerApproval,
+        mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
+      })
+      : null;
+
     if (claim) {
       const mutableAuthoring = authoringRecord ?? {};
       pendingContent.authoring = mutableAuthoring;
@@ -10242,6 +10309,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
         materialHash: authoringSpecMaterialHash(pendingContent),
         actorId: providerApproval?.actorId ?? req.user!.id,
         walPayload: { workspaceId, providerApproval },
+        ...(responseIdentity ? { responseIdentity } : {}),
       };
     }
     // Publish the updated pending bytes through an exclusive temp file, file
@@ -10251,7 +10319,8 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
     // A durable cross-directory rename requires both directory entries to be
     // flushed. Recovery therefore observes either the exact pending artifact or
     // the exact approved artifact, never a torn in-place rewrite.
-    fs.mkdirSync(approvedDir, { recursive: true });
+    durableEnsureDirectory(approvedDir);
+    fsyncDirectory(path.dirname(approvedDir));
     fsyncDirectory(approvedDir);
     fs.renameSync(pendingFile, approvedFile);
     fsyncDirectory(pendingDir);
@@ -10295,6 +10364,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
       readiness,
       ...(providerApproval ? { providerApproval } : {}),
       ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
+      ...(responseIdentity ? { responseIdentity } : {}),
     };
     if (claim) {
       authoringMutationFailpoint('approve_before_receipt_completion');
@@ -16794,11 +16864,6 @@ function latestRelevantStageJob(jobs: SpecJob[], stage: RepairPostSaveStage, sav
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
 }
 
-function isPgBossMetadataUnavailable(error: unknown): boolean {
-  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
-  return code === '42P01' || code === '3F000';
-}
-
 async function listLivePgBossRepairJobs(workspaceId: string, specId: string, queueName: string): Promise<RepairPgBossJob[]> {
   type Row = {
     id: string;
@@ -16813,7 +16878,7 @@ async function listLivePgBossRepairJobs(workspaceId: string, specId: string, que
   try {
     rows = await query<Row>(
       `SELECT id::text, name, state, created_on, started_on, data
-       FROM pgboss.job
+       FROM ${getPgBossTableSql('job')}
        WHERE name = $1
          AND state IN ('created', 'active', 'retry')
          AND data->>'specId' = $2
@@ -16822,10 +16887,9 @@ async function listLivePgBossRepairJobs(workspaceId: string, specId: string, que
       [queueName, specId, workspaceId],
     );
   } catch (error) {
-    if (isPgBossMetadataUnavailable(error)) {
-      logger.warn({ err: error, queueName, specId, workspaceId }, '[Specs] pg-boss metadata unavailable during repair liveness check — assuming no live jobs');
-      return [];
-    }
+    // Queue metadata is evidence, never absence authority. If it cannot be
+    // inspected, repair must not infer that publication is safe or duplicate
+    // an application-owned pending/running job.
     throw new ConflictError(`Unable to verify pg-boss liveness for ${queueName} repair: ${error instanceof Error ? error.message : String(error)}`);
   }
 

@@ -128,6 +128,7 @@ export const PipelineRunJobPayload = z.object({
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
   taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  commandDenylist: z.array(z.string().min(1).max(512)).max(50).optional(),
   // Persisted request metadata is supplied by the pipeline route for worker
   // correlation. It is not an execution authority, but strict schema parsing
   // must preserve it rather than rejecting an otherwise valid run job.

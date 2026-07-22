@@ -22,11 +22,34 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { execSync, spawn, type ChildProcess } from 'child_process';
 
+// Unit/integration fixture processes use bounded mock binaries. Production
+// autonomous launches retain the mandatory linux-bwrap boundary; this test-only
+// adapter avoids depending on a Linux namespace while exercising parsers and
+// provider request construction in-process.
+jest.mock('../lib/autonomous-sandbox', () => {
+  const actual = jest.requireActual('../lib/autonomous-sandbox');
+  const launch = (options: { command: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv }) => ({
+    command: options.command,
+    args: [...options.args],
+    cwd: options.cwd,
+    env: options.env,
+    isolated: true,
+  });
+  return {
+    ...actual,
+    assertAutonomousExecutionBoundary: jest.fn(),
+    prepareAutonomousSandboxLaunch: launch,
+    prepareAutonomousModelSandboxLaunch: launch,
+  };
+});
+
 // ─── Test Fixtures ──────────────────────────────────────────────────────────
 
 const FIXTURES_DIR = path.join(__dirname, 'fixtures');
 const MOCK_OPENCODE_BIN = path.join(FIXTURES_DIR, 'mock-opencode.sh');
 const MOCK_OPENCODE_SPECGEN_BIN = path.join(FIXTURES_DIR, 'mock-opencode-specgen.sh');
+const CAN_RUN_LINUX_AUTONOMOUS_FIXTURE = process.platform === 'linux'
+  && process.env.RORCA_TEST_LINUX_BWRAP === '1';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -162,32 +185,15 @@ describe('OpenCode server lifecycle', () => {
     cleanupDir(tmpDir);
   });
 
-  test('start creates socket file and stop cleans up', async () => {
+  test('warm shared server start fails closed without creating PID or socket authority', async () => {
     const { OpenCodeServer } = require('../lib/opencode-server') as typeof import('../lib/opencode-server');
 
     const server = new OpenCodeServer({ binPath: MOCK_OPENCODE_BIN });
-    await server.start();
-
-    expect(server.getState()).toBe('running');
-    expect(server.getPid()).not.toBeNull();
-    expect(server.getSocketPath()).not.toBeNull();
-
-    const socketPath = server.getSocketPath()!;
-    expect(fs.existsSync(socketPath)).toBe(true);
-
-    // attach() returns the socket path
-    const addr = server.attach();
-    expect(addr).toBe(socketPath);
-
-    // isAlive returns true
-    expect(server.isAlive()).toBe(true);
-
-    // Stop the server
-    await server.stop();
-    expect(server.getState()).toBe('stopped');
+    await expect(server.start()).rejects.toThrow('Warm OpenCode server mode is retired');
+    expect(server.getState()).toBe('error');
     expect(server.getPid()).toBeNull();
-    // Socket cleaned up
-    expect(fs.existsSync(socketPath)).toBe(false);
+    expect(server.getSocketPath()).toBeNull();
+    expect(server.isAlive()).toBe(false);
   }, 15_000);
 
   test('attach throws when server is not running', () => {
@@ -196,7 +202,7 @@ describe('OpenCode server lifecycle', () => {
     expect(() => server.attach()).toThrow('not running');
   });
 
-  test('onPidReady callback fires with server PID', async () => {
+  test('retired warm server never publishes a PID callback', async () => {
     const { OpenCodeServer } = require('../lib/opencode-server') as typeof import('../lib/opencode-server');
     let capturedPid: number | null = null;
 
@@ -205,35 +211,19 @@ describe('OpenCode server lifecycle', () => {
       onPidReady: (pid) => { capturedPid = pid; },
     });
 
-    await server.start();
-    expect(capturedPid).not.toBeNull();
-    expect(capturedPid).toBeGreaterThan(0);
-    expect(capturedPid).toBe(server.getPid());
-    await server.stop();
+    await expect(server.start()).rejects.toThrow('Warm OpenCode server mode is retired');
+    expect(capturedPid).toBeNull();
+    expect(server.getPid()).toBeNull();
   }, 15_000);
 
-  test('restart succeeds once, fails on second attempt', async () => {
+  test('restart cannot revive the retired warm server surface', async () => {
     const { OpenCodeServer } = require('../lib/opencode-server') as typeof import('../lib/opencode-server');
     const server = new OpenCodeServer({ binPath: MOCK_OPENCODE_BIN });
 
-    await server.start();
-    const firstPid = server.getPid();
-
-    // Kill the server to simulate crash
-    await server.stop();
-    expect(server.getState()).toBe('stopped');
-
-    // First restart succeeds
-    const firstRestart = await server.restart();
-    expect(firstRestart).toBe(true);
-    expect(server.getState()).toBe('running');
-    expect(server.getPid()).not.toBeNull();
-    expect(server.getPid()).not.toBe(firstPid);
-
-    // Second restart attempt fails (only one allowed per instance)
-    await server.stop();
-    const secondRestart = await server.restart();
-    expect(secondRestart).toBe(false);
+    await expect(server.start()).rejects.toThrow('Warm OpenCode server mode is retired');
+    expect(await server.restart()).toBe(false);
+    expect(await server.restart()).toBe(false);
+    expect(server.getPid()).toBeNull();
   }, 20_000);
 });
 
@@ -356,7 +346,14 @@ describe('Execution engine with opencode agent', () => {
       });
     });
 
-    // The engine should complete successfully (exit 0 = all stories passed)
+    if (!CAN_RUN_LINUX_AUTONOMOUS_FIXTURE) {
+      expect(result.code).toBe(1);
+      const unchanged = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+      expect(unchanged.userStories[0].passes).toBe(false);
+      return;
+    }
+
+    // The Linux bwrap fixture should complete successfully (exit 0 = all stories passed).
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('US-001');
     expect(result.stdout).toContain('completed (exit 0)');
@@ -401,6 +398,13 @@ describe('Execution engine with opencode agent', () => {
       child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
       child.on('exit', (code) => resolve({ code: code ?? 1, stdout }));
     });
+
+    if (!CAN_RUN_LINUX_AUTONOMOUS_FIXTURE) {
+      expect(result.code).toBe(1);
+      const unchanged = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+      expect(unchanged.userStories.every((story: { passes?: boolean }) => story.passes !== true)).toBe(true);
+      return;
+    }
 
     expect(result.code).toBe(0);
 
@@ -699,7 +703,7 @@ describe('Execution engine handles opencode failures', () => {
     cleanupDir(tmpWorkspace);
   });
 
-  test('engine retries on retryable failure then skips after MAX_RETRIES', async () => {
+  test('engine retries bounded failures or fails closed before attempts without the Linux sandbox', async () => {
     // Create a wrapper script that always fails with exit code 1.
     // Sleep >5s to exceed RATE_LIMIT_FAST_EXIT_THRESHOLD_MS (5000ms) —
     // otherwise the engine treats fast exits as rate-limited and applies
@@ -751,9 +755,15 @@ describe('Execution engine handles opencode failures', () => {
       child.on('exit', (code) => resolve({ code: code ?? 1, stdout }));
     });
 
-    // Engine should have retried and eventually marked story as skipped
     const updatedSpec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
     const story = updatedSpec.userStories[0];
+    if (!CAN_RUN_LINUX_AUTONOMOUS_FIXTURE) {
+      expect(result.code).toBe(1);
+      expect(story.skipped).not.toBe(true);
+      expect(story.passes).toBeFalsy();
+      return;
+    }
+    // The Linux sandbox fixture retries and eventually marks the story skipped.
     expect(story.skipped).toBe(true);
     expect(story.passes).toBeFalsy();
   }, 180_000);
@@ -823,6 +833,13 @@ describe('Full E2E: opencode execution with SKILL.md and git commit', () => {
       child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
       child.on('exit', (code) => resolve({ code: code ?? 1, stdout }));
     });
+
+    if (!CAN_RUN_LINUX_AUTONOMOUS_FIXTURE) {
+      expect(result.code).toBe(1);
+      const unchanged = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+      expect(unchanged.userStories[0].passes).toBe(false);
+      return;
+    }
 
     expect(result.code).toBe(0);
 

@@ -13,7 +13,12 @@ import { retryHash } from './retry-governance';
 import { stableWalJson } from './trusted-wal';
 
 export const PROVIDER_HUMAN_EVENT_VERSION = 'provider-human-event.v1' as const;
-export type ProviderHumanPurpose = 'authoring_plan_confirmation' | 'spec_set_approval' | 'retry_approval' | 'lifecycle_decision';
+export type ProviderHumanPurpose =
+  | 'authoring_plan_confirmation'
+  | 'spec_set_approval'
+  | 'retry_approval'
+  | 'lifecycle_decision'
+  | 'task_manifest_dispatch';
 
 export const ProviderHumanEventSchema = z.object({
   schemaVersion: z.literal(PROVIDER_HUMAN_EVENT_VERSION),

@@ -141,6 +141,25 @@ describe('autonomous-command-guard', () => {
     }
   });
 
+  test('caller-added TaskManifest command restrictions are enforced by the runtime wrapper', () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-manifest-command-guard-'));
+    const guarded = createAutonomousCommandGuard({
+      cwd: workspace,
+      env: process.env as Record<string, string>,
+      commandDenylist: ['git commit', 'node --eval forbidden-side-effect'],
+    });
+    try {
+      const git = spawnSync('git', ['commit', '--allow-empty', '-m', 'must-not-run'], {
+        cwd: workspace, env: guarded.env, encoding: 'utf8',
+      });
+      expect(git.status).toBe(126);
+      expect(git.stderr).toMatch(/manifest command denylist/i);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      fs.rmSync(guarded.guardBinDir, { recursive: true, force: true });
+    }
+  });
+
   test.each(['general', 'conflict-resolution'] as const)('%s profile blocks network, gh, and remote git operations as defense in depth', (profile) => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-conflict-guard-ws-'));
     const guarded = createAutonomousCommandGuard({

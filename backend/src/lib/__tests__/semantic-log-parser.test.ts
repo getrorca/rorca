@@ -1,369 +1,168 @@
-/**
- * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: Apache-2.0
- * Licensed under the Apache License, Version 2.0.
- * See LICENSE file in the project root for full license text.
- */
+// SPDX-License-Identifier: Apache-2.0
 
 import { parseStreamJsonLine, parseOpenCodeLine, parseLine } from '../semantic-log-parser';
 
-// ─── Claude stream-json tests ────────────────────────────────────────────────
+function claudeAssistant(...content: Array<Record<string, unknown>>): string {
+  return JSON.stringify({ type: 'assistant', message: { content } });
+}
+
+function claudeTool(name: string, input: Record<string, unknown>): string {
+  return claudeAssistant({ type: 'tool_use', name, input });
+}
 
 describe('parseStreamJsonLine', () => {
-  test('Read tool_use → type read with file path', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Read',
-      input: { file_path: '/src/index.ts' },
+  test.each([
+    ['Read', { file_path: '/src/index.ts' }, 'read', 'Read /src/index.ts', undefined],
+    ['Edit', { file_path: '/src/app.tsx' }, 'edit', 'Edit /src/app.tsx', undefined],
+    ['Write', { file_path: '/new-file.ts', content: 'hello' }, 'write', 'Write /new-file.ts', undefined],
+    ['Bash', { command: 'npm test', description: 'Run tests' }, 'bash', 'Run tests', 'npm test'],
+    ['Glob', { pattern: '**/*.ts', path: '/src' }, 'search', 'Glob **/*.ts', '/src'],
+    ['Grep', { pattern: 'TODO', path: '/src' }, 'search', 'Grep TODO', '/src'],
+    ['Task', { description: 'Explore codebase structure', prompt: 'Find all routes' }, 'plan', 'Task: Explore codebase structure', undefined],
+    ['CustomTool', {}, 'unknown', 'CustomTool', undefined],
+  ])('%s tool_use emits the canonical semantic step', (name, input, type, label, detail) => {
+    const steps = parseStreamJsonLine(claudeTool(name, input));
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ type, label, toolName: name });
+    expect(steps[0].detail).toBe(detail);
+    expect(steps[0].ts).toBeTruthy();
+  });
+
+  test('one assistant event preserves every tool block in order', () => {
+    const steps = parseStreamJsonLine(claudeAssistant(
+      { type: 'tool_use', name: 'Read', input: { file_path: '/a.ts' } },
+      { type: 'tool_use', name: 'Edit', input: { file_path: '/a.ts' } },
+      { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } },
+    ));
+    expect(steps.map(({ type, label }) => ({ type, label }))).toEqual([
+      { type: 'read', label: 'Read /a.ts' },
+      { type: 'edit', label: 'Edit /a.ts' },
+      { type: 'bash', label: 'npm test' },
+    ]);
+  });
+
+  test('long assistant text emits reasoning while short text is ignored', () => {
+    const long = parseStreamJsonLine(claudeAssistant({
+      type: 'text',
+      text: 'Let me analyze the codebase structure to understand the patterns used here.',
+    }));
+    expect(long).toHaveLength(1);
+    expect(long[0]).toMatchObject({ type: 'plan', label: 'Reasoning' });
+    expect(parseStreamJsonLine(claudeAssistant({ type: 'text', text: 'OK' }))).toEqual([]);
+  });
+
+  test('successful result extracts a commit identity', () => {
+    const steps = parseStreamJsonLine(JSON.stringify({
+      type: 'result', subtype: 'success', result: 'All changes committed. commit abc1234 feat: add dark mode toggle',
+    }));
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ type: 'commit', label: 'abc1234' });
+  });
+
+  test('successful result without a commit emits generic completion', () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: 'result', subtype: 'success', result: 'Task completed successfully',
+    }))[0]).toMatchObject({ type: 'commit', label: 'Run completed' });
+  });
+
+  test('error result is marked as an error semantic step', () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: 'result', subtype: 'error', error: 'Process timed out',
+    }))[0]).toMatchObject({
+      type: 'unknown', label: 'Error', detail: 'Process timed out', isError: true,
     });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('read');
-    expect(step!.label).toBe('Read /src/index.ts');
-    expect(step!.ts).toBeTruthy();
   });
 
-  test('Edit tool_use → type edit with file path', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Edit',
-      input: { file_path: '/src/app.tsx' },
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('edit');
-    expect(step!.label).toBe('Edit /src/app.tsx');
-  });
-
-  test('Bash tool_use → type bash with description', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Bash',
-      input: { command: 'npm test', description: 'Run tests' },
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('bash');
-    expect(step!.label).toBe('Run tests');
-    expect(step!.detail).toBe('npm test');
-  });
-
-  test('Write tool_use → type write', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Write',
-      input: { file_path: '/new-file.ts', content: 'hello' },
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('write');
-    expect(step!.label).toBe('Write /new-file.ts');
-  });
-
-  test('Glob tool_use → type search', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Glob',
-      input: { pattern: '**/*.ts', path: '/src' },
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('search');
-    expect(step!.label).toBe('Glob **/*.ts');
-    expect(step!.detail).toBe('/src');
-  });
-
-  test('Grep tool_use → type search', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Grep',
-      input: { pattern: 'TODO', path: '/src' },
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('search');
-    expect(step!.label).toBe('Grep TODO');
-  });
-
-  test('assistant message → type plan', () => {
-    const line = JSON.stringify({
-      type: 'assistant',
-      message: 'Let me analyze the codebase structure to understand the patterns used here.',
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('plan');
-    expect(step!.label).toBe('Reasoning');
-  });
-
-  test('short assistant message → null (below threshold)', () => {
-    const line = JSON.stringify({ type: 'assistant', message: 'OK' });
-    expect(parseStreamJsonLine(line)).toBeNull();
-  });
-
-  test('result with success subtype → type commit', () => {
-    const line = JSON.stringify({
-      type: 'result',
-      subtype: 'success',
-      result: 'All changes committed. commit abc1234 feat: add dark mode toggle',
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('commit');
-    expect(step!.label).toBe('abc1234');
-  });
-
-  test('result with success but no commit → commit with generic label', () => {
-    const line = JSON.stringify({
-      type: 'result',
-      subtype: 'success',
-      result: 'Task completed successfully',
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('commit');
-    expect(step!.label).toBe('Run completed');
-  });
-
-  test('result with error subtype → type unknown', () => {
-    const line = JSON.stringify({
-      type: 'result',
-      subtype: 'error',
-      error: 'Process timed out',
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('unknown');
-    expect(step!.label).toBe('Error');
-    expect(step!.detail).toBe('Process timed out');
-  });
-
-  test('Task tool_use → type plan', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Task',
-      input: { description: 'Explore codebase structure', prompt: 'Find all routes' },
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('plan');
-    expect(step!.label).toContain('Task:');
-  });
-
-  test('unknown tool → type unknown', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'CustomTool',
-      input: {},
-    });
-    const step = parseStreamJsonLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('unknown');
-    expect(step!.label).toBe('CustomTool');
-  });
-
-  test('malformed JSON → null', () => {
-    expect(parseStreamJsonLine('not json at all')).toBeNull();
-  });
-
-  test('empty line → null', () => {
-    expect(parseStreamJsonLine('')).toBeNull();
-    expect(parseStreamJsonLine('   ')).toBeNull();
-  });
-
-  test('SSE comment line → null', () => {
-    expect(parseStreamJsonLine(': heartbeat')).toBeNull();
-  });
-
-  test('unrecognized type field → null', () => {
-    const line = JSON.stringify({ type: 'content_block_delta', delta: { text: 'hi' } });
-    expect(parseStreamJsonLine(line)).toBeNull();
+  test.each([
+    ['malformed JSON', 'not json at all'],
+    ['empty line', ''],
+    ['whitespace', '   '],
+    ['SSE comment', ': heartbeat'],
+    ['unrecognized event', JSON.stringify({ type: 'content_block_delta', delta: { text: 'hi' } })],
+    ['legacy standalone tool event', JSON.stringify({ type: 'tool_use', name: 'Read', input: { file_path: '/a.ts' } })],
+  ])('%s emits no semantic steps', (_label, line) => {
+    expect(parseStreamJsonLine(line)).toEqual([]);
   });
 });
-
-// ─── OpenCode --format json tests ────────────────────────────────────────────
 
 describe('parseOpenCodeLine', () => {
-  test('read tool_call → type read', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'read',
-      args: { file_path: '/src/main.ts' },
-      timestamp: '2026-02-26T10:00:00Z',
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('read');
-    expect(step!.label).toBe('Read /src/main.ts');
-    expect(step!.ts).toBe('2026-02-26T10:00:00Z');
+  test.each([
+    ['read', { file_path: '/src/main.ts' }, 'read', 'Read /src/main.ts', undefined],
+    ['write', { path: '/new.ts' }, 'write', 'Write /new.ts', undefined],
+    ['edit', { file_path: '/src/component.tsx' }, 'edit', 'Edit /src/component.tsx', undefined],
+    ['bash', { command: 'npm run build', description: 'Build project' }, 'bash', 'Build project', 'npm run build'],
+    ['glob', { pattern: '*.json' }, 'search', 'glob *.json', undefined],
+    ['grep', { pattern: 'import', path: '/src' }, 'search', 'grep import', '/src'],
+    ['sometool', {}, 'unknown', 'sometool', undefined],
+  ])('%s tool_call emits the canonical semantic step', (tool, args, type, label, detail) => {
+    const steps = parseOpenCodeLine(JSON.stringify({ type: 'tool_call', tool, args }));
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ type, label, toolName: tool });
+    expect(steps[0].detail).toBe(detail);
   });
 
-  test('write tool_call → type write', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'write',
-      args: { path: '/new.ts' },
-      timestamp: '2026-02-26T10:01:00Z',
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('write');
-    expect(step!.label).toBe('Write /new.ts');
-  });
-
-  test('edit tool_call → type edit', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'edit',
-      args: { file_path: '/src/component.tsx' },
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('edit');
-    expect(step!.label).toBe('Edit /src/component.tsx');
-  });
-
-  test('bash tool_call → type bash with command detail', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'bash',
-      args: { command: 'npm run build', description: 'Build project' },
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('bash');
-    expect(step!.label).toBe('Build project');
-    expect(step!.detail).toBe('npm run build');
-  });
-
-  test('glob tool_call → type search', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'glob',
-      args: { pattern: '*.json' },
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('search');
-    expect(step!.label).toContain('*.json');
-  });
-
-  test('grep tool_call → type search', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'grep',
-      args: { pattern: 'import', path: '/src' },
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('search');
-    expect(step!.detail).toBe('/src');
-  });
-
-  test('assistant message → type plan', () => {
-    const line = JSON.stringify({
-      type: 'assistant',
-      content: 'I need to understand the authentication flow before making changes.',
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('plan');
-    expect(step!.label).toBe('Reasoning');
-  });
-
-  test('short assistant content → null', () => {
-    const line = JSON.stringify({ type: 'assistant', content: 'OK' });
-    expect(parseOpenCodeLine(line)).toBeNull();
-  });
-
-  test('completion → type commit', () => {
-    const line = JSON.stringify({
-      type: 'completion',
-      content: 'Implementation complete. All tests passing.',
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('commit');
-    expect(step!.label).toBe('Run completed');
-  });
-
-  test('error event → type unknown', () => {
-    const line = JSON.stringify({
-      type: 'error',
-      message: 'Rate limit exceeded',
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('unknown');
-    expect(step!.label).toBe('Error');
-    expect(step!.detail).toBe('Rate limit exceeded');
-  });
-
-  test('malformed JSON → null', () => {
-    expect(parseOpenCodeLine('{not valid')).toBeNull();
-  });
-
-  test('empty line → null', () => {
-    expect(parseOpenCodeLine('')).toBeNull();
-  });
-
-  test('unknown tool → type unknown', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'sometool',
-      args: {},
-    });
-    const step = parseOpenCodeLine(line);
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('unknown');
-  });
-
-  test('uses timestamp from event', () => {
+  test('uses the event timestamp verbatim', () => {
     const ts = '2026-01-15T08:30:00Z';
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'read',
-      args: { path: '/a.ts' },
-      timestamp: ts,
+    const steps = parseOpenCodeLine(JSON.stringify({
+      type: 'tool_call', tool: 'read', args: { path: '/a.ts' }, timestamp: ts,
+    }));
+    expect(steps[0].ts).toBe(ts);
+  });
+
+  test('assistant reasoning is emitted only above the minimum length', () => {
+    const long = parseOpenCodeLine(JSON.stringify({
+      type: 'assistant', content: 'I need to understand the authentication flow before making changes.',
+    }));
+    expect(long[0]).toMatchObject({ type: 'plan', label: 'Reasoning' });
+    expect(parseOpenCodeLine(JSON.stringify({ type: 'assistant', content: 'OK' }))).toEqual([]);
+  });
+
+  test('completion and error events preserve terminal meaning', () => {
+    const completion = parseOpenCodeLine(JSON.stringify({
+      type: 'completion', content: 'Implementation complete. All tests passing.',
+    }))[0];
+    expect(completion).toMatchObject({ type: 'commit', label: 'Run completed' });
+    expect(completion.isError).toBeFalsy();
+    expect(parseOpenCodeLine(JSON.stringify({
+      type: 'error', message: 'Rate limit exceeded',
+    }))[0]).toMatchObject({
+      type: 'unknown', label: 'Error', detail: 'Rate limit exceeded', isError: true,
     });
-    const step = parseOpenCodeLine(line);
-    expect(step!.ts).toBe(ts);
+  });
+
+  test('tool results retain bounded output and duration evidence', () => {
+    const steps = parseOpenCodeLine(JSON.stringify({
+      type: 'tool_result', tool: 'bash', content: 'tests passed', duration_ms: 42,
+    }));
+    expect(steps[0]).toMatchObject({
+      type: 'bash', label: 'bash result', detail: 'tests passed', output: 'tests passed', durationMs: 42,
+    });
+  });
+
+  test.each([
+    ['malformed JSON', '{not valid'],
+    ['empty line', ''],
+    ['SSE comment', ': heartbeat'],
+    ['unknown event', JSON.stringify({ type: 'unknown_event' })],
+  ])('%s emits no semantic steps', (_label, line) => {
+    expect(parseOpenCodeLine(line)).toEqual([]);
   });
 });
 
-// ─── parseLine dispatcher tests ──────────────────────────────────────────────
-
 describe('parseLine', () => {
-  test('dispatches to opencode parser when agent is opencode', () => {
-    const line = JSON.stringify({
-      type: 'tool_call',
-      tool: 'bash',
-      args: { command: 'ls' },
-    });
-    const step = parseLine(line, 'opencode');
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('bash');
+  test('dispatches to the OpenCode parser', () => {
+    expect(parseLine(JSON.stringify({
+      type: 'tool_call', tool: 'bash', args: { command: 'ls' },
+    }), 'opencode')[0]).toMatchObject({ type: 'bash', detail: 'ls' });
   });
 
-  test('dispatches to claude parser when agent is claude', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Bash',
-      input: { command: 'ls' },
-    });
-    const step = parseLine(line, 'claude');
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('bash');
+  test('dispatches to the Claude parser', () => {
+    expect(parseLine(claudeTool('Bash', { command: 'ls' }), 'claude')[0])
+      .toMatchObject({ type: 'bash', detail: 'ls' });
   });
 
-  test('defaults to claude parser for unknown agent', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      name: 'Read',
-      input: { file_path: '/a.ts' },
-    });
-    const step = parseLine(line, 'unknown');
-    expect(step).not.toBeNull();
-    expect(step!.type).toBe('read');
+  test('defaults unknown agents to the Claude parser', () => {
+    expect(parseLine(claudeTool('Read', { file_path: '/a.ts' }), 'unknown')[0])
+      .toMatchObject({ type: 'read', label: 'Read /a.ts' });
   });
 });

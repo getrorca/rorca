@@ -11,6 +11,7 @@ import { query, queryOne, transaction } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { assertReleaseOneCapabilityEnabled } from '../lib/release-one-capability-profile';
 
 const router = Router();
 
@@ -87,12 +88,12 @@ router.get('/', async (req: Request, res: Response) => {
  * /api/pipeline/schedules:
  *   post:
  *     tags: [Pipeline]
- *     summary: Create a new pipeline schedule
+ *     summary: Retired Release-1 pipeline schedule creation
  *     operationId: createPipelineSchedule
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Creating durable unattended execution requires an authenticated operator and remains outside autonomous MCP tools."
  *     x-rorca-mcp: false
- *     description: Creates a new cron-based schedule that automatically triggers pipeline runs for a specific spec.
+ *     description: Release-1 disables unattended scheduled execution. This stable compatibility route returns a typed fail-closed response before workspace or schedule mutation.
  *     requestBody:
  *       required: true
  *       content:
@@ -118,6 +119,7 @@ router.get('/', async (req: Request, res: Response) => {
 router.post('/', async (req: Request, res: Response) => {
   try {
     const { workspaceId, specId, cronExpression, enabled } = req.body;
+    assertReleaseOneCapabilityEnabled('scheduled_autonomy', { operation: 'create_schedule' });
 
     if (!workspaceId || !specId || !cronExpression) {
       throw new ValidationError('Missing required fields: workspaceId, specId, cronExpression');
@@ -172,7 +174,7 @@ router.post('/', async (req: Request, res: Response) => {
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Changing durable unattended execution requires an authenticated operator and remains outside autonomous MCP tools."
  *     x-rorca-mcp: false
- *     description: Updates an existing pipeline schedule. Only provided fields are modified.
+ *     description: Release-1 permits only fail-safe disabling of an existing schedule. Enabling or reconfiguring scheduled autonomy returns a typed rejection before mutation.
  *     parameters:
  *       - in: path
  *         name: id
@@ -206,6 +208,11 @@ router.patch('/:id', async (req: Request, res: Response) => {
       return;
     }
 
+    const { cronExpression, enabled, specId } = req.body;
+    if (enabled !== false || cronExpression !== undefined || specId !== undefined) {
+      assertReleaseOneCapabilityEnabled('scheduled_autonomy', { operation: 'update_schedule' });
+    }
+
     const existing = await queryOne<ScheduleRow>(
       'SELECT * FROM pipeline_schedules WHERE id = $1',
       [id]
@@ -214,8 +221,6 @@ router.patch('/:id', async (req: Request, res: Response) => {
       throw new NotFoundError('Schedule not found');
       return;
     }
-
-    const { cronExpression, enabled, specId } = req.body;
 
     if (cronExpression !== undefined) {
       try {

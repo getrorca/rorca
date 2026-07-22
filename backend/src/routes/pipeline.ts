@@ -73,8 +73,18 @@ import {
 import { logger } from '../lib/logger';
 import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
-import { getBoss, getPgBossSchemaSql } from '../lib/pg-boss';
+import { getBoss } from '../lib/pg-boss';
+import { getPgBossTableSql } from '../lib/pg-boss-schema';
+import {
+  claimDispatchPublication,
+  pipelineTriggerRequestHash,
+  prepareDispatchPublication,
+  publishPreparedDispatch,
+  type DispatchPublicationClaim,
+  type DispatchPublicationState,
+} from '../lib/dispatch-publication';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
+import { terminalizeCanonicalCancellation } from '../lib/pipeline-cancellation';
 import { authRequired, isSuperUser } from '../lib/auth-utils';
 import { AuthError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, resolveOperatorInputTerminalMode, type TerminalMode } from '../lib/terminal-mode';
@@ -86,7 +96,7 @@ import {
   type CanonicalStoryResultStatus,
 } from '../lib/story-result-persistence';
 import { isPtyGenerationReaderEnabled } from '../lib/pty-feature-flags';
-import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
+import { lifecycleFromLegacyStatus, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { normalizeRejectedStoryEvidence, sanitizeStoredRejectedStoryEvidence, type PortableRejectionEvidence } from '../lib/rejected-wave-closeout';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
@@ -215,6 +225,7 @@ import {
   type WaveExecutionMode,
 } from '../lib/wave-parallel-policy';
 import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
+import { assertReleaseOnePipelineExecutionRequest } from '../lib/release-one-capability-profile';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -654,6 +665,10 @@ async function resolveAndPersistDispatchManifests(input: {
   const stories = (Array.isArray(input.specJson.userStories) ? input.specJson.userStories : phaseStories) as DispatchManifestStory[];
   const mode = detectExecutionModeFromSpec(input.specJson as { mode?: string; phases?: unknown });
   const specProfile = (input.specJson.executionManifest as DispatchManifestProfile | undefined) ?? {};
+  const taskManifestExecution = parseJsonRecordLike(input.specJson.taskManifestExecution);
+  const taskManifestCommandDenylist = Array.isArray(taskManifestExecution?.commandDenylist)
+    ? taskManifestExecution.commandDenylist.filter((value): value is string => typeof value === 'string' && value.length > 0)
+    : [];
   const baseRevision = execSync('git rev-parse HEAD', { cwd: input.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const specRevision = deriveStoryContractRevision(input.specJson);
   const manifests: ImmutableStoryExecutionManifest[] = [];
@@ -766,7 +781,10 @@ async function resolveAndPersistDispatchManifests(input: {
         guardVersion: '1',
         guardedWorkingDirectory: storyWorktreePath,
         allowedWorkingDirectories: [...new Set([storyWorktreePath, input.cwd])],
-        blockedCommandPatterns: ['backend/Jest-style tests without an isolated *_test database'],
+        blockedCommandPatterns: [
+          'backend/Jest-style tests without an isolated *_test database',
+          ...taskManifestCommandDenylist,
+        ],
         redactedEnvironmentKeys: ['ANTHROPIC_API_KEY', 'DATABASE_URL', 'DATABASE_URL_TEST', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'],
         allowBackendJest: false,
         baselineFailurePolicy: profile.baselineFailurePolicy ?? 'block',
@@ -1215,12 +1233,12 @@ router.post('/preflight', async (req: Request, res: Response) => {
  * /api/pipeline/trigger:
  *   post:
  *     tags: [Pipeline]
- *     summary: Trigger a canonical worker-backed pipeline run
+ *     summary: Preview a spec run or receive the Release-1 TaskManifest redirect
  *     operationId: triggerPipelineRun
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Starting a local spec run is a core open-source CLI action and must remain callable via MCP and REST."
+ *     x-rorca-rationale: "The legacy trigger remains a stable local dry-run/typed-redirect contract; Release-1 execution itself requires the bounded TaskManifest endpoint."
  *     x-rorca-public-api: true
- *     description: Validates and enqueues an approved spec for the canonical worker, which launches the execution engine under mandatory autonomous isolation.
+ *     description: Dry-run previews remain available. Non-dry Release-1 execution fails closed unless this handler is reached through the host-validated TaskManifest broker; callers must use POST /api/pipeline/task-manifests/trigger.
  *     requestBody:
  *       required: true
  *       content:
@@ -1231,13 +1249,13 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *             properties:
  *               specPath: { type: string, example: "forge/specs/approved/my-spec.json" }
  *               workspaceId: { type: string }
- *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
- *               autoMerge: { type: boolean, default: false, description: "Auto-merge worktree branch to main on successful run" }
- *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
+ *               autoWorktree: { type: boolean, enum: [true], default: true, description: "Release-1 execution requires a host-created isolated worktree; dry-run previews may omit this field." }
+ *               autoMerge: { type: boolean, enum: [false], default: false, description: "Release-1 never auto-merges." }
+ *               mergeStrategy: { type: string, enum: [pr, draft-pr], default: draft-pr, description: "Release-1 delivery preserves human PR review; direct and branch-only execution fail closed." }
  *               dryRun: { type: boolean, default: false }
- *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
- *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. Production wave-parallel execution is disabled by default and requires the complete governed receipt/review/activation/cohort envelope." }
- *               parallelism: { type: integer, minimum: 1, maximum: 4, default: 1, description: "Explicit wave parallelism. Production values 2-4 require the complete governed receipt/review/activation/cohort envelope; omitted fields remain sequential." }
+ *               triggerType: { type: string, enum: [manual], default: manual, description: "Scheduled unattended execution is disabled in Release-1." }
+ *               orchestrationMode: { type: string, enum: [sequential], default: sequential, description: "Wave-parallel/high-risk autonomous execution is disabled in Release-1." }
+ *               parallelism: { type: integer, minimum: 1, maximum: 1, default: 1, description: "Release-1 execution is sequential." }
  *               forceSequential: { type: boolean, default: false, description: "Force effective sequential execution." }
  *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity for governed wave qualification metadata" }
  *               rolloutCohort: { type: string, description: "Explicit governed production rollout cohort metadata; it is validated with the immutable qualification and activation envelope." }
@@ -1260,9 +1278,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                 description: "Run-level terminal renderer mode. native-pty runs the real interactive CLI in xterm with marker-based completion. null/missing resolves to ansi-html for backward compatibility."
  *               executionEnvironment:
  *                 type: string
- *                 enum: [remote-rorca, local-user]
+ *                 enum: [remote-rorca]
  *                 default: remote-rorca
- *                 description: "Where the implementation engine executes. local-user requires a configured local execution bridge and fails closed otherwise."
+ *                 description: "Release-1 executes on the Rorca host; the retired local-user bridge fails closed."
  *     responses:
  *       200:
  *         description: Pipeline started or conflict detected
@@ -1282,7 +1300,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                     activeRunId: { type: integer }
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or spec not found" }
- *       422: { description: "Spec is not executable or wave-parallel execution was denied by policy" }
+ *       422: { description: "Spec is not executable or the request asks for a disabled Release-1 capability" }
  */
 const PipelineTriggerSchema = z.object({
   specPath: z.string().min(1),
@@ -1326,6 +1344,8 @@ const PipelineTriggerSchema = z.object({
   reservedRunId: z.number().optional(),
   executionEnvironment: z.enum(['remote-rorca', 'local-user']).optional(),
   executionEnvironmentId: z.string().optional(),
+  dispatchPublicationOwner: z.string().min(1).max(200).optional(),
+  taskManifestPromotion: z.boolean().optional(),
 }).passthrough();
 
 const HERMES_LEGACY_REPAIR_METADATA_FIELDS = [
@@ -1368,7 +1388,24 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId: requestedReservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride, dispatchPublicationOwner, taskManifestPromotion } = req.body;
+    // Reject disabled execution shapes before compatibility resolvers, workspace
+    // reads, Git, run rows, or queue state. Exact TaskManifest authority is
+    // checked again after a queued-promotion lease is verified below.
+    assertReleaseOnePipelineExecutionRequest({
+      dryRun,
+      triggerType,
+      orchestrationMode,
+      parallelism: requestedParallelism,
+      autoWorktree,
+      autoMerge,
+      mergeStrategy,
+      executionEnvironment,
+      taskManifestAuthority: taskManifestPromotion === true
+        || (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true,
+    });
+    let reservedRunId = requestedReservedRunId;
+    const triggerRequestHash = pipelineTriggerRequestHash(req.body as Record<string, unknown>);
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
     // Compatibility parsing is intentionally before the first workspace/DB read.
     // local-user is unavailable until a signed host closeout protocol exists.
@@ -1381,6 +1418,31 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       throw new NotFoundError('Workspace not found');
       return;
     }
+    if (taskManifestPromotion === true) {
+      if (!queuedRunId || !dispatchPublicationOwner) throw new ConflictError('TaskManifest promotion lacks queue publication authority');
+      const authorizedPromotion = await queryOne<{ id: number }>(
+        `SELECT run.id
+           FROM pipeline_runs run
+           JOIN pipeline_dispatch_publications publication ON publication.run_id = run.id
+          WHERE run.id = $1 AND run.workspace_id = $2 AND run.task_manifest_id IS NOT NULL
+            AND run.status = 'queued' AND publication.state = 'preparing'
+            AND publication.lease_owner = $3 AND publication.lease_expires_at > NOW()`,
+        [queuedRunId, workspaceId, dispatchPublicationOwner],
+      );
+      if (!authorizedPromotion) throw new ConflictError('TaskManifest promotion publication lease is invalid or stale');
+      (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution = true;
+    }
+    assertReleaseOnePipelineExecutionRequest({
+      dryRun,
+      triggerType,
+      orchestrationMode,
+      parallelism: requestedParallelism,
+      autoWorktree,
+      autoMerge,
+      mergeStrategy,
+      executionEnvironment,
+      taskManifestAuthority: (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true,
+    });
 
     // Generic trigger idempotency is application-owned. A scheduler/client may
     // lose the committed HTTP response; exact replay must discover the durable
@@ -1388,27 +1450,76 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     if (idempotencyKey && queuedRunId === undefined && reservedRunId === undefined && dryRun !== true) {
       const replay = await queryOne<{
         id: number; workspace_id: string; spec_path: string; trigger_type: string; status: string;
-        branch_name: string | null; worktree_path: string | null;
+        branch_name: string | null; worktree_path: string | null; triggered_via: string | null;
+        dispatch_request_hash: string | null;
+        publication_state: DispatchPublicationState | null; publication_payload: Record<string, unknown> | null;
+        lease_expires_at: Date | string | null;
       }>(
-        `SELECT id, workspace_id, spec_path, trigger_type, status, branch_name, worktree_path
-         FROM pipeline_runs WHERE workspace_id = $1 AND idempotency_key = $2`,
+        `SELECT run.id, run.workspace_id, run.spec_path, run.trigger_type, run.status,
+                run.branch_name, run.worktree_path, run.triggered_via, run.dispatch_request_hash,
+                publication.state AS publication_state, publication.payload AS publication_payload,
+                publication.lease_expires_at
+           FROM pipeline_runs run
+           LEFT JOIN pipeline_dispatch_publications publication ON publication.run_id = run.id
+          WHERE run.workspace_id = $1 AND run.idempotency_key = $2`,
         [workspaceId, idempotencyKey],
       );
       if (replay) {
-        if (replay.spec_path !== specPath || replay.trigger_type !== (triggerType === 'scheduled' ? 'scheduled' : 'manual')) {
-          throw new ConflictError('Pipeline idempotency key was reused for a different trigger request');
+        const replayRunId = normalizeWorkerRunId(replay.id);
+        if (replay.spec_path !== specPath
+          || replay.trigger_type !== (triggerType === 'scheduled' ? 'scheduled' : 'manual')
+          || (replay.dispatch_request_hash !== null && replay.dispatch_request_hash !== triggerRequestHash)) {
+          throw new ConflictError('Pipeline idempotency key was reused for a different trigger request or effective options');
         }
-        res.status(200).json({
+        if (!replay.publication_state) {
+          throw new ConflictError('Idempotent pipeline run lacks application publication authority');
+        }
+
+        const replayResponse = (disposition: Parameters<typeof dispatchOutcome>[0]['disposition'], reasonCode: string) => ({
           ok: true,
           replayed: true,
-          runId: replay.id,
+          runId: replayRunId,
           status: replay.status,
           queued: replay.status === 'queued',
           idempotencyKey,
           branchName: replay.branch_name,
           worktreePath: replay.worktree_path,
+          dispatchOutcome: dispatchOutcome({
+            disposition,
+            runId: replayRunId,
+            runStatus: replay.status,
+            replayed: true,
+            reasonCode,
+          }),
         });
-        return;
+        if (replay.publication_state === 'reserved' && replay.triggered_via === 'queue') {
+          res.status(200).json(replayResponse('already_queued', 'pipeline_queue_reservation_replayed'));
+          return;
+        }
+        if (replay.publication_state === 'reserved'
+          || (replay.publication_state === 'preparing'
+            && !replay.publication_payload
+            && (!replay.lease_expires_at || new Date(replay.lease_expires_at).getTime() <= Date.now()))) {
+          // The committed run exists but no transport payload was durably built.
+          // Resume the exact row through the normal preflight/publication path;
+          // never acknowledge it merely because the idempotency row exists.
+          reservedRunId = replayRunId;
+        } else if (replay.publication_state === 'preparing') {
+          res.status(202).json(replayResponse('pending_publication', 'pipeline_dispatch_preparing'));
+          return;
+        } else if (replay.publication_state === 'published') {
+          res.status(200).json(replayResponse('already_queued', 'pipeline_dispatch_published'));
+          return;
+        } else if (replay.publication_state === 'claimed') {
+          res.status(200).json(replayResponse('running', 'pipeline_dispatch_claimed'));
+          return;
+        } else {
+          res.status(200).json(replayResponse(
+            replayDispositionForRunStatus(replay.status),
+            `pipeline_dispatch_${replay.publication_state}`,
+          ));
+          return;
+        }
       }
     }
 
@@ -1618,9 +1729,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     if ((req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution) {
       // The reservation's complete immutable safety envelope is authoritative;
       // generic trigger defaults may never broaden branch-only/no-send policy.
-      const reservedOptions = reservedRunId === undefined ? null : parseJsonRecordLike((await queryOne<{ effective_options: unknown }>(
+      const taskManifestRunId = reservedRunId ?? queuedRunId;
+      const reservedOptions = taskManifestRunId === undefined ? null : parseJsonRecordLike((await queryOne<{ effective_options: unknown }>(
         'SELECT effective_options FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
-        [normalizeWorkerRunId(reservedRunId), workspaceId],
+        [normalizeWorkerRunId(taskManifestRunId), workspaceId],
       ))?.effective_options);
       if (!reservedOptions || !isEffectiveRunOptions(reservedOptions)) {
         throw new ConflictError('TaskManifest reservation lacks immutable effective execution options');
@@ -1635,8 +1747,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       };
     }
     let frozenQueuedOptions: EffectiveRunOptions | null = null;
-    if (queuedRunId !== undefined) {
-      const queuedId = normalizeWorkerRunId(queuedRunId);
+    const frozenReservedOrQueuedRunId = queuedRunId ?? reservedRunId;
+    if (frozenReservedOrQueuedRunId !== undefined) {
+      const queuedId = normalizeWorkerRunId(frozenReservedOrQueuedRunId);
       const queuedRow = await queryOne<{
         workspace_id: string;
         spec_path: string;
@@ -1998,10 +2111,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
            terminal_mode, execution_environment, branch_name, worktree_path, effective_options,
            idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
            orchestration_mode, wave_policy, wave_policy_fence, wave_qualification_receipt_id,
-           wave_source_revision, wave_rollout_cohort)
+           wave_source_revision, wave_rollout_cohort, dispatch_request_hash, dispatch_effective_options_hash)
           VALUES ($1, $2, 'queued', $3, $4, NOW(), $5, 'queue', $6, $7, $8, $9, $10, $11, $12,
                   $13, $14, $15, $16, $17::jsonb, $18, $19, $20::jsonb, $21::jsonb,
-                  $22, $23::jsonb, $24, $25, $26, $27)
+                  $22, $23::jsonb, $24, $25, $26, $27, $28, $29)
           RETURNING id`, [
           specPath,
           workspaceId,
@@ -2030,6 +2143,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           wavePolicy.receipt?.id ?? null,
           wavePolicy.receipt?.sourceRevision ?? null,
           wavePolicy.requested.rolloutCohort,
+          triggerRequestHash,
+          retryHash(queuedEffectiveOptions),
         ]);
         const queuedId = normalizeWorkerRunId(queueResult?.id);
 
@@ -2308,9 +2423,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       }
     }
 
-    if (autonomousSafety.policyLocked || parallelism > 1) {
-      // Wave authority is execution authority only; it never implies merge,
-      // deployment, retry, or lifecycle approval.
+    if ((autonomousSafety.policyLocked && !taskManifestExecution) || parallelism > 1) {
+      // Generic policy-locked/wave authority is execution authority only. A
+      // TaskManifest's separately validated PR/draft-PR strategy is host-frozen
+      // release authority and must never be silently degraded to branch-only.
       resolvedMergeStrategy = 'branch-only';
     }
 
@@ -2364,11 +2480,21 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     );
 
     const existingRunMetadata = existingRunId
-      ? await queryOne<Pick<PipelineRunRow, 'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'>>(
-        `SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options FROM pipeline_runs WHERE id = $1`,
+      ? await queryOne<Pick<PipelineRunRow, 'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'> & {
+        dispatch_request_hash: string | null;
+        dispatch_effective_options_hash: string | null;
+      }>(
+        `SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+                dispatch_request_hash, dispatch_effective_options_hash
+           FROM pipeline_runs WHERE id = $1`,
         [existingRunId],
       )
       : undefined;
+    const persistedDispatchOptionsHash = retryHash(persistedDispatchOptions);
+    if (existingRunMetadata?.dispatch_effective_options_hash
+      && existingRunMetadata.dispatch_effective_options_hash !== persistedDispatchOptionsHash) {
+      throw new ConflictError('Reserved pipeline run differs from the exact effective execution options');
+    }
     const persistedArtifacts = parseJsonRecordLike(existingRunMetadata?.task_manifest_artifacts) ?? undefined;
     const existingTriggerOptions = parseJsonRecordLike(existingRunMetadata?.trigger_options) ?? undefined;
     const effectiveIdempotencyKey = idempotencyKey ?? existingRunMetadata?.idempotency_key ?? stringValue(existingTriggerOptions?.idempotencyKey);
@@ -2397,15 +2523,45 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     if (existingRunId) {
       // Promote or complete a pre-reserved queued run — worker will actually execute it.
-      await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
+      const promoted = await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
          branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14,
          idempotency_key = COALESCE($15, idempotency_key), task_manifest_id = COALESCE($16, task_manifest_id), task_manifest_artifacts = COALESCE($17::jsonb, task_manifest_artifacts), trigger_options = $18::jsonb
          WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, canonicalRunBranch, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, existingRunId, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      if (promoted.rowCount !== 1) throw new ConflictError('Queued run lost canonical promotion authority');
       runId = normalizeWorkerRunId(existingRunId);
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, canonicalRunBranch, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options, dispatch_request_hash, dispatch_effective_options_hash) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb, $21, $22) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, canonicalRunBranch, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions, triggerRequestHash, persistedDispatchOptionsHash]);
       runId = normalizeWorkerRunId(runResult?.id);
+    }
+
+    const dispatchRequestHash = existingRunMetadata?.dispatch_request_hash ?? triggerRequestHash;
+    let dispatchPublication = (req as Request & { _dispatchPublication?: DispatchPublicationClaim })._dispatchPublication;
+    if (!dispatchPublication) {
+      dispatchPublication = await claimDispatchPublication({
+        runId,
+        workspaceId,
+        expectedRequestHash: dispatchRequestHash,
+        ...(dispatchPublicationOwner ? { owner: dispatchPublicationOwner } : {}),
+      });
+      if (dispatchPublication.outcome !== 'acquired') {
+        res.status(202).json({
+          ok: true,
+          queued: true,
+          runId,
+          idempotencyKey: effectiveIdempotencyKey ?? null,
+          dispatchOutcome: dispatchOutcome({
+            disposition: 'pending_publication',
+            runId,
+            runStatus: 'queued',
+            replayed: true,
+            retryable: dispatchPublication.outcome === 'busy' || dispatchPublication.outcome === 'published',
+            reasonCode: `pipeline_dispatch_${dispatchPublication.outcome}`,
+          }),
+        });
+        return;
+      }
+      (req as Request & { _dispatchPublication?: DispatchPublicationClaim })._dispatchPublication = dispatchPublication;
     }
 
     // Re-evaluate after the durable run identity exists. This is the API/run-row
@@ -2598,6 +2754,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     // receives the resulting execution-only contract and does not recompute
     // lifecycle evidence or command-safety policy from story prose.
     const dispatchSpec = JSON.parse(fs.readFileSync(runSpecPath, 'utf8')) as Record<string, unknown>;
+    const dispatchTaskManifestExecution = parseJsonRecordLike(dispatchSpec.taskManifestExecution);
+    const taskManifestCommandDenylist = Array.isArray(dispatchTaskManifestExecution?.commandDenylist)
+      ? dispatchTaskManifestExecution.commandDenylist.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : [];
     const { expectedStoryIds, excludedStoryIds } = frozenRunStoryScope(dispatchSpec, storyId);
     if (expectedStoryIds.length === 0) throw new ValidationError('Runnable spec must freeze at least one non-excluded expected story');
 
@@ -2702,68 +2862,29 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(effectiveTriggerOptions ? { triggerOptions: effectiveTriggerOptions } : {}),
       ...(executionEnvironment ? { executionEnvironment } : {}),
       ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
+      ...(taskManifestCommandDenylist.length > 0 ? { commandDenylist: taskManifestCommandDenylist } : {}),
     };
 
-    const boss = getBoss();
-    if (typeof boss.createQueue === 'function') {
-      await boss.createQueue('pipeline:run');
+    if (!dispatchPublication || dispatchPublication.outcome !== 'acquired' || !dispatchPublication.owner) {
+      throw new ConflictError('Pipeline dispatch lacks an application outbox publication lease');
     }
-    const taskPublication = (req as Request & { _taskManifestPublication?: TaskManifestPublicationClaim })._taskManifestPublication;
-    const payloadHash = retryHash(jobPayload);
-    if (taskManifestAuthorityRequested && !taskPublication) {
-      throw new ConflictError('TaskManifest dispatch lacks application publication authority');
+    const preparedPublication = await prepareDispatchPublication({
+      runId,
+      owner: dispatchPublication.owner,
+      requestHash: dispatchRequestHash,
+      effectiveOptionsHash: persistedDispatchOptionsHash,
+      payload: jobPayload,
+    });
+    if (process.env.NODE_ENV === 'test' && process.env.RORCA_TASK_MANIFEST_FAILPOINT === 'after_preparation_before_send') {
+      throw new Error('task_manifest_failpoint:after_preparation_before_send');
     }
-    if (taskPublication) {
-      const prepared = await execute(
-        `UPDATE task_manifest_dispatch_publications
-         SET payload_hash = COALESCE(payload_hash, $3), updated_at = NOW()
-         WHERE run_id = $1 AND state = 'preparing' AND lease_owner = $2
-           AND (payload_hash IS NULL OR payload_hash = $3)`,
-        [runId, taskPublication.owner, payloadHash],
-      );
-      if (prepared.rowCount !== 1) throw new ConflictError('TaskManifest publication lease or payload identity changed');
-      if (process.env.NODE_ENV === 'test' && process.env.RORCA_TASK_MANIFEST_FAILPOINT === 'after_preparation_before_send') {
-        throw new Error('task_manifest_failpoint:after_preparation_before_send');
-      }
-    }
-
-    let jobId: string | null = null;
-    if (taskPublication) {
-      const schema = getPgBossSchemaSql();
-      const existingJob = await queryOne<{ id: string }>(
-        `SELECT id::text FROM ${schema}.job WHERE id = $1
-         UNION ALL SELECT id::text FROM ${schema}.archive WHERE id = $1 LIMIT 1`,
-        [taskPublication.bossJobId],
-      ).catch(() => undefined);
-      jobId = existingJob?.id ?? await boss.send('pipeline:run', jobPayload, {
-        id: taskPublication.bossJobId,
-        retryLimit: 0,
-        expireInSeconds: 300,
-      });
-    } else {
-      jobId = await boss.send('pipeline:run', jobPayload, {
-        retryLimit: 0,
-        expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
-      });
-    }
-
-    if (jobId === null) {
-      if (!taskPublication) {
-        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
-      }
-      throw new ServiceUnavailableError('Failed to enqueue pipeline:run job: pg-boss returned null (queue may be missing or not started)');
-    }
-    if (taskPublication) {
-      const published = await execute(
-        `UPDATE task_manifest_dispatch_publications
-         SET state = 'published', lease_owner = NULL, lease_expires_at = NULL,
-             published_at = NOW(), updated_at = NOW()
-         WHERE run_id = $1 AND state = 'preparing' AND lease_owner = $2
-           AND boss_job_id = $3 AND payload_hash = $4`,
-        [runId, taskPublication.owner, taskPublication.bossJobId, payloadHash],
-      );
-      if (published.rowCount !== 1) throw new ConflictError('TaskManifest job publication did not converge to application authority');
-    }
+    await publishPreparedDispatch({
+      runId,
+      owner: dispatchPublication.owner,
+      bossJobId: preparedPublication.bossJobId,
+      payloadHash: preparedPublication.payloadHash,
+      payload: jobPayload,
+    });
 
     logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
 
@@ -2852,6 +2973,7 @@ const TaskManifestTriggerRequestSchema = z.object({
   includeGraph: z.boolean().optional(),
   forceSequential: z.boolean().optional(),
   queue: z.boolean().optional(),
+  humanApproval: ProviderHumanEventSchema.optional(),
 }).passthrough();
 
 type TaskManifestTriggerRequestBody = z.infer<typeof TaskManifestTriggerRequestSchema>;
@@ -3220,6 +3342,7 @@ function buildTaskManifestTriggerOptions(input: {
   executionEnvironmentSupported: boolean;
   executionOptions: ResolvedExecutionOptions;
   sourceStoryIds: string[];
+  providerHumanReceiptId?: string | null;
 }): JsonRecord {
   const routeDecisionSummary = [
     input.manifest.routeDecision.route,
@@ -3232,6 +3355,7 @@ function buildTaskManifestTriggerOptions(input: {
     idempotencyKey: input.manifest.idempotencyKey,
     manifestHash: input.manifestHash,
     syntheticSpecHash: input.artifacts.syntheticSpecHash,
+    providerHumanReceiptId: input.providerHumanReceiptId ?? null,
     sourceRefs: {
       ...input.manifest.source,
       sourceStoryIds: input.sourceStoryIds,
@@ -3319,9 +3443,10 @@ async function taskManifestResponseIdentity(runId: number, artifacts: unknown): 
   const lineage = await queryOne<{
     workspace_id: string; manifest_id: string; source_idempotency_key: string;
     manifest_hash: string; synthetic_spec_hash: string; lineage_identity_hash: string;
+    provider_human_receipt_id: string | null;
   }>(
     `SELECT workspace_id, manifest_id, source_idempotency_key, manifest_hash,
-            synthetic_spec_hash, lineage_identity_hash
+            synthetic_spec_hash, lineage_identity_hash, provider_human_receipt_id
      FROM task_manifest_run_lineage WHERE run_id = $1`, [runId],
   );
   if (!lineage) throw new ConflictError('TaskManifest response lacks immutable run lineage');
@@ -3335,6 +3460,7 @@ async function taskManifestResponseIdentity(runId: number, artifacts: unknown): 
     syntheticSpecHash: lineage.synthetic_spec_hash,
     lineageIdentityHash: lineage.lineage_identity_hash,
     artifactDigest: retryHash(artifacts),
+    providerHumanReceiptId: lineage.provider_human_receipt_id,
   };
 }
 
@@ -3431,6 +3557,8 @@ async function reserveTaskManifestRun(input: {
   agentType: AgentType;
   agentModel: string | null;
   effectiveOptions: EffectiveRunOptions;
+  requestHash: string;
+  providerHumanReceiptId: string | null;
 }): Promise<TaskManifestRunReservation> {
   return transaction(async (client) => {
     await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
@@ -3492,12 +3620,13 @@ async function reserveTaskManifestRun(input: {
          triggered_via, auto_worktree, auto_merge, merge_strategy, terminal_mode,
          include_graph, agent, agent_type, agent_model,
          idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
-         effective_options, task_manifest_authority_version
+         effective_options, task_manifest_authority_version,
+         dispatch_request_hash, dispatch_effective_options_hash
        ) VALUES (
          $1, $2, 'queued', 'manual', NOW(), $3,
          $4, $5, false, $6, $7,
          $8, $9, $10, $11,
-         $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, 1
+         $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, 1, $17, $18
        )
        ON CONFLICT (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id, queue_position`,
@@ -3518,6 +3647,8 @@ async function reserveTaskManifestRun(input: {
         JSON.stringify(input.artifacts),
         JSON.stringify(input.triggerOptions),
         JSON.stringify(input.effectiveOptions),
+        input.requestHash,
+        retryHash(input.effectiveOptions),
       ],
     );
 
@@ -3536,6 +3667,7 @@ async function reserveTaskManifestRun(input: {
         syntheticSpecHash: input.artifacts.syntheticSpecHash,
         manifestPath: input.artifacts.manifestPath,
         syntheticSpecPath: input.artifacts.specPath,
+        providerHumanReceiptId: input.providerHumanReceiptId,
       }));
       return { kind: 'created', runId, queuePosition: inserted.queue_position };
     }
@@ -3561,46 +3693,8 @@ async function reserveTaskManifestRun(input: {
   });
 }
 
-interface TaskManifestPublicationClaim {
-  outcome: 'acquired' | 'busy' | 'published';
-  owner: string | null;
-  bossJobId: string;
-}
-
-async function claimTaskManifestPublication(runId: number, workspaceId: string): Promise<TaskManifestPublicationClaim> {
-  const owner = `task-manifest-api:${process.pid}:${randomUUID()}`;
-  return transaction(async (client) => {
-    const run = (await client.query<{ status: string; workspace_id: string; task_manifest_id: string | null }>(
-      'SELECT status, workspace_id, task_manifest_id FROM pipeline_runs WHERE id = $1 FOR UPDATE', [runId],
-    )).rows[0];
-    if (!run || run.workspace_id !== workspaceId || !run.task_manifest_id || run.status !== 'queued') {
-      throw new ConflictError('TaskManifest publication no longer owns a queued canonical run');
-    }
-    const existing = (await client.query<{
-      boss_job_id: string; state: 'preparing' | 'published'; lease_owner: string | null; lease_expires_at: string | null;
-    }>('SELECT boss_job_id, state, lease_owner, lease_expires_at FROM task_manifest_dispatch_publications WHERE run_id = $1 FOR UPDATE', [runId])).rows[0];
-    if (existing?.state === 'published') return { outcome: 'published', owner: null, bossJobId: existing.boss_job_id };
-    if (existing?.state === 'preparing' && existing.lease_expires_at
-      && new Date(existing.lease_expires_at).getTime() > Date.now()) {
-      return { outcome: 'busy', owner: existing.lease_owner, bossJobId: existing.boss_job_id };
-    }
-    if (existing) {
-      await client.query(
-        `UPDATE task_manifest_dispatch_publications
-         SET lease_owner = $2, lease_expires_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
-         WHERE run_id = $1`, [runId, owner],
-      );
-      return { outcome: 'acquired', owner, bossJobId: existing.boss_job_id };
-    }
-    const bossJobId = randomUUID();
-    await client.query(
-      `INSERT INTO task_manifest_dispatch_publications
-         (run_id, workspace_id, boss_job_id, state, lease_owner, lease_expires_at)
-       VALUES ($1,$2,$3,'preparing',$4,NOW() + INTERVAL '5 minutes')`,
-      [runId, workspaceId, bossJobId, owner],
-    );
-    return { outcome: 'acquired', owner, bossJobId };
-  });
+async function claimTaskManifestPublication(runId: number, workspaceId: string): Promise<DispatchPublicationClaim> {
+  return claimDispatchPublication({ runId, workspaceId });
 }
 
 /**
@@ -3611,7 +3705,7 @@ async function claimTaskManifestPublication(runId: number, workspaceId: string):
  *     summary: Trigger a bounded Hermes task manifest through the Rorca pipeline broker
  *     operationId: triggerTaskManifestPipelineRun
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Stable local task-manifest execution is safe for MCP/CLI because the route validates bounded Hermes manifests, requires workspaceId and idempotencyKey, rejects autoMerge=true and mergeStrategy=direct, and the manifest policy forbids deploys and credential-copying before any pg-boss job is inserted."
+ *     x-rorca-rationale: "Stable local task-manifest execution is safe for MCP/CLI because the route validates bounded Hermes manifests, requires workspaceId and idempotencyKey, requires a host-created isolated worktree, preserves an exact pr/draft-pr strategy, rejects auto-merge/branch-only delivery, and forbids deploys and credential-copying before any pg-boss job is inserted."
  *     x-rorca-public-api: true
  *     description: >
  *       Validates a Hermes task manifest, writes manifest.json/tasks.md plus an internal synthetic spec under
@@ -3634,9 +3728,9 @@ async function claimTaskManifestPublication(runId: number, workspaceId: string):
  *               manifest: { type: object, description: "Hermes TaskManifest v1 payload" }
  *               idempotencyKey: { type: string, format: uuid, description: "Hermes-issued idempotency key; must match manifest.idempotencyKey" }
  *               dryRun: { type: boolean, default: false }
- *               autoWorktree: { type: boolean, default: true }
- *               autoMerge: { type: boolean, default: false, description: "Must be false; task manifests never auto-merge" }
- *               mergeStrategy: { type: string, enum: [pr, draft-pr, branch-only], default: draft-pr }
+ *               autoWorktree: { type: boolean, enum: [true], default: true, description: "Must be true; Rorca creates the isolated branch and worktree" }
+ *               autoMerge: { type: boolean, enum: [false], default: false, description: "Must be false; task manifests never auto-merge" }
+ *               mergeStrategy: { type: string, enum: [pr, draft-pr], default: draft-pr, description: "Must exactly match manifest.execution.mergeStrategy; branch-only is unsupported" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi] }
  *               modelOverride: { type: string }
  *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh] }
@@ -3644,6 +3738,10 @@ async function claimTaskManifestPublication(runId: number, workspaceId: string):
  *               executionEnvironmentId: { type: string, description: "Optional execution-environment identifier when supported." }
  *               terminal_mode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
  *               terminalMode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
+ *               humanApproval:
+ *                 type: object
+ *                 description: Exact signed provider-human command event required when an internal service such as Hermes relays non-dry execution authority
+ *                 required: [schemaVersion, issuerId, keyId, provider, providerTenantId, actorId, conversationId, threadId, messageId, occurredAt, normalizedCommandHash, ingressIdempotencyKey, signature]
  *     responses:
  *       200:
  *         description: Dry-run plan or idempotency conflict
@@ -3652,8 +3750,10 @@ async function claimTaskManifestPublication(runId: number, workspaceId: string):
  *       202:
  *         description: Manifest accepted into the queue when queue=true
  *       400: { description: Invalid task manifest, missing workspace/idempotency, invalid source authority, or ineligible route decision }
- *       409: { description: Active workspace run conflict when autoWorktree=false }
- *       422: { description: Unsafe task-manifest execution policy such as autoMerge=true or mergeStrategy=direct }
+ *       401: { description: Internal service execution omitted the exact signed provider-human command event }
+ *       403: { description: Provider-human event signature, target, freshness, or tenant/workspace binding is invalid }
+ *       409: { description: Durable task-manifest reservation or publication conflict }
+ *       422: { description: Unsafe task-manifest execution policy such as autoMerge=true, autoWorktree=false, branch-only delivery, or a strategy mismatch }
  */
 async function handleTaskManifestTrigger(req: Request, res: Response): Promise<void> {
   try {
@@ -3681,30 +3781,45 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
 
     assertTaskManifestSourceAuthority(requestBody, manifest, requestWorkspaceId, requestIdempotencyKey);
     assertTaskManifestRouteDecisionAllowed(manifest);
+    const resolvedDryRun = requestBody.dryRun === true || manifest.policy.dryRun === true;
+    const providerHumanEvent = requestBody.humanApproval;
+    const internalServicePrincipal = !req.user
+      || req.user.email.toLowerCase().endsWith('@rorca.internal')
+      || req.user.id === 'system';
+    if (!resolvedDryRun && internalServicePrincipal && !providerHumanEvent) {
+      throw new AuthError('Internal services must relay the exact signed provider-human TaskManifest approval command');
+    }
+    let providerHumanAuthority: { receiptId: string; replayed: boolean; actorId: string } | null = null;
 
-    const resolvedAutoWorktree = requestBody.autoWorktree !== false;
-    const resolvedAutoMerge = requestBody.autoMerge === true;
-    const resolvedMergeStrategy = requestBody.mergeStrategy ?? manifest.execution.mergeStrategy;
-    if (resolvedAutoMerge && resolvedMergeStrategy === 'direct') {
+    if (requestBody.autoWorktree === false) {
       throw new UnprocessableError(
-        'Task manifest execution rejects autoMerge=true with mergeStrategy=direct; high-risk direct repair must use PR, draft-PR, or branch-only review.',
-        'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR',
-        { code: 'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR' },
+        'Task manifest execution requires a host-created isolated worktree and branch',
+        'TASK_MANIFEST_ISOLATED_WORKTREE_REQUIRED',
+        { code: 'TASK_MANIFEST_ISOLATED_WORKTREE_REQUIRED' },
       );
     }
+    const resolvedAutoWorktree = true;
+    const resolvedAutoMerge = requestBody.autoMerge === true;
+    if (requestBody.mergeStrategy && requestBody.mergeStrategy !== manifest.execution.mergeStrategy) {
+      throw new UnprocessableError(
+        'Task manifest outer mergeStrategy must exactly match the host-frozen manifest execution strategy',
+        'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH',
+        { code: 'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH' },
+      );
+    }
+    const resolvedMergeStrategy = manifest.execution.mergeStrategy;
     if (resolvedAutoMerge) {
       throw new UnprocessableError(
-        'Task manifest execution rejects autoMerge=true; use PR, draft-PR, or branch-only review',
+        'Task manifest execution rejects autoMerge=true; use PR or draft-PR review',
         'TASK_MANIFEST_AUTO_MERGE_REJECTED',
         { code: 'TASK_MANIFEST_AUTO_MERGE_REJECTED' },
       );
     }
-
-    if (resolvedMergeStrategy === 'direct') {
+    if (resolvedMergeStrategy === 'branch-only') {
       throw new UnprocessableError(
-        'Task manifest execution rejects mergeStrategy=direct; use pr, draft-pr, or branch-only',
-        'TASK_MANIFEST_DIRECT_MERGE_REJECTED',
-        { code: 'TASK_MANIFEST_DIRECT_MERGE_REJECTED' },
+        'Task manifest execution does not support branch-only delivery in the initial release; preserve pr or draft-pr review authority',
+        'TASK_MANIFEST_BRANCH_ONLY_REJECTED',
+        { code: 'TASK_MANIFEST_BRANCH_ONLY_REJECTED' },
       );
     }
 
@@ -3723,7 +3838,6 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     const plannedEnvelope = buildPlannedTaskManifestEnvelope(workspace.path, manifest);
     const resolvedTerminalMode = resolveRequestedTerminalMode(requestBody.terminal_mode ?? requestBody.terminalMode ?? manifest.execution.terminalMode);
     assertTerminalModeAvailable(resolvedTerminalMode);
-    const resolvedDryRun = requestBody.dryRun === true || manifest.policy.dryRun === true;
     const resolvedAgentOverride = requestBody.agentOverride ?? manifest.execution.agentOverride;
     const resolvedModelOverride = requestBody.modelOverride ?? manifest.execution.modelOverride;
     const resolvedEffortLevel = requestBody.effortLevel ?? manifest.execution.effortLevel;
@@ -3766,6 +3880,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
         executionEnvironmentSupported: executionEnvironmentResolution.supported,
         executionOptions: taskManifestExecutionOptions,
         sourceStoryIds: dryRunEnvelope.spec.sourceStoryIds,
+        providerHumanReceiptId: null,
       });
       const model = taskManifestExecutionOptions.finalAgentModel ?? DEFAULT_MODEL;
       const estimate = await estimateDryRunCost(
@@ -3798,6 +3913,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
           syntheticSpecHash: dryRunArtifacts.syntheticSpecHash,
           lineageIdentityHash: null,
           artifactDigest: retryHash(dryRunArtifacts),
+          providerHumanReceiptId: null,
         },
         artifacts: dryRunArtifacts,
         artifactRefs: dryRunArtifactRefs,
@@ -3839,7 +3955,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       terminal: resolvedTerminalMode,
       policyLocked: true,
       deploy: false,
-      externalSend: resolvedMergeStrategy !== 'branch-only',
+      externalSend: true,
     });
     // Existing rows are resolved after deterministic artifact verification and
     // reservation repair below. A queued immediate reservation with no frozen
@@ -3874,6 +3990,15 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       return;
     }
 
+    providerHumanAuthority = providerHumanEvent
+      ? await verifyAndPersistProviderHumanAuthority({
+        workspaceId: requestWorkspaceId,
+        purpose: 'task_manifest_dispatch',
+        targetHash: plannedEnvelope.manifestHash,
+        event: providerHumanEvent,
+      })
+      : null;
+
     // Materialize and hash immutable artifacts before reserving lineage. A crash
     // may leave deterministic proposal files, but can never leave a lineage row
     // that points at bytes which were not independently verified first.
@@ -3899,6 +4024,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       executionEnvironmentSupported: executionEnvironmentResolution.supported,
       executionOptions: taskManifestExecutionOptions,
       sourceStoryIds: envelope.spec.sourceStoryIds,
+      providerHumanReceiptId: providerHumanAuthority?.receiptId ?? null,
     });
 
     const reservation = await reserveTaskManifestRun({
@@ -3917,6 +4043,8 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       agentType: taskManifestExecutionOptions.resolvedAgentType,
       agentModel: taskManifestExecutionOptions.finalAgentModel ?? null,
       effectiveOptions: immutableEffectiveOptions,
+      requestHash: pipelineTriggerRequestHash(requestBody as Record<string, unknown>),
+      providerHumanReceiptId: providerHumanAuthority?.receiptId ?? null,
     });
     if (reservation.kind === 'created'
       && process.env.NODE_ENV === 'test'
@@ -3927,7 +4055,11 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     let dispatchRunId: number;
     if (reservation.kind === 'existing') {
       dispatchRunId = Number(reservation.row.id);
-      await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+      const verifiedLineage = await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+      if (providerHumanAuthority
+        && verifiedLineage.lineage.providerHumanReceiptId !== providerHumanAuthority.receiptId) {
+        throw new ConflictError('TaskManifest replay differs from the immutable provider-human authority receipt');
+      }
       if (reservation.row.status !== 'queued') {
         res.status(200).json(await buildTaskManifestReplayResponse({
           row: reservation.row,
@@ -3940,7 +4072,10 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       }
     } else {
       dispatchRunId = reservation.runId;
-      await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+      const verifiedLineage = await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+      if (verifiedLineage.lineage.providerHumanReceiptId !== (providerHumanAuthority?.receiptId ?? null)) {
+        throw new ConflictError('TaskManifest reservation did not bind the exact provider-human authority receipt');
+      }
     }
 
     if (requestBody.queue === true) {
@@ -4008,7 +4143,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       });
       return;
     }
-    (req as Request & { _taskManifestPublication?: TaskManifestPublicationClaim })._taskManifestPublication = publication;
+    (req as Request & { _dispatchPublication?: DispatchPublicationClaim })._dispatchPublication = publication;
 
     req.body = {
       specPath: envelope.relativeSpecPath,
@@ -6546,6 +6681,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
             syntheticSpecHash: parent.syntheticSpecHash,
             manifestPath: parent.manifestPath,
             syntheticSpecPath: parent.syntheticSpecPath,
+            providerHumanReceiptId: parent.providerHumanReceiptId,
           }));
         }
         let humanApprovalId: string | null = null;
@@ -7451,9 +7587,10 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
 });
 
 // ─── POST /api/pipeline/runs/:runId/cancel — Cancel a queued or running pipeline ─
-// Queued path: calls getBoss().cancel(String(runId)) to remove the pg-boss job
-//   before the worker picks it up, then marks the run as cancelled immediately.
-// Running path: sends a 'pipeline:cancel' job to the worker, returns 200 immediately.
+// Queued path: application state terminalizes synchronously under the run and
+//   cancellation locks; pg-boss delivery is irrelevant to canonical authority.
+// Running path: sends a 'pipeline:cancel' notification to the worker after the
+//   durable intent commits; restart reconciliation is independent of delivery.
 //   The worker owns SIGTERM → SIGKILL sequencing and DB/WAL updates for this path.
 // Completed/cancelled: returns 409 Conflict.
 
@@ -7468,8 +7605,8 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  *     x-rorca-rationale: "Cancelling a local run is a core operator action required by the stable open-source CLI surface."
  *     x-rorca-public-api: true
  *     description: >
- *       For queued runs: removes the pg-boss job and marks the run as cancelled immediately.
- *       For running runs: delivers a pipeline:cancel job to the worker (which sends SIGTERM then SIGKILL after 10s) and returns 200 immediately — DB and WAL updates happen asynchronously in the worker.
+ *       For queued runs: atomically marks application run/publication/cancellation authority cancelled without relying on transport.
+ *       For running runs: persists cancellation intent, notifies the worker, and returns immediately; the worker re-reads child, engine PID, and PTY process state before terminalizing, while startup reconciliation recovers lost notifications.
  *       Returns 409 if the run is already completed or cancelled.
  *     parameters:
  *       - in: path
@@ -7530,7 +7667,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
 
     // Persist application authority first under the run lock. pg-boss is only a
     // notification transport; no job-table state can override this request.
-    await transaction(async (client) => {
+    const cancellationStatus = await transaction(async (client) => {
       const locked = (await client.query<{ status: string; workspace_id: string }>(
         'SELECT status, workspace_id FROM pipeline_runs WHERE id = $1 FOR UPDATE', [runId],
       )).rows[0];
@@ -7544,7 +7681,20 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
          ON CONFLICT (run_id) DO NOTHING`,
         [runId, run.workspace_id, req.user?.id ?? 'unknown'],
       );
+      return locked.status;
     });
+    if (cancellationStatus === 'queued') {
+      const terminal = await terminalizeCanonicalCancellation({
+        runId,
+        source: 'api_cancel_queued',
+        processQuiescent: true,
+      });
+      if (!['terminalized', 'already_terminal'].includes(terminal.outcome)) {
+        throw new ConflictError(`Queued cancellation did not converge: ${terminal.outcome}`);
+      }
+      res.json({ ok: true, runId, status: 'cancelled' });
+      return;
+    }
     await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
@@ -7567,7 +7717,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Cancel a queued pipeline run
  *     operationId: cancelQueuedRun
- *     description: Cancels a queued run by marking it as failed with finished_at set. Only works for runs with status='queued'. Returns 409 if the run is already active or completed.
+ *     description: Cancels a queued run by atomically terminalizing application run and dispatch-publication state. Only works for runs with status='queued'. Returns 409 if the run is already active or completed.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -7634,8 +7784,15 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
         [runId, run.workspace_id, req.user?.id ?? 'unknown'],
       );
     });
-    await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
-    res.json({ ok: true, runId, status: 'cancelling' });
+    const terminal = await terminalizeCanonicalCancellation({
+      runId,
+      source: 'api_delete_queued',
+      processQuiescent: true,
+    });
+    if (!['terminalized', 'already_terminal'].includes(terminal.outcome)) {
+      throw new ConflictError(`Queued deletion cancellation did not converge: ${terminal.outcome}`);
+    }
+    res.json({ ok: true, runId, status: 'cancelled' });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Delete queued run');
   }
@@ -8727,6 +8884,9 @@ async function gateLegacyStoryResultIngress(
     if (!isSuperUser(req.user) && !['admin', 'owner'].includes(run.membership_role ?? '')) {
       throw new ForbiddenError('Workspace admin access is required');
     }
+    // pg BIGSERIAL values are decoded as strings by default. Normalize the
+    // validated route value before handing it to strict persistence authority.
+    body.runId = runId;
     body.workspaceId = run.workspace_id;
     body.integrated = false;
     next();
@@ -9996,6 +10156,9 @@ export async function cleanupOrphanRuns(): Promise<number> {
     // worker_heartbeat table may not exist on first startup — proceed with cleanup
   }
 
+  // Resolve configuration before examining application rows. Invalid queue
+  // authority must fail the reconciliation batch without touching run state.
+  const pgBossJobTable = getPgBossTableSql('job');
   const staleRuns = await query(`SELECT id, pid, opencode_server_pid, workspace_id, agent_type FROM pipeline_runs WHERE status IN ('running', 'paused')`) as Array<{
     id: number;
     pid: number | null;
@@ -10009,18 +10172,21 @@ export async function cleanupOrphanRuns(): Promise<number> {
   let cleaned = 0;
 
   for (const run of staleRuns) {
-    // Skip runs with an active or queued pg-boss job — includes 'retry' state which was previously missed
+    // Skip runs with an active or queued pg-boss job — includes 'retry' state which was previously missed.
+    // Queue-evidence failure is not evidence of abandonment: preserve canonical
+    // application state and retry reconciliation on a later startup.
     try {
       const pgBossJob = await queryOne<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active', 'retry') LIMIT 1`,
+        `SELECT id FROM ${pgBossJobTable} WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active', 'retry') LIMIT 1`,
         [String(run.id)]
       );
       if (pgBossJob) {
         logger.info(`[Cleanup] Skipping run ${run.id} — active pg-boss job ${pgBossJob.id} found`);
         continue;
       }
-    } catch {
-      // pgboss schema may not exist yet — treat as no active job, proceed with cleanup
+    } catch (error) {
+      logger.error({ error, runId: run.id }, '[Cleanup] Queue evidence unavailable; preserving application run state');
+      continue;
     }
 
     // Only clean up runs whose PID is no longer alive
@@ -10082,11 +10248,11 @@ export async function cleanupOrphanRuns(): Promise<number> {
  *   post:
  *     x-rorca-native-api: true
  *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     summary: Smart run trigger — start immediately or queue if a run is active
+ *     summary: Retired manifestless smart-run compatibility route
  *     description: >
- *       Checks for an active run in the workspace. If none, triggers the run immediately.
- *       If one is active, queues the run and returns its position. Accepts workspaceId + specId
- *       (filename slug) instead of specPath for convenience.
+ *       Release-1 execution requires a bounded TaskManifest and uses
+ *       /api/pipeline/task-manifests/trigger with queue=true. This legacy native
+ *       route returns a typed redirect before workspace, Git, run, or queue mutation.
  *     tags: [Pipeline]
  *     requestBody:
  *       required: true
@@ -10146,6 +10312,11 @@ router.post('/queue', async (req: Request, res: Response) => {
       throw new ValidationError('workspaceId and specId are required');
       return;
     }
+    assertReleaseOnePipelineExecutionRequest({
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
+      taskManifestAuthority: false,
+    });
 
     // Validate workspace exists
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -10269,7 +10440,7 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
       data: unknown;
     }>(
       `SELECT id, output, retrycount, archivedon, data
-       FROM pgboss.archive
+       FROM ${getPgBossTableSql('archive')}
        WHERE name IN ('pipeline:run', 'pipeline:retry')
          AND state = 'failed'
          AND data->>'runId' = $1
@@ -10580,7 +10751,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       `SELECT (j.data->>'runId') AS run_id,
               pr.spec_path,
               j.created_on::text AS started_at
-       FROM   pgboss.job j
+       FROM   ${getPgBossTableSql('job')} j
        LEFT   JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::bigint
        WHERE  j.name = 'pipeline:run'
          AND  j.state = 'active'`,
@@ -10595,7 +10766,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
 
     // ── 3. Queue depth (pending pipeline:run jobs) ──────────────────────────
     const queueDepthRow = await queryOne<{ cnt: string }>(
-      `SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE name = 'pipeline:run' AND state = 'created'`,
+      `SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE name = 'pipeline:run' AND state = 'created'`,
     ).catch(() => ({ cnt: '0' }));
     const queueDepth = parseInt(queueDepthRow?.cnt ?? '0', 10);
 
@@ -10606,7 +10777,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       timezone: string | null;
     }
     const scheduleRows = await query<ScheduleRow>(
-      `SELECT name, cron, timezone FROM pgboss.schedule ORDER BY name`,
+      `SELECT name, cron, timezone FROM ${getPgBossTableSql('schedule')} ORDER BY name`,
     ).catch(() => [] as ScheduleRow[]);
 
     const scheduledJobs = scheduleRows.map(r => ({
@@ -10617,13 +10788,13 @@ router.get('/worker/health', async (req: Request, res: Response) => {
 
     // ── 5. DLQ depth (failed archived jobs) ────────────────────────────────
     const dlqRow = await queryOne<{ cnt: string }>(
-      `SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = 'failed'`,
+      `SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = 'failed'`,
     ).catch(() => ({ cnt: '0' }));
     const dlqDepth = parseInt(dlqRow?.cnt ?? '0', 10);
 
     // ── 6. pg-boss schema version ───────────────────────────────────────────
     const versionRow = await queryOne<{ version: string }>(
-      `SELECT version FROM pgboss.version LIMIT 1`,
+      `SELECT version FROM ${getPgBossTableSql('version')} LIMIT 1`,
     ).catch(() => undefined);
     const pgBossVersion = versionRow?.version ?? 'unknown';
 
@@ -10674,20 +10845,20 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       queueRows,
       latencyRow,
     ] = await Promise.all([
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['created']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['active']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['failed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'24 hours\'', ['completed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'24 hours\'', ['failed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'7 days\'', ['failed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive').catch(() => ({ cnt: '0' })),
-      queryOne<AgeRow>('SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_on)))::integer AS age_seconds FROM pgboss.job WHERE state = $1', ['created']).catch(() => ({ age_seconds: null })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['created']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['active']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = $1 AND archived_on > NOW() - INTERVAL '24 hours'`, ['completed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = $1 AND archived_on > NOW() - INTERVAL '24 hours'`, ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = $1 AND archived_on > NOW() - INTERVAL '7 days'`, ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')}`).catch(() => ({ cnt: '0' })),
+      queryOne<AgeRow>(`SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_on)))::integer AS age_seconds FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['created']).catch(() => ({ age_seconds: null })),
       query<QueueRow>(
         `SELECT name,
                 COUNT(*) FILTER (WHERE state = 'created')::text AS pending,
                 COUNT(*) FILTER (WHERE state = 'active')::text AS active,
                 COUNT(*) FILTER (WHERE state = 'failed')::text AS failed
-         FROM pgboss.job
+         FROM ${getPgBossTableSql('job')}
          GROUP BY name
          ORDER BY name`,
       ).catch(() => [] as QueueRow[]),
@@ -10699,7 +10870,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
            MIN(EXTRACT(EPOCH FROM (started_on - created_on)))                                                             AS min_pickup_seconds,
            MAX(EXTRACT(EPOCH FROM (started_on - created_on)))                                                             AS max_pickup_seconds,
            COUNT(*)::text                                                                                                  AS sample_count
-         FROM pgboss.archive
+         FROM ${getPgBossTableSql('archive')}
          WHERE started_on IS NOT NULL
            AND created_on IS NOT NULL
            AND archived_on > NOW() - INTERVAL '24 hours'
@@ -11101,11 +11272,11 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
     // UNION of unarchived failed jobs + archived failed jobs (last 30 days)
     const unionSql = `
       SELECT id, name, data, state, retry_count, retry_limit, output, completed_on, 'job' AS source
-      FROM pgboss.job
+      FROM ${getPgBossTableSql('job')}
       WHERE state = 'failed'
       UNION ALL
       SELECT id, name, data, state, retry_count, retry_limit, output, completed_on, 'archive' AS source
-      FROM pgboss.archive
+      FROM ${getPgBossTableSql('archive')}
       WHERE state = 'failed'
         AND archived_on > NOW() - INTERVAL '30 days'
     `;
@@ -11193,8 +11364,8 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
  *   post:
  *     x-rorca-native-api: true
  *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     summary: Re-enqueue a failed pg-boss job
- *     description: Reads the failed job from pgboss.archive or pgboss.job by its UUID, extracts the original queue name and payload, and re-inserts it as a fresh job via boss.send(). Used by operators to manually retry a failed job after fixing the underlying issue.
+ *     summary: Generic transport retry is disabled
+ *     description: Generic pg-boss replay cannot establish application-owned retry authority. Operators must use the run retry or spec repair APIs, which validate canonical state and create durable publication intent.
  *     tags:
  *       - Pipeline
  *     parameters:
@@ -11206,65 +11377,14 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
  *           format: uuid
  *         description: pg-boss job UUID
  *     responses:
- *       200:
- *         description: Job successfully re-enqueued
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 newJobId:
- *                   type: string
- *                   description: UUID of the newly created job
- *                 message:
- *                   type: string
- *                   example: Job requeued
- *               required: [newJobId, message]
- *       404:
- *         description: Job not found in pgboss.job or pgboss.archive
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *               required: [error]
- *       500:
- *         description: Internal server error
+ *       422:
+ *         description: Generic transport replay is unsupported; use an application-owned retry endpoint
  */
-router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Response) => {
-  const { jobId } = req.params;
-
+router.post('/queue/failed-jobs/:jobId/retry', async (_req: Request, res: Response) => {
   try {
-    interface JobLookupRow {
-      id: string;
-      name: string;
-      data: Record<string, unknown> | null;
-    }
-
-    // Look up in pgboss.job first (very recent failures), then pgboss.archive
-    const job = await queryOne<JobLookupRow>(
-      `SELECT id, name, data FROM pgboss.job WHERE id = $1 AND state = 'failed'
-       UNION ALL
-       SELECT id, name, data FROM pgboss.archive WHERE id = $1 AND state = 'failed'
-       LIMIT 1`,
-      [jobId],
+    throw new UnprocessableError(
+      'Generic pg-boss retry is disabled because transport rows are not retry authority; use the pipeline run retry or spec repair API',
     );
-
-    if (!job) {
-      throw new NotFoundError(`Failed job ${jobId} not found`);
-    }
-
-    const boss = getBoss();
-    const newJobId = await boss.send(job.name, job.data ?? {});
-
-    if (!newJobId) {
-      return res.status(500).json({ error: 'boss.send() returned null — queue may not exist or boss is not running' });
-    }
-
-    logger.info({ jobId, newJobId, queueName: job.name }, '[Pipeline] failed job re-enqueued');
-    res.json({ newJobId, message: 'Job requeued' });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Pipeline] Failed job retry');
   }

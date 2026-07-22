@@ -51,7 +51,16 @@ import {
 // RORCA_PROCESS_ROLE=engine children to perform system-owned orchestration jobs,
 // so it must bypass per-request JWT RLS scoping.
 import { initDb, query, queryOne, execute, transaction, closePool } from './db/index';
-import { initBoss, getBoss, getPgBossSchemaSql } from './lib/pg-boss';
+import { initBoss, getBoss } from './lib/pg-boss';
+import { getPgBossSchemaSql } from './lib/pg-boss-schema';
+import { claimDispatchForWorker, recoverPendingDispatchPublications } from './lib/dispatch-publication';
+import {
+  quiesceCancellationProcesses,
+  reconcilePendingCancellationRequests,
+  releaseLaunchGateWithCancellationFence,
+  terminalizeCanonicalCancellation,
+  type CancellationProcessSnapshot,
+} from './lib/pipeline-cancellation';
 import { registerSchedulesWithBoss, checkAndFireDueSchedules } from './lib/scheduler';
 import { registerSpecJobHandlers } from './lib/spec-job-worker';
 import { registerHydrationWorker } from './lib/hydration-worker';
@@ -112,6 +121,10 @@ import { inspectRunHostAuthority, type RunHostAuthority } from './lib/run-host-a
 import { persistHostRunCloseout } from './lib/run-closeout-authority';
 import { assertFrozenRunExecutionIdentity } from './lib/run-git-authority';
 import { loadAndVerifyTaskManifestRunLineage } from './lib/task-manifest-run-lineage';
+import {
+  assertTaskManifestWorkerPayloadAuthority,
+  taskManifestCommandGuardEnv,
+} from './lib/task-manifest-worker-authority';
 import { assertAutonomousExecutionBoundary } from './lib/autonomous-sandbox';
 import { ensureAutonomousModelEgress } from './lib/autonomous-model-egress';
 import {
@@ -497,6 +510,77 @@ async function assertCurrentWaveRunDispatch(input: {
   return currentWavePolicy;
 }
 
+async function cancellationProcessSnapshot(runId: number): Promise<CancellationProcessSnapshot> {
+  const durable = await queryOne<{
+    pid: number | null;
+    pty_child_pid: number | null;
+    pty_status: string | null;
+  }>(
+    `SELECT run.pid, pty.child_pid AS pty_child_pid, pty.status AS pty_status
+       FROM pipeline_runs run
+       LEFT JOIN LATERAL (
+         SELECT child_pid, status FROM run_pty_sessions
+          WHERE run_id = run.id ORDER BY updated_at DESC LIMIT 1
+       ) pty ON TRUE
+      WHERE run.id = $1`,
+    [runId],
+  );
+  const activeChild = activeProcesses.get(runId);
+  const child = activeChild && activeChild.exitCode === null && activeChild.signalCode === null
+    ? activeChild
+    : null;
+  return {
+    child,
+    enginePid: durable?.pid ?? null,
+    ptyPid: durable?.pty_status && ['starting', 'active'].includes(durable.pty_status)
+      ? durable.pty_child_pid
+      : null,
+  };
+}
+
+async function finalizeFreshRunCancellation(runId: number, source: string): Promise<{
+  outcome: string;
+  quiescent: boolean;
+}> {
+  const run = await queryOne<{ status: string; workspace_id: string }>(
+    'SELECT status, workspace_id FROM pipeline_runs WHERE id = $1', [runId],
+  );
+  if (!run) return { outcome: 'run_missing', quiescent: true };
+  if (run.status === 'queued') {
+    const terminal = await terminalizeCanonicalCancellation({ runId, source, processQuiescent: true });
+    return { outcome: terminal.outcome, quiescent: true };
+  }
+
+  cancellingRuns.add(runId);
+  const quiescence = await quiesceCancellationProcesses({
+    read: () => cancellationProcessSnapshot(runId),
+    signalPid: (pid, signal) => { try { process.kill(pid, signal); } catch { /* already exited */ } },
+    signalPty: (pid, signal) => signalPtyProcessGroup(pid, signal),
+    isPidAlive: (pid) => isProcessAlive(pid),
+  });
+  if (!quiescence.quiescent) {
+    return { outcome: 'process_still_active', quiescent: false };
+  }
+
+  await synthesizeAllMissingFrozenStoryFailures(runId, run.workspace_id, 'operator_cancelled_before_or_during_launch');
+  try {
+    await persistHostRunCloseout({ runId, status: 'cancelled', terminalizeRun: true });
+  } catch (error) {
+    const current = await queryOne<{ status: string }>('SELECT status FROM pipeline_runs WHERE id = $1', [runId]);
+    if (current?.status !== 'cancelled') throw error;
+  }
+  const terminal = await terminalizeCanonicalCancellation({ runId, source, processQuiescent: true });
+  cancellingRuns.delete(runId);
+  return { outcome: terminal.outcome, quiescent: true };
+}
+
+async function reconcilePendingFreshRunCancellations(limit = 100): Promise<{ scanned: number; pending: number }> {
+  return reconcilePendingCancellationRequests({
+    limit,
+    reconcile: (runId) => finalizeFreshRunCancellation(runId, 'worker_cancellation_reconcile'),
+  });
+}
+
 export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   // Process all jobs concurrently — batchSize controls how many are fetched per poll,
   // but each spawns an independent child process that should run in parallel.
@@ -517,8 +601,22 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
       executionManifestPath, envOverrides, secretReferences, startFromStoryId,
       specificStory, includeGraph, terminalMode, executionEnvironment,
       orchestrationMode, parallelism: payloadParallelism, triggerOptions,
-      thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort,
+      thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, commandDenylist,
     } = payload;
+
+    // Application outbox authority is claimed before any workspace, policy,
+    // filesystem, lifecycle, or process side effect. Duplicate/stale transport
+    // deliveries are acknowledgements only and cannot terminalize a live owner.
+    const publicationClaim = await claimDispatchForWorker({
+      runId,
+      bossJobId: jobId,
+      payload: job.data,
+      workerId: WORKER_ID,
+    });
+    if (!publicationClaim.claimed) {
+      logger.info({ runId, jobId, reason: publicationClaim.reason }, '[worker] pipeline:run delivery did not acquire application publication authority');
+      return;
+    }
 
     // Local-user jobs belong to the signed local runner, never this remote worker.
     if (executionEnvironment !== 'remote-rorca') {
@@ -556,7 +654,11 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     const cancellationRequested = await queryOne<{ run_id: number }>(
       'SELECT run_id FROM pipeline_run_cancellation_requests WHERE run_id = $1', [runId],
     );
-    if (cancellationRequested) throw new Error('operator_cancellation_requested_before_engine_launch');
+    if (cancellationRequested) {
+      logger.info({ runId }, '[worker] cancellation intent fenced dispatch before engine launch');
+      await finalizeFreshRunCancellation(runId, 'worker_before_wave_claim');
+      return;
+    }
     if ((worktreePath ?? null) !== (runRow.worktree_path ?? null)) {
       throw new Error('Queue payload worktreePath differs from pipeline_runs.worktree_path');
     }
@@ -569,19 +671,20 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     const cwd = frozenExecution.worktreePath;
     if (runRow.task_manifest_id) {
       const lineage = await loadAndVerifyTaskManifestRunLineage(runId, frozenExecution.workspacePath);
-      const effective = typeof runRow.effective_options === 'string'
-        ? JSON.parse(runRow.effective_options) as Record<string, any>
-        : runRow.effective_options as Record<string, any> | null;
-      const frozenSafety = effective?.safety;
-      if (payload.manifestId !== lineage.lineage.manifestId
-        || payload.safetyOptions.deploy !== false
-        || frozenSafety?.deploy !== payload.safetyOptions.deploy
-        || frozenSafety?.externalSend !== payload.safetyOptions.externalSend
-        || frozenSafety?.policyLocked !== payload.safetyOptions.policyLocked
-        || effective?.merge?.strategy !== payload.mergeStrategy
-        || effective?.merge?.autoMerge !== payload.autoMerge) {
-        throw new Error('TaskManifest run payload differs from immutable lineage/safety authority');
-      }
+      assertTaskManifestWorkerPayloadAuthority({
+        payload: {
+          manifestId: payload.manifestId,
+          commandDenylist,
+          safetyOptions: payload.safetyOptions,
+          mergeStrategy: payload.mergeStrategy,
+          autoMerge: payload.autoMerge,
+        },
+        lineage: {
+          manifestId: lineage.lineage.manifestId,
+          commandDenylist: lineage.manifest.policy.commandDenylist,
+        },
+        effectiveOptions: runRow.effective_options,
+      });
     }
     if (!await enforceWorkerWavePolicy({
       runId,
@@ -650,7 +753,13 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     try {
       claimedWavePolicy = await assertCurrentWaveRunDispatch({ runId, parallelism: Number(parallelism ?? 1), payload });
       const claim = await claimWaveProductionDispatch({ runId, owner: WORKER_ID, envelope: claimedWavePolicy });
-      if (!claim.claimed) throw new Error(`[wave-production-policy] atomic dispatch claim denied: ${claim.reason}`);
+      if (!claim.claimed) {
+        if (claim.reason === 'cancellation_requested' || claim.reason === 'run_not_queued') {
+          logger.info({ runId, reason: claim.reason }, '[worker] dispatch claim superseded without failure terminalization');
+          return;
+        }
+        throw new Error(`[wave-production-policy] atomic dispatch claim denied: ${claim.reason}`);
+      }
     } catch (error) {
       if (payload.wavePolicy) {
         await auditWaveProductionDecision({
@@ -762,6 +871,7 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
       RORCA_WORKSPACE_ID: workspaceId,
       RORCA_TERMINAL_MODE: terminalMode,
       RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(claimedWavePolicy),
+      ...taskManifestCommandGuardEnv(commandDenylist),
     };
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_ENTRYPOINT;
@@ -771,6 +881,14 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     delete env.RORCA_WAVE_PRODUCTION_ACTIVATION_KEY;
 
     logger.info({ runId, agent, model, cwd, executionEngine: executionEngineEntrypoint.path, executionEngineBin: engineLauncher.bin }, '[worker] Revalidating governed mode immediately before spawn');
+    const cancellationImmediatelyBeforeSpawn = await queryOne<{ run_id: number }>(
+      'SELECT run_id FROM pipeline_run_cancellation_requests WHERE run_id = $1', [runId],
+    );
+    if (cancellationImmediatelyBeforeSpawn) {
+      logger.info({ runId }, '[worker] cancellation intent fenced the immediate pre-spawn barrier');
+      await finalizeFreshRunCancellation(runId, 'worker_immediately_before_spawn');
+      return;
+    }
     try {
       const preSpawnWavePolicy = await assertCurrentWaveRunDispatch({ runId, parallelism: Number(parallelism ?? 1), payload });
       env.RORCA_GOVERNED_WAVE_POLICY = JSON.stringify(preSpawnWavePolicy);
@@ -851,11 +969,30 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     });
     if (!advanced) {
       child.kill('SIGTERM');
+      const cancellation = await queryOne<{ run_id: number }>(
+        'SELECT run_id FROM pipeline_run_cancellation_requests WHERE run_id = $1', [runId],
+      );
+      if (cancellation) {
+        cancellingRuns.add(runId);
+        logger.info({ runId }, '[worker] cancellation won before launch lifecycle advance');
+        return;
+      }
       throw new Error('[wave-production-policy] stale dispatch owner cannot advance lifecycle');
     }
-    if (!child.send({ type: 'launch_start', token: launchGateToken })) {
+    const launchRelease = await releaseLaunchGateWithCancellationFence({
+      runId,
+      owner: WORKER_ID,
+      fence: claimedWavePolicy.fence,
+      release: () => Boolean(child.send({ type: 'launch_start', token: launchGateToken })),
+    });
+    if (launchRelease !== 'released') {
+      cancellingRuns.add(runId);
       child.kill('SIGTERM');
-      throw new Error('[wave-production-policy] engine launch gate could not be released');
+      if (launchRelease === 'cancellation_requested') {
+        logger.info({ runId }, '[worker] cancellation won after spawn registration and before launch-gate release');
+        return;
+      }
+      throw new Error(`[wave-production-policy] engine launch gate ${launchRelease}`);
     }
 
     // 6. Pipe stdout/stderr to run_output_chunks — flush every data event immediately.
@@ -1038,11 +1175,14 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
         const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
 
         if (wasCancelled) {
-          await emitWalEvent('run_cancelled', workspaceId, {
-            run_id: runId,
-            cancelledAt: new Date().toISOString(),
-            source: 'worker',
+          const cancellationTerminal = await terminalizeCanonicalCancellation({
+            runId,
+            source: 'worker_engine_close',
+            processQuiescent: true,
           });
+          if (!['terminalized', 'already_terminal'].includes(cancellationTerminal.outcome)) {
+            throw new Error(`Cancellation closeout did not converge: ${cancellationTerminal.outcome}`);
+          }
         } else {
           // External release routing is reachable only from frozen host result,
           // closeout, commit, attestation, accounting, released-outbox, branch,
@@ -1184,11 +1324,16 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
         : 'worker_preflight_failed';
     await terminalizeFreshRunPreflightFailure(runId, reason, {
       bindFailure: (id, failureReason) => queryOne<{ workspace_id: string }>(`
-        UPDATE pipeline_runs
+        UPDATE pipeline_runs run
            SET status = 'failed', finished_at = NOW(), summary = $2
-         WHERE id = $1 AND status NOT IN ('done', 'failed', 'partial_failure', 'cancelled')
-         RETURNING workspace_id
-      `, [id, failureReason]),
+          FROM pipeline_dispatch_publications publication
+         WHERE run.id = $1 AND publication.run_id = run.id
+           AND (
+             (run.status = 'queued' AND publication.state = 'claimed' AND publication.lease_owner = $3)
+             OR (run.status = 'starting' AND run.dispatch_owner = $3)
+           )
+         RETURNING run.workspace_id
+      `, [id, failureReason, WORKER_ID]),
       recordFailureAuthority: async (id, failureWorkspaceId, _failureReason) => {
         await synthesizeInterruptedStoryFailure({
           runId: id,
@@ -2490,6 +2635,17 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
       && !['finalized', 'failed', 'manual_review_required', 'cancelled'].includes(governedState.state);
     if (!['queued', 'starting', 'running', 'paused'].includes(run.status) && !governedNeedsTerminalization) {
       logger.info({ jobId: job.id, runId, status: run.status }, '[worker] pipeline:cancel — run already terminal');
+      await terminalizeCanonicalCancellation({
+        runId,
+        source: 'worker_cancel_terminal_replay',
+        processQuiescent: true,
+      });
+      continue;
+    }
+    if (!governedState) {
+      const cancellation = await finalizeFreshRunCancellation(runId, 'worker_cancel_notification');
+      logger.info({ runId, cancellation }, '[worker] fresh-run cancellation reconciliation completed');
+      if (cancellation.quiescent) await advanceQueue(run.workspace_id);
       continue;
     }
 
@@ -3685,6 +3841,24 @@ async function start(): Promise<void> {
     process.exit(1);
   }
 
+  // 2b. Re-publish expired/stale application-owned dispatch payloads before
+  // handlers poll pg-boss. Unknown recovery state fails startup closed rather
+  // than acknowledging canonical queued rows that transport no longer retains.
+  try {
+    const dispatchRecovery = await recoverPendingDispatchPublications();
+    if (dispatchRecovery.scanned > 0) {
+      logger.info({ dispatchRecovery }, '[worker] startup pipeline dispatch publication recovery complete');
+    }
+    const cancellationRecovery = await reconcilePendingFreshRunCancellations();
+    if (cancellationRecovery.scanned > 0) {
+      logger.info({ cancellationRecovery }, '[worker] startup fresh-run cancellation recovery complete');
+    }
+  } catch (error) {
+    logger.error({ error }, '[worker] pipeline dispatch publication recovery failed closed');
+    process.exit(1);
+    return;
+  }
+
   // 3. Reconcile committed pass authority, consume retained exact relay
   // references, then re-scan. Recovery proves ordered descendants before an
   // earlier pass can be released after a later story advanced canonical HEAD.
@@ -3757,6 +3931,10 @@ async function start(): Promise<void> {
     void (async () => {
       await reconcilePendingRunReleases(100).catch((error) =>
         logger.warn({ error }, '[worker] periodic exact release reconciliation deferred'));
+      await recoverPendingDispatchPublications().catch((error) =>
+        logger.error({ error }, '[worker] periodic pipeline dispatch publication recovery deferred'));
+      await reconcilePendingFreshRunCancellations().catch((error) =>
+        logger.error({ error }, '[worker] periodic fresh-run cancellation recovery deferred'));
       await reconcileState();
     })();
   }, RECONCILE_INTERVAL_MS);

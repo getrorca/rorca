@@ -63,6 +63,9 @@ describe('Phase 1 GraphRAG hardening', () => {
       source_story_id: 'US-001',
       source_spec_id: 'spec-graph',
       related_files: '["./src/foo.ts","src/foo.ts","docs/notes.md"]',
+      pinned: false,
+      created_at: null,
+      updated_at: null,
     })).toEqual([
       { type: 'LEARNED_FROM', target: 'US-001' },
       { type: 'FROM_SPEC', target: 'spec-graph' },

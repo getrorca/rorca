@@ -185,8 +185,9 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/install:
  *   post:
- *     x-rorca-intentionally-denied: true
- *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
+ *     x-rorca-native-api: true
+ *     x-rorca-native-authority: local-admin
+ *     x-rorca-rationale: "Dashboard-only local-administrator skill installation; excluded from autonomous/MCP exposure and protected by the native human-authority gate."
  *     tags: [Skills]
  *     summary: Install a skill from markdown content
  *     operationId: installSkill
@@ -694,8 +695,9 @@ async function fetchSkillFromRegistry(query: string): Promise<{
  * @swagger
  * /api/skills/install-from-sh:
  *   post:
- *     x-rorca-intentionally-denied: true
- *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
+ *     x-rorca-native-api: true
+ *     x-rorca-native-authority: local-admin
+ *     x-rorca-rationale: "Dashboard-only local-administrator skill installation; excluded from autonomous/MCP exposure and protected by the native human-authority gate."
  *     tags: [Skills]
  *     summary: Install a skill from the skills.sh registry via HTTP
  *     operationId: installSkillFromSh
@@ -1295,8 +1297,9 @@ router.post('/browse-github', async (req: Request, res: Response) => {
  * @swagger
  * /api/skills/install-from-github:
  *   post:
- *     x-rorca-intentionally-denied: true
- *     x-rorca-rationale: "Explicitly denied native operation; it is mounted outside autonomous/MCP exposure or remains inaccessible through the protected plan gate."
+ *     x-rorca-native-api: true
+ *     x-rorca-native-authority: local-admin
+ *     x-rorca-rationale: "Dashboard-only local-administrator skill installation; excluded from autonomous/MCP exposure and protected by the native human-authority gate."
  *     tags: [Skills]
  *     summary: Install a skill from a GitHub repository by path
  *     operationId: installSkillFromGitHub

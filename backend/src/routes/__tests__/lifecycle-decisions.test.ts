@@ -169,6 +169,15 @@ describe('lifecycle decision route authority boundary', () => {
     expect(response.status).toBe(200);
     expect(response.body.targetHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(response.body.command).toBe(`approve lifecycle decision ${response.body.targetHash}`);
+    expect(response.body.responseIdentity).toEqual(expect.objectContaining({
+      schemaVersion: 'rorca.lifecycle-decision-target-identity.v1',
+      workspaceId: 'workspace-evaluator',
+      specSlug: 'fixture-phase-evaluator',
+      phaseId: 'merge',
+      gateId: 'merge-gate',
+      decisionType: 'merge_approval',
+      targetHash: response.body.targetHash,
+    }));
     expect(mockVerifyProviderHuman).not.toHaveBeenCalled();
     expect(mockRecord).not.toHaveBeenCalled();
   });
@@ -204,6 +213,17 @@ describe('lifecycle decision route authority boundary', () => {
       purpose: 'lifecycle_decision',
       targetHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       event: humanApproval,
+    }));
+    expect(response.body.responseIdentity).toEqual(expect.objectContaining({
+      schemaVersion: 'rorca.lifecycle-decision-response-identity.v1',
+      workspaceId: 'workspace-evaluator',
+      specSlug: 'fixture-phase-evaluator',
+      phaseId: 'implementation',
+      decisionType: 'defer',
+      sourceRequestId: 'decision-hermes-signed-1',
+      actorId: 'human-9',
+      providerHumanReceiptId: '11111111-1111-4111-8111-111111111111',
+      decisionId: '1',
     }));
     expect(mockRecord).toHaveBeenCalledWith(
       expect.objectContaining({ sourceRequestId: 'decision-hermes-signed-1' }),

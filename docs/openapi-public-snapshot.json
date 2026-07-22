@@ -1,6 +1,6 @@
 {
-  "contractVersion": "16.0.0",
-  "generatedAt": "2026-07-21T20:25:35.541Z",
+  "contractVersion": "17.0.0",
+  "generatedAt": "2026-07-22T22:04:55.548Z",
   "routes": [
     {
       "method": "GET",
@@ -4232,10 +4232,17 @@
                   "autoMerge": {
                     "default": false,
                     "description": "Must be false; task manifests never auto-merge",
+                    "enum": [
+                      false
+                    ],
                     "type": "boolean"
                   },
                   "autoWorktree": {
                     "default": true,
+                    "description": "Must be true; Rorca creates the isolated branch and worktree",
+                    "enum": [
+                      true
+                    ],
                     "type": "boolean"
                   },
                   "dryRun": {
@@ -4260,6 +4267,25 @@
                     "description": "Optional execution-environment identifier when supported.",
                     "type": "string"
                   },
+                  "humanApproval": {
+                    "description": "Exact signed provider-human command event required when an internal service such as Hermes relays non-dry execution authority",
+                    "required": [
+                      "schemaVersion",
+                      "issuerId",
+                      "keyId",
+                      "provider",
+                      "providerTenantId",
+                      "actorId",
+                      "conversationId",
+                      "threadId",
+                      "messageId",
+                      "occurredAt",
+                      "normalizedCommandHash",
+                      "ingressIdempotencyKey",
+                      "signature"
+                    ],
+                    "type": "object"
+                  },
                   "idempotencyKey": {
                     "description": "Hermes-issued idempotency key; must match manifest.idempotencyKey",
                     "format": "uuid",
@@ -4271,10 +4297,10 @@
                   },
                   "mergeStrategy": {
                     "default": "draft-pr",
+                    "description": "Must exactly match manifest.execution.mergeStrategy; branch-only is unsupported",
                     "enum": [
                       "pr",
-                      "draft-pr",
-                      "branch-only"
+                      "draft-pr"
                     ],
                     "type": "string"
                   },
@@ -4320,10 +4346,12 @@
         "201": {},
         "202": {},
         "400": {},
+        "401": {},
+        "403": {},
         "409": {},
         "422": {}
       },
-      "hash": "sha256:8beff74c282556146184c8baf891822626022fecfb02d921d3caa877f56c1bab"
+      "hash": "sha256:1b9c02173e53d7b448170cc25b5b2cb06e7c3c4f1baa94f763ac81c5f7d478ba"
     },
     {
       "method": "GET",
@@ -4516,12 +4544,18 @@
                   },
                   "autoMerge": {
                     "default": false,
-                    "description": "Auto-merge worktree branch to main on successful run",
+                    "description": "Release-1 never auto-merges.",
+                    "enum": [
+                      false
+                    ],
                     "type": "boolean"
                   },
                   "autoWorktree": {
-                    "default": false,
-                    "description": "Create git worktree for isolated run",
+                    "default": true,
+                    "description": "Release-1 execution requires a host-created isolated worktree; dry-run previews may omit this field.",
+                    "enum": [
+                      true
+                    ],
                     "type": "boolean"
                   },
                   "dryRun": {
@@ -4541,10 +4575,9 @@
                   },
                   "executionEnvironment": {
                     "default": "remote-rorca",
-                    "description": "Where the implementation engine executes. local-user requires a configured local execution bridge and fails closed otherwise.",
+                    "description": "Release-1 executes on the Rorca host; the retired local-user bridge fails closed.",
                     "enum": [
-                      "remote-rorca",
-                      "local-user"
+                      "remote-rorca"
                     ],
                     "type": "string"
                   },
@@ -4563,13 +4596,11 @@
                     "type": "boolean"
                   },
                   "mergeStrategy": {
-                    "default": "direct",
-                    "description": "Post-run branch handling strategy when worktrees are enabled",
+                    "default": "draft-pr",
+                    "description": "Release-1 delivery preserves human PR review; direct and branch-only execution fail closed.",
                     "enum": [
-                      "direct",
                       "pr",
-                      "draft-pr",
-                      "branch-only"
+                      "draft-pr"
                     ],
                     "type": "string"
                   },
@@ -4584,17 +4615,16 @@
                   },
                   "orchestrationMode": {
                     "default": "sequential",
-                    "description": "Effective orchestration request. Production wave-parallel execution is disabled by default and requires the complete governed receipt/review/activation/cohort envelope.",
+                    "description": "Wave-parallel/high-risk autonomous execution is disabled in Release-1.",
                     "enum": [
-                      "sequential",
-                      "wave-parallel"
+                      "sequential"
                     ],
                     "type": "string"
                   },
                   "parallelism": {
                     "default": 1,
-                    "description": "Explicit wave parallelism. Production values 2-4 require the complete governed receipt/review/activation/cohort envelope; omitted fields remain sequential.",
-                    "maximum": 4,
+                    "description": "Release-1 execution is sequential.",
+                    "maximum": 1,
                     "minimum": 1,
                     "type": "integer"
                   },
@@ -4643,9 +4673,9 @@
                   },
                   "triggerType": {
                     "default": "manual",
+                    "description": "Scheduled unattended execution is disabled in Release-1.",
                     "enum": [
-                      "manual",
-                      "scheduled"
+                      "manual"
                     ],
                     "type": "string"
                   },
@@ -4706,7 +4736,7 @@
         "404": {},
         "422": {}
       },
-      "hash": "sha256:ec5c72a1dc1337577228f115bfb4d08f14a22a25f7815fbe8f6e25bfc333b02c"
+      "hash": "sha256:eb224389c6832a728aea0bae84ce7ef3739a86911bc00ba2914c64bb44cf48e7"
     },
     {
       "method": "GET",
@@ -6052,8 +6082,33 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "humanApproval": {
+                    "description": "Exact accepted authoring identity plus signed provider-human attestation for governed specs.",
+                    "properties": {
+                      "acceptedPlanHash": {
+                        "type": "string"
+                      },
+                      "acceptedPreflightHash": {
+                        "type": "string"
+                      },
+                      "attestation": {
+                        "type": "object"
+                      },
+                      "persistReceiptId": {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      "persistRequestHash": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "readinessOverride": {
-                    "description": "Explicitly approve despite readiness blockers; usage is logged to WAL for auditability.",
+                    "description": "Governed approval never permits readiness override.",
+                    "enum": [
+                      false
+                    ],
                     "type": "boolean"
                   },
                   "workspaceId": {
@@ -6083,11 +6138,24 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "approvedPath": {
+                    "type": "string"
+                  },
+                  "mutationReceipt": {
+                    "type": "object"
+                  },
                   "ok": {
                     "type": "boolean"
                   },
-                  "specPath": {
-                    "type": "string"
+                  "providerApproval": {
+                    "type": "object"
+                  },
+                  "readiness": {
+                    "type": "object"
+                  },
+                  "responseIdentity": {
+                    "description": "rorca.spec-approval-response-identity.v1 exact request/target/receipt binding",
+                    "type": "object"
                   }
                 },
                 "type": "object"
@@ -6097,7 +6165,7 @@
         },
         "404": {}
       },
-      "hash": "sha256:c1559e4cfceab749f9fe0fce76661f431c9f82c4d9ea17a4434b447d8503c4d4"
+      "hash": "sha256:52925baf6176170c234b70c940d045c94f947315e2f4298696a688745756086c"
     },
     {
       "method": "GET",
@@ -8846,11 +8914,23 @@
                           "endpoint": {
                             "type": "string"
                           },
+                          "humanAuthorityVersion": {
+                            "enum": [
+                              "provider-human-event.v1"
+                            ],
+                            "type": "string"
+                          },
                           "idempotency": {
                             "enum": [
                               "stable-uuid"
                             ],
                             "type": "string"
+                          },
+                          "serviceRelayRequiresProviderHuman": {
+                            "enum": [
+                              true
+                            ],
+                            "type": "boolean"
                           }
                         },
                         "required": [
@@ -8908,7 +8988,7 @@
           }
         }
       },
-      "hash": "sha256:4ace065af3de1d868abffc084748b8bcbd6abab61e1b36c85a56c90d70b92527"
+      "hash": "sha256:72a0aa64ef3a271d53455d40ce47bcc1314fbed093b28ae653c493a0460b1186"
     },
     {
       "method": "GET",
@@ -8955,12 +9035,6 @@
                   "total": {
                     "example": 3,
                     "type": "integer"
-                  },
-                  "workspaces": {
-                    "items": {
-                      "$ref": "#/components/schemas/Workspace"
-                    },
-                    "type": "array"
                   }
                 },
                 "type": "object"
@@ -8978,7 +9052,7 @@
           }
         }
       },
-      "hash": "sha256:17b8dea2ff89bb1d8c7acb63659fe62b73747dbc118c3047bf30ce80e029ef69"
+      "hash": "sha256:36b714a951707ea8427910f3d15a69beb3868a16e4f37a8726a566d240a87269"
     },
     {
       "method": "GET",

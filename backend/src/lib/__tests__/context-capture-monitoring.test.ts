@@ -124,6 +124,29 @@ describe('always-on context production monitoring', () => {
     ]);
   });
 
+  test('queries only the configured pg-boss schema', async () => {
+    const previousSchema = process.env.RORCA_PGBOSS_SCHEMA;
+    process.env.RORCA_PGBOSS_SCHEMA = 'pgboss_cert_alt';
+    try {
+      queryMock.mockResolvedValue([] as never);
+      queryOneMock.mockResolvedValue(undefined);
+
+      await getContextCaptureMonitoring('configured-workspace', 24);
+
+      const queueSql = queryMock.mock.calls
+        .map(([sql]) => String(sql))
+        .filter((sql) => sql.includes('.job') || sql.includes('.archive'));
+      expect(queueSql.length).toBeGreaterThan(0);
+      for (const sql of queueSql) {
+        expect(sql).toContain('"pgboss_cert_alt".');
+        expect(sql).not.toMatch(/\bpgboss\.(?:job|archive)\b/);
+      }
+    } finally {
+      if (previousSchema === undefined) delete process.env.RORCA_PGBOSS_SCHEMA;
+      else process.env.RORCA_PGBOSS_SCHEMA = previousSchema;
+    }
+  });
+
   test('fails closed with explicit unavailable signals when monitoring tables are absent', async () => {
     queryMock.mockRejectedValue(new Error('relation missing'));
     queryOneMock.mockRejectedValue(new Error('relation missing'));

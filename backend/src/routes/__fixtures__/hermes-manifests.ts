@@ -231,7 +231,7 @@ export const hermesHrcTaskManifestWithoutExecutionEnvironment = {
     modelOverride: 'claude-sonnet-4-5-20250929',
     effortLevel: 'high',
     terminalMode: 'ansi-html',
-    mergeStrategy: 'branch-only',
+    mergeStrategy: 'draft-pr',
   },
 } as const;
 

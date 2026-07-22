@@ -11,6 +11,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { execute, queryOne } from '../../db/index';
+import { getAuthToken } from './helpers/auth-helper';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -66,7 +67,7 @@ beforeAll(async () => {
 }, 60_000);
 
 beforeEach(async () => {
-  authToken = 'local-test-token';
+  authToken = await getAuthToken(app);
 
   workspaceId = 'ws-memory-test-' + Date.now();
   await execute(

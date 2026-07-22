@@ -13,6 +13,7 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
+import { claimDispatchForWorker } from '../../lib/dispatch-publication';
 
 jest.setTimeout(90_000);
 
@@ -31,7 +32,8 @@ jest.mock('../../lib/llm-client', () => ({
 jest.mock('../../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
   getBoss: jest.fn().mockReturnValue({
-    send: jest.fn().mockResolvedValue('mock-job-id'),
+    createQueue: jest.fn().mockResolvedValue(undefined),
+    send: jest.fn().mockImplementation(async (_name: string, _data: unknown, options?: { id?: string }) => options?.id ?? 'mock-job-id'),
     work: jest.fn(),
     stop: jest.fn().mockResolvedValue(undefined),
   }),
@@ -42,7 +44,8 @@ let tmpDir: string;
 let wsDir: string;
 let authToken: string;
 
-const WS_ID = 'ws-queue-test';
+let workspaceSequence = 0;
+let WS_ID = '';
 
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
@@ -65,6 +68,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   jest.clearAllMocks();
+  workspaceSequence += 1;
+  WS_ID = `ws-queue-test-${process.pid}-${workspaceSequence}`;
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-queue-test-'));
   wsDir = path.join(tmpDir, 'workspace');
@@ -75,11 +80,8 @@ beforeEach(async () => {
   execFileSync('git', ['-C', wsDir, 'add', '-A']);
   execFileSync('git', ['-C', wsDir, '-c', 'user.name=Rorca Tests', '-c', 'user.email=tests@rorca.local', 'commit', '--allow-empty', '-qm', 'test baseline']);
 
-  // Clean up DB state
-  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [WS_ID]);
-  await execute(`DELETE FROM wal_events WHERE workspace_id = $1`, [WS_ID]);
+  // Each test receives a fresh workspace identity. Canonical runs and evidence
+  // are append-only, so fixture isolation never deletes a prior run graph.
 
   // Ensure users with plan='pro'
   await execute(
@@ -109,15 +111,16 @@ beforeEach(async () => {
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 300));
+  await execute(
+    `UPDATE pipeline_runs
+        SET status = 'failed', finished_at = COALESCE(finished_at, NOW())
+      WHERE workspace_id = $1 AND status NOT IN ('done', 'failed', 'cancelled', 'partial_failure')`,
+    [WS_ID],
+  );
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-afterAll(async () => {
-  // Clean up test data
-  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [WS_ID]);
-  await execute(`DELETE FROM wal_events WHERE workspace_id = $1`, [WS_ID]);
+afterAll(() => {
   delete process.env.NODE_ENV;
 });
 
@@ -246,6 +249,36 @@ describe('Queue Semantics', () => {
     expect(res.status).toBe(202);
     expect(res.body.queued).toBe(true);
     expect(res.body.queuePosition).toBe(1);
+  });
+
+  test('queued cancellation terminalizes application state without relying on a cancel notification', async () => {
+    const runId = await seedRun({
+      status: 'queued',
+      spec_path: 'forge/specs/approved/cancel-before-preparation.json',
+      queue_position: 1,
+      triggered_via: 'queue',
+    });
+
+    const response = await request(app)
+      .post(`/api/pipeline/runs/${runId}/cancel`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, runId: Number(runId), status: 'cancelled' });
+    await expect(queryOne(
+      `SELECT run.status, publication.state AS publication_state,
+              cancellation.terminalized_at
+         FROM pipeline_runs run
+         JOIN pipeline_dispatch_publications publication ON publication.run_id = run.id
+         JOIN pipeline_run_cancellation_requests cancellation ON cancellation.run_id = run.id
+        WHERE run.id = $1`,
+      [runId],
+    )).resolves.toMatchObject({
+      status: 'cancelled',
+      publication_state: 'cancelled',
+      terminalized_at: expect.anything(),
+    });
   });
 
   test('queue fills sequentially with correct positions', async () => {
@@ -501,6 +534,209 @@ describe('triggered_via Routing', () => {
       [res.body.runId]
     );
     expect(run!.triggered_via).toBe('run_now');
+  });
+
+  test('generic idempotency rejects reuse with different effective trigger options', async () => {
+    seedSpec('generic-idempotency-options');
+    const idempotencyKey = '11111111-1111-4111-8111-111111111991';
+    const first = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/generic-idempotency-options.json',
+        workspaceId: WS_ID,
+        readinessOverride: true,
+        includeGraph: false,
+        idempotencyKey,
+      });
+    expect(first.status).toBe(201);
+
+    const conflictingReplay = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/generic-idempotency-options.json',
+        workspaceId: WS_ID,
+        readinessOverride: true,
+        includeGraph: true,
+        idempotencyKey,
+      });
+
+    expect(conflictingReplay.status).toBe(409);
+    const rows = await query<{ id: number }>(
+      'SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND idempotency_key = $2',
+      [WS_ID, idempotencyKey],
+    );
+    expect(rows).toHaveLength(1);
+    const publication = await queryOne<{
+      state: string; boss_job_id: string; request_hash: string; effective_options_hash: string;
+      payload_hash: string; payload: Record<string, unknown>;
+    }>(
+      `SELECT state, boss_job_id::text, request_hash, effective_options_hash, payload_hash, payload
+         FROM pipeline_dispatch_publications WHERE run_id = $1`,
+      [first.body.runId],
+    );
+    expect(publication).toMatchObject({
+      state: 'published',
+      request_hash: expect.stringMatching(/^sha256:/),
+      effective_options_hash: expect.stringMatching(/^sha256:/),
+      payload_hash: expect.stringMatching(/^sha256:/),
+    });
+    const workerClaim = await claimDispatchForWorker({
+      runId: first.body.runId,
+      bossJobId: publication!.boss_job_id,
+      payload: publication!.payload,
+      workerId: '11111111-1111-4111-8111-111111111992',
+    });
+    expect(workerClaim.claimed).toBe(true);
+    const duplicate = await claimDispatchForWorker({
+      runId: first.body.runId,
+      bossJobId: publication!.boss_job_id,
+      payload: publication!.payload,
+      workerId: '11111111-1111-4111-8111-111111111993',
+    });
+    expect(duplicate).toMatchObject({ claimed: false, reason: 'duplicate_delivery' });
+  });
+
+  test('exact replay reconciles reserved, preparing, published, and claimed application publication states', async () => {
+    seedSpec('dispatch-replay-states');
+    const idempotencyKey = '11111111-1111-4111-8111-111111111996';
+    const requestBody = {
+      specPath: 'forge/specs/approved/dispatch-replay-states.json',
+      workspaceId: WS_ID,
+      readinessOverride: true,
+      idempotencyKey,
+    };
+    const first = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(requestBody);
+    expect(first.status).toBe(201);
+
+    await execute(
+      `UPDATE pipeline_dispatch_publications
+          SET state = 'reserved', payload = NULL, payload_hash = NULL,
+              lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
+        WHERE run_id = $1`,
+      [first.body.runId],
+    );
+    const reservedReplay = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(requestBody);
+    expect(reservedReplay.status).toBe(201);
+    expect(reservedReplay.body.runId).toBe(first.body.runId);
+    await expect(queryOne<{ state: string }>(
+      'SELECT state FROM pipeline_dispatch_publications WHERE run_id = $1',
+      [first.body.runId],
+    )).resolves.toMatchObject({ state: 'published' });
+
+    await execute(
+      `UPDATE pipeline_dispatch_publications
+          SET state = 'preparing', payload = NULL, payload_hash = NULL,
+              lease_owner = 'other-live-publisher', lease_expires_at = NOW() + INTERVAL '5 minutes',
+              updated_at = NOW()
+        WHERE run_id = $1`,
+      [first.body.runId],
+    );
+    const preparingReplay = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(requestBody);
+    expect(preparingReplay.status).toBe(202);
+    expect(preparingReplay.body.dispatchOutcome).toMatchObject({
+      disposition: 'pending_publication',
+      runId: first.body.runId,
+      replayed: true,
+    });
+
+    await execute(
+      `UPDATE pipeline_dispatch_publications
+          SET state = 'published', payload = '{}'::jsonb,
+              payload_hash = 'sha256:' || repeat('a', 64), lease_owner = NULL,
+              lease_expires_at = NULL, updated_at = NOW()
+        WHERE run_id = $1`,
+      [first.body.runId],
+    );
+    const publishedReplay = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(requestBody);
+    expect(publishedReplay.status).toBe(200);
+    expect(publishedReplay.body.dispatchOutcome).toMatchObject({
+      disposition: 'already_queued',
+      runId: first.body.runId,
+      replayed: true,
+    });
+
+    await execute(
+      `UPDATE pipeline_dispatch_publications
+          SET state = 'claimed', lease_owner = 'worker-owner',
+              lease_expires_at = NOW() + INTERVAL '10 minutes', updated_at = NOW()
+        WHERE run_id = $1`,
+      [first.body.runId],
+    );
+    const claimedReplay = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(requestBody);
+    expect(claimedReplay.status).toBe(200);
+    expect(claimedReplay.body.dispatchOutcome).toMatchObject({
+      disposition: 'running',
+      runId: first.body.runId,
+      replayed: true,
+    });
+  });
+
+  test('worker pickup repairs application authority after send-before-published crash', async () => {
+    seedSpec('dispatch-after-send-crash');
+    process.env.RORCA_PIPELINE_DISPATCH_FAILPOINT = 'after_send_before_published';
+    try {
+      const response = await request(app)
+        .post('/api/pipeline/trigger')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          specPath: 'forge/specs/approved/dispatch-after-send-crash.json',
+          workspaceId: WS_ID,
+          readinessOverride: true,
+          idempotencyKey: '11111111-1111-4111-8111-111111111994',
+        });
+      expect(response.status).toBe(500);
+      const run = await queryOne<{ id: number }>(
+        'SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND idempotency_key = $2',
+        [WS_ID, '11111111-1111-4111-8111-111111111994'],
+      );
+      const publication = await queryOne<{ state: string; boss_job_id: string; payload: Record<string, unknown> }>(
+        'SELECT state, boss_job_id::text, payload FROM pipeline_dispatch_publications WHERE run_id = $1',
+        [run!.id],
+      );
+      expect(publication!.state).toBe('preparing');
+
+      const replay = await request(app)
+        .post('/api/pipeline/trigger')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          specPath: 'forge/specs/approved/dispatch-after-send-crash.json',
+          workspaceId: WS_ID,
+          readinessOverride: true,
+          idempotencyKey: '11111111-1111-4111-8111-111111111994',
+        });
+      expect(replay.status).toBe(202);
+      expect(replay.body.dispatchOutcome).toMatchObject({
+        disposition: 'pending_publication',
+        runId: Number(run!.id),
+        replayed: true,
+      });
+
+      await expect(claimDispatchForWorker({
+        runId: run!.id,
+        bossJobId: publication!.boss_job_id,
+        payload: publication!.payload,
+        workerId: '11111111-1111-4111-8111-111111111995',
+      })).resolves.toMatchObject({ claimed: true });
+    } finally {
+      delete process.env.RORCA_PIPELINE_DISPATCH_FAILPOINT;
+    }
   });
 
   test('queue:true sets triggered_via = queue on the queued row', async () => {
@@ -914,6 +1150,33 @@ describe('advanceQueue()', () => {
 
     expect(fetchSpy).not.toHaveBeenCalled();
 
+    fetchSpy.mockRestore();
+  });
+
+  test('concurrent promoters acquire exactly one publication owner', async () => {
+    seedSpec('advance-concurrent');
+    await execute(`UPDATE worker_settings SET value = '1' WHERE key = 'queue_max_concurrent'`);
+    const queuedId = await seedRun({
+      status: 'queued',
+      spec_path: 'forge/specs/approved/advance-concurrent.json',
+      queue_position: 1,
+      triggered_via: 'queue',
+    });
+    let releaseFetch!: () => void;
+    const fetchBarrier = new Promise<void>((resolve) => { releaseFetch = resolve; });
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      await fetchBarrier;
+      return new Response(JSON.stringify({ ok: true, runId: queuedId }), { status: 201 });
+    });
+
+    const { advanceQueue } = require('../../lib/run-queue');
+    const promotions = [advanceQueue(WS_ID), advanceQueue(WS_ID)];
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    releaseFetch();
+    await Promise.all(promotions);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     fetchSpy.mockRestore();
   });
 

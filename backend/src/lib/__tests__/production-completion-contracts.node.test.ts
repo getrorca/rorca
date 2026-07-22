@@ -75,14 +75,23 @@ test('strict post-save memory stage reports degradation instead of converting fa
   assert.match(handler, /throw new Error\(`Required spec memory synthesis did not complete/);
 });
 
-test('TaskManifest source authority and advertised v2 contracts bind Slack tenant and canonical outcomes', () => {
+test('TaskManifest source and provider-human authority bind tenant, manifest hash, immutable lineage, and canonical outcomes', () => {
   const manifest = readSource('lib', 'task-manifest.ts');
   const pipeline = readSource('routes', 'pipeline.ts');
   const version = readSource('routes', 'version.ts');
+  const providerHuman = readSource('lib', 'provider-human-authority.ts');
+  const providerMigration = readSource('db', 'pg-migrations', '20260722201500_task_manifest_provider_human_authority.sql');
   assert.match(manifest, /teamId: identifierString\('Slack team id'\)/);
   assert.match(pipeline, /assertProviderTenantWorkspaceBinding/);
   assert.match(pipeline, /dispatchOutcome\(/);
+  assert.match(pipeline, /purpose: 'task_manifest_dispatch'/);
+  assert.match(pipeline, /Internal services must relay the exact signed provider-human TaskManifest approval command/);
+  assert.match(providerHuman, /'task_manifest_dispatch'/);
+  assert.match(providerMigration, /provider_human_receipt_id/);
+  assert.match(providerMigration, /receipt\.target_hash <> NEW\.manifest_hash/);
+  assert.doesNotMatch(providerMigration, /(?:CREATE|ALTER|DROP|DELETE FROM|UPDATE)\s+(?:TABLE\s+)?pgboss\./i);
   assert.match(version, /resultContract: 'rorca-dispatch-outcome\.v1'/);
   assert.match(version, /sourceTenantBinding: 'slack-team-v1'/);
   assert.match(version, /humanAuthorityVersion: 'provider-human-event\.v1'/);
+  assert.match(version, /serviceRelayRequiresProviderHuman: true/);
 });

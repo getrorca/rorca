@@ -92,9 +92,7 @@ export async function prepareHostRunCloseout(input: {
       runId: input.runId,
       workspacePath: authority.repositoryTopLevel,
       repositoryPath: authority.checkoutPath,
-      commitShas: authority.stories
-        .filter((story) => story.status === 'pass' && story.commitSha)
-        .map((story) => story.commitSha!),
+      terminalRevision: authority.terminalRevision,
     });
   }
   const dispatchIdentity = input.governedRetryDispatchIdentity ?? null;

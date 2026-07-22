@@ -1,0 +1,1669 @@
+{
+  "schemaVersion": "rorca.release-one-f2-classification.v1",
+  "profileId": "release-1-supervised-core",
+  "roadmapAuthority": "Linear ROR-21",
+  "generatedAt": "2026-07-22T19:45:00.000Z",
+  "source": {
+    "resultFile": "rorca-f2-broad-rerun1-results.json",
+    "logFile": "rorca-f2-broad-rerun1.log",
+    "sha256": "aa84326a096eb448e3fd62a199817f7664c222212574dc48a84b9445c9f1ecaa",
+    "repositoryHead": "925808d23f6ea388f848e9e8fb9a48c501a1a291",
+    "failedSuites": 104,
+    "failedTests": 479,
+    "passedSuites": 333,
+    "passedTests": 4421,
+    "pendingSuites": 2,
+    "pendingTests": 6,
+    "totalSuites": 439,
+    "totalTests": 4906
+  },
+  "classificationPolicy": {
+    "supervised_core": "In the Release-1 critical path; production and adversarial tests must be green.",
+    "disabled_future_capability": "Excluded from Release-1; production must fail closed before side effects and the denial test must be green.",
+    "harness_or_corpus": "The candidate-current production boundary remains; repair stale fixture, mock, isolation, compilation, or assertion behavior without weakening it.",
+    "noWaivers": true,
+    "noSilentSkips": true
+  },
+  "entries": [
+    {
+      "suite": "backend/scripts/__tests__/pty-noisy-release-harness.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "host_enforced_scope",
+        "isolated_worktree_execution",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pty-noisy-release-harness.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/__tests__/CLI-016-pi-models.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "CLI-016-pi-models.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/__tests__/CLI-017-config-agent.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "CLI-017-config-agent.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/__tests__/CLI-019-pi-rpc-retry-context.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "bounded_task_manifest",
+        "learning_memory",
+        "platform_integrity",
+        "supervised_retry",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "CLI-019-pi-rpc-retry-context.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/__tests__/direction-layers-wal-events-rls.integration.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "direction-layers-wal-events-rls.integration.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/__tests__/golden-terminal-parity.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "golden-terminal-parity.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/__tests__/mcp-oauth-disabled.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "mcp-oauth-disabled.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/__tests__/opencode-integration.test.ts",
+      "failedAssertions": 10,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core",
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "mixed_fix_and_fail_closed",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout",
+        "warm_shared_agent_server"
+      ],
+      "rationale": "opencode-integration.test.ts mixes supervised closeout behavior with an explicitly excluded Release-1 actuator; repair the supervised path and replace excluded expectations with production fail-closed evidence."
+    },
+    {
+      "suite": "backend/src/__tests__/pg-boss-unit.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "pg-boss-unit.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/__tests__/pr-template.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "github_app_draft_pr_check",
+        "human_merge_observation",
+        "platform_integrity"
+      ],
+      "rationale": "pr-template.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/__tests__/QRW-010-pipeline-trigger-workflow-config.test.ts",
+      "failedAssertions": 20,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core",
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "mixed_fix_and_fail_closed",
+      "capabilityIds": [
+        "ambient_credential_injection",
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "QRW-010-pipeline-trigger-workflow-config.test.ts mixes supervised closeout behavior with an explicitly excluded Release-1 actuator; repair the supervised path and replace excluded expectations with production fail-closed evidence."
+    },
+    {
+      "suite": "backend/src/__tests__/QRW-012-execution-engine-reasoning-flags.test.ts",
+      "failedAssertions": 9,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "QRW-012-execution-engine-reasoning-flags.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/__tests__/worker-singleton-sweep.test.ts",
+      "failedAssertions": 3,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "worker-singleton-sweep.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/__tests__/workflow-configs-migration.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "workflow-configs-migration.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/__tests__/workspaces-rls.integration.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "workspaces-rls.integration.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/db/__tests__/autonomous-delivery-governance-migration.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "disabled_future_capability",
+      "classes": [
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "replace_with_fail_closed_test",
+      "capabilityIds": [
+        "autonomous_provider_merge",
+        "platform_integrity"
+      ],
+      "rationale": "autonomous-delivery-governance-migration.test.ts exercises an explicitly excluded Release-1 capability or stale compatibility expectation; production must reject it before side effects and the suite must prove that denial."
+    },
+    {
+      "suite": "backend/src/db/__tests__/autonomous-reviewed-delivery-migration.test.ts",
+      "failedAssertions": 3,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "disabled_future_capability",
+      "classes": [
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "replace_with_fail_closed_test",
+      "capabilityIds": [
+        "auto_merge",
+        "autonomous_provider_merge",
+        "platform_integrity"
+      ],
+      "rationale": "autonomous-reviewed-delivery-migration.test.ts exercises an explicitly excluded Release-1 capability or stale compatibility expectation; production must reject it before side effects and the suite must prove that denial."
+    },
+    {
+      "suite": "backend/src/db/__tests__/context-events-memory-candidates.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "context-events-memory-candidates.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/db/__tests__/db.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "db.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/context-distillation.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "context-distillation.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/direction-stack.test.ts",
+      "failedAssertions": 10,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "direction-stack.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/execution-engine-closeout.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "execution-engine-closeout.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/execution-engine-prompt.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "execution-engine-prompt.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/execution-environment-registry.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core",
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "mixed_fix_and_fail_closed",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "local_user_execution_bridge",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "execution-environment-registry.test.ts mixes supervised closeout behavior with an explicitly excluded Release-1 actuator; repair the supervised path and replace excluded expectations with production fail-closed evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/git-memory-removal.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "host_enforced_scope",
+        "isolated_worktree_execution",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "git-memory-removal.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/graph-context.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "graph-context.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/graph-projection-cleanup.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "graph-projection-cleanup.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/graph-query-scope.test.ts",
+      "failedAssertions": 3,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "graph-query-scope.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/graph-rag-phase1.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "graph-rag-phase1.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/hilo-hydration-runner.test.ts",
+      "failedAssertions": 9,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "hilo-hydration-runner.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/hilo.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "hilo.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/hook-runner.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "hook-runner.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/main-reconciliation-collision.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core",
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "mixed_fix_and_fail_closed",
+      "capabilityIds": [
+        "local_user_execution_bridge",
+        "platform_integrity"
+      ],
+      "rationale": "main-reconciliation-collision.test.ts mixes supervised closeout behavior with an explicitly excluded Release-1 actuator; repair the supervised path and replace excluded expectations with production fail-closed evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/memory-router.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "memory-router.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/pi-parity.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pi-parity.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/pipeline-cancellation.test.ts",
+      "failedAssertions": 4,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pipeline-cancellation.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/plan-gate-default-deny.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "plan-gate-default-deny.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/pty-cli-fake-smoke.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pty-cli-fake-smoke.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/rate-limiter.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "rate-limiter.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/release-reconciler-state-transitions.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core",
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "mixed_fix_and_fail_closed",
+      "capabilityIds": [
+        "branch_only_external_push",
+        "github_app_draft_pr_check",
+        "host_enforced_scope",
+        "human_merge_observation",
+        "isolated_worktree_execution",
+        "platform_integrity"
+      ],
+      "rationale": "release-reconciler-state-transitions.test.ts mixes supervised closeout behavior with an explicitly excluded Release-1 actuator; repair the supervised path and replace excluded expectations with production fail-closed evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/release-restart-reconciliation.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "host_enforced_scope",
+        "isolated_worktree_execution",
+        "platform_integrity"
+      ],
+      "rationale": "release-restart-reconciliation.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/semantic-log-parser.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "semantic-log-parser.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/spec-job-handlers-retrieval-feedback.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "spec-job-handlers-retrieval-feedback.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/spec-post-save-orchestration.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "spec-post-save-orchestration.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/spec-post-save-workflow.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "spec-post-save-workflow.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/ssdlc-decisions.test.ts",
+      "failedAssertions": 0,
+      "suiteRuntimeFailure": true,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "ssdlc-decisions.test.ts failed to compile or complete under the candidate-current broad harness; repair the test corpus or harness without relaxing any production type, isolation, or authority check."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/ssdlc-pass-reconciler.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "ssdlc-pass-reconciler.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/story-pass-outbox-recovery.test.ts",
+      "failedAssertions": 8,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "story-pass-outbox-recovery.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/lib/__tests__/wave-integration-store.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "disabled_future_capability",
+      "classes": [
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "replace_with_fail_closed_test",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "high_risk_parallel_autonomy",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "wave-integration-store.test.ts exercises an explicitly excluded Release-1 capability or stale compatibility expectation; production must reject it before side effects and the suite must prove that denial."
+    },
+    {
+      "suite": "backend/src/mcp/__tests__/approve-spec.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "mcp_local_automation",
+        "platform_integrity"
+      ],
+      "rationale": "approve-spec.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/mcp/__tests__/get-context.test.ts",
+      "failedAssertions": 4,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "mcp_local_automation",
+        "platform_integrity"
+      ],
+      "rationale": "get-context.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/mcp/__tests__/list-specs.test.ts",
+      "failedAssertions": 3,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "mcp_local_automation",
+        "platform_integrity"
+      ],
+      "rationale": "list-specs.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/mcp/__tests__/pipeline-control.test.ts",
+      "failedAssertions": 19,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "mcp_local_automation",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pipeline-control.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/mcp/__tests__/pipeline-status.test.ts",
+      "failedAssertions": 6,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "mcp_local_automation",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pipeline-status.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/mcp/__tests__/server.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "mcp_local_automation",
+        "platform_integrity"
+      ],
+      "rationale": "server.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/activity.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "activity.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/agent-hooks.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "agent-hooks.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/agent-profiles.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "agent-profiles.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/analytics-export.test.ts",
+      "failedAssertions": 4,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "analytics-export.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/analytics.test.ts",
+      "failedAssertions": 29,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "analytics.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/auto-merge-pipeline.test.ts",
+      "failedAssertions": 26,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "disabled_future_capability",
+      "classes": [
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "replace_with_fail_closed_test",
+      "capabilityIds": [
+        "auto_merge",
+        "autonomous_provider_merge",
+        "bounded_task_manifest",
+        "manual_worktree_merge_surface",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "auto-merge-pipeline.test.ts exercises an explicitly excluded Release-1 capability or stale compatibility expectation; production must reject it before side effects and the suite must prove that denial."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/backups.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "backups.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/batch.test.ts",
+      "failedAssertions": 6,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "batch.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/billing-trial.test.ts",
+      "failedAssertions": 3,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "billing-trial.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/budget.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "budget.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/conventions.test.ts",
+      "failedAssertions": 3,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "conventions.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/direction.test.ts",
+      "failedAssertions": 6,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "direction.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/env-vars.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "env-vars.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/events-candidates.test.ts",
+      "failedAssertions": 6,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "events-candidates.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/execution-environments.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core",
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "mixed_fix_and_fail_closed",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "local_user_execution_bridge",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "execution-environments.test.ts mixes supervised closeout behavior with an explicitly excluded Release-1 actuator; repair the supervised path and replace excluded expectations with production fail-closed evidence."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/github-checks.test.ts",
+      "failedAssertions": 15,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "github_app_draft_pr_check",
+        "human_merge_observation",
+        "platform_integrity"
+      ],
+      "rationale": "github-checks.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/graph-graceful-degradation.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "graph-graceful-degradation.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/health.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "health.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/hydrate.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "hydrate.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/memory.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "approved_context_evidence",
+        "learning_memory",
+        "platform_integrity"
+      ],
+      "rationale": "memory.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/notifications.test.ts",
+      "failedAssertions": 7,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "notifications.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/onboarding.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "onboarding.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/pipeline-pty-attachment.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pipeline-pty-attachment.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/pipeline-queue.test.ts",
+      "failedAssertions": 30,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pipeline-queue.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/pipeline-readiness.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pipeline-readiness.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/pipeline.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pipeline.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/pr-body.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "github_app_draft_pr_check",
+        "human_merge_observation",
+        "platform_integrity"
+      ],
+      "rationale": "pr-body.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/pr-merge.test.ts",
+      "failedAssertions": 12,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "github_app_draft_pr_check",
+        "human_merge_observation",
+        "platform_integrity"
+      ],
+      "rationale": "pr-merge.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/pty-evidence.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "pty-evidence.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/retry-merge.test.ts",
+      "failedAssertions": 7,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "disabled_future_capability",
+      "classes": [
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "replace_with_fail_closed_test",
+      "capabilityIds": [
+        "autonomous_provider_merge",
+        "bounded_task_manifest",
+        "manual_worktree_merge_surface",
+        "platform_integrity",
+        "supervised_retry",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "retry-merge.test.ts exercises an explicitly excluded Release-1 capability or stale compatibility expectation; production must reject it before side effects and the suite must prove that denial."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/retry.test.ts",
+      "failedAssertions": 8,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "platform_integrity",
+        "supervised_retry",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "retry.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/security-audit.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "security-audit.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/settings-debug.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "settings-debug.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/settings.test.ts",
+      "failedAssertions": 3,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "settings.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/spec-repair.test.ts",
+      "failedAssertions": 5,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "spec-repair.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/sse-integration.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "sse-integration.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/stories.test.ts",
+      "failedAssertions": 8,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "stories.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/story-comments.test.ts",
+      "failedAssertions": 8,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "story-comments.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/story-commits.test.ts",
+      "failedAssertions": 14,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "host_enforced_scope",
+        "isolated_worktree_execution",
+        "platform_integrity"
+      ],
+      "rationale": "story-commits.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/sweep-orphan-processes.test.ts",
+      "failedAssertions": 10,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "sweep-orphan-processes.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/tags.test.ts",
+      "failedAssertions": 10,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "tags.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/team-rls.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "team-rls.test.ts challenges an authority, closeout, security, or execution invariant on the supervised critical path; fix the production root cause and retain adversarial green evidence."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/templates.test.ts",
+      "failedAssertions": 6,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "authorized_spec_authoring",
+        "platform_integrity"
+      ],
+      "rationale": "templates.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/token-usage.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "operator_diagnostics",
+        "platform_integrity"
+      ],
+      "rationale": "token-usage.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/vault-rls.test.ts",
+      "failedAssertions": 1,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "vault-rls.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/webhooks.test.ts",
+      "failedAssertions": 10,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "bounded_task_manifest",
+        "github_app_draft_pr_check",
+        "human_merge_observation",
+        "platform_integrity",
+        "trusted_validation_closeout"
+      ],
+      "rationale": "webhooks.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/workspaces.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "workspaces.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    },
+    {
+      "suite": "backend/src/routes/__tests__/worktrees.test.ts",
+      "failedAssertions": 19,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "supervised_core",
+      "classes": [
+        "supervised_core",
+        "disabled_future_capability",
+        "harness_or_corpus"
+      ],
+      "disposition": "mixed_fix_and_fail_closed",
+      "capabilityIds": [
+        "branch_only_external_push",
+        "host_enforced_scope",
+        "isolated_worktree_execution",
+        "manual_worktree_merge_surface",
+        "platform_integrity"
+      ],
+      "rationale": "worktrees.test.ts mixes supervised closeout behavior with an explicitly excluded Release-1 actuator; repair the supervised path and replace excluded expectations with production fail-closed evidence."
+    },
+    {
+      "suite": "backend/src/tui/__tests__/run-formatting.test.ts",
+      "failedAssertions": 2,
+      "suiteRuntimeFailure": false,
+      "primaryClass": "harness_or_corpus",
+      "classes": [
+        "harness_or_corpus"
+      ],
+      "disposition": "must_fix_green",
+      "capabilityIds": [
+        "platform_integrity"
+      ],
+      "rationale": "run-formatting.test.ts is attributed to stale fixtures, mocks, retained append-only state, or another harness/corpus mismatch; repair it to green without weakening candidate-current production behavior."
+    }
+  ]
+}

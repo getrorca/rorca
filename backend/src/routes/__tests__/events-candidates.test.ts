@@ -23,39 +23,31 @@ import { getAuthToken } from './helpers/auth-helper';
 
 let app: Express;
 let authToken: string;
-const testWorkspaceId = 'ws-ci-us032';
+let workspaceSequence = 0;
+let testWorkspaceId = '';
 
-beforeEach(async () => {
-  jest.resetModules();
-  jest.clearAllMocks();
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
-
-  // Ensure test workspace exists
-  const { execute } = require('../../db/index');
-  await execute(
-    `INSERT INTO workspaces (id, label, path)
-     VALUES ($1, 'CI US-032', '/tmp/ws-ci-us032')
-     ON CONFLICT (id) DO NOTHING`,
-    [testWorkspaceId],
-  );
-
-  // Isolate the shared CI workspace: clear rows accumulated by earlier tests
-  // or prior runs (the jest DB teardown is intentionally skipped, so the
-  // candidates/events/memories tables persist across files). Each test creates
-  // the data it needs, so starting from an empty workspace is the contract.
-  await execute(`DELETE FROM memory_candidates WHERE workspace_id = $1`, [testWorkspaceId]);
-  await execute(`DELETE FROM context_events WHERE workspace_id = $1`, [testWorkspaceId]);
-  await execute(`DELETE FROM memories WHERE workspace_id = $1`, [testWorkspaceId]);
+beforeAll(() => {
+  process.env.NODE_ENV = 'test';
+  app = require('../../server').default;
 });
 
-afterEach(async () => {
-  try {
-    const { closePool } = require('../../db/index');
-    await closePool();
-  } catch {}
+beforeEach(async () => {
+  jest.clearAllMocks();
+  workspaceSequence += 1;
+  testWorkspaceId = `ws-ci-us032-${process.pid}-${workspaceSequence}`;
+  authToken = await getAuthToken(app);
+
+  const { execute } = require('../../db/index');
+  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
+  await execute(
+    `INSERT INTO workspaces (id, label, path)
+     VALUES ($1, 'CI US-032', $2)`,
+    [testWorkspaceId, `/tmp/${testWorkspaceId}`],
+  );
+});
+
+afterAll(() => {
+  delete process.env.NODE_ENV;
 });
 
 // ═══════════════════════════════════════════════════════════════════════════=
@@ -63,7 +55,7 @@ afterEach(async () => {
 // ═══════════════════════════════════════════════════════════════════════════=
 
 describe('POST /api/events', () => {
-  const validEvent = {
+  const validEvent = () => ({
     workspace_id: testWorkspaceId,
     source_system: 'rorca-capture',
     event_type: 'commit',
@@ -73,13 +65,13 @@ describe('POST /api/events', () => {
     actor: 'test-user',
     source_ref: 'abc123def456',
     idempotency_key: `ce-${crypto.randomUUID()}`,
-  };
+  });
 
   test('creates a new event and returns 201', async () => {
     const res = await request(app)
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
-      .send(validEvent);
+      .send(validEvent());
 
     expect(res.status).toBe(201);
     expect(res.body.workspace_id).toBe(testWorkspaceId);
@@ -92,7 +84,7 @@ describe('POST /api/events', () => {
 
   test('idempotency: duplicate submission returns 200 with existing record', async () => {
     const key = `ce-dup-${crypto.randomUUID()}`;
-    const body = { ...validEvent, idempotency_key: key };
+    const body = { ...validEvent(), idempotency_key: key };
 
     const first = await request(app)
       .post('/api/events')
@@ -206,7 +198,7 @@ describe('POST /api/events', () => {
 // ═══════════════════════════════════════════════════════════════════════════=
 
 describe('POST /api/candidates', () => {
-  const validCandidate = {
+  const validCandidate = () => ({
     workspace_id: testWorkspaceId,
     source_system: 'rorca-capture',
     category: 'Pattern',
@@ -215,13 +207,13 @@ describe('POST /api/candidates', () => {
     context: 'Prevents connection exhaustion under load',
     related_files: ['src/db/pool.ts'],
     idempotency_key: `mc-${crypto.randomUUID()}`,
-  };
+  });
 
   test('creates a new candidate and returns 201', async () => {
     const res = await request(app)
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
-      .send(validCandidate);
+      .send(validCandidate());
 
     expect(res.status).toBe(201);
     expect(res.body.workspace_id).toBe(testWorkspaceId);
@@ -234,7 +226,7 @@ describe('POST /api/candidates', () => {
 
   test('idempotency: duplicate submission returns 200 with existing record', async () => {
     const key = `mc-dup-${crypto.randomUUID()}`;
-    const body = { ...validCandidate, idempotency_key: key };
+    const body = { ...validCandidate(), idempotency_key: key };
 
     const first = await request(app)
       .post('/api/candidates')

@@ -32,6 +32,14 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
+function stableProviderEventJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableProviderEventJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => `${JSON.stringify(key)}:${stableProviderEventJson(child)}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
 const nativeImport = new Function('specifier', 'return import(specifier)') as
   (specifier: string) => Promise<Record<string, any>>;
 
@@ -51,6 +59,21 @@ describeLive('live Hermes -> Rorca HTTP -> PostgreSQL -> pg-boss -> worker -> ch
   const fakeEngine = path.join(root, 'fake-engine.js');
   const pool = new Pool({ connectionString, max: 3 });
   const serviceToken = crypto.randomBytes(48).toString('base64url');
+  const providerKeyPair = crypto.generateKeyPairSync('ed25519');
+  const providerTenantId = 'T-LIVE-CERT';
+  const signedApproval = (targetHash: string, messageId: string) => {
+    const unsigned = {
+      schemaVersion: 'provider-human-event.v1' as const,
+      issuerId: 'hermes-live-cert', keyId: 'live-cert-ed25519-1', provider: 'slack' as const,
+      providerTenantId, actorId: 'U-LIVE-CERT-HUMAN', conversationId: 'C-LIVE-CERT',
+      threadId: 'THREAD-LIVE-CERT', messageId, occurredAt: new Date().toISOString(),
+      normalizedCommandHash: targetHash, ingressIdempotencyKey: `ingress-${messageId}`,
+    };
+    return {
+      ...unsigned,
+      signature: crypto.sign(null, Buffer.from(stableProviderEventJson(unsigned), 'utf8'), providerKeyPair.privateKey).toString('base64url'),
+    };
+  };
   let server: Server;
   let boss: PgBoss;
   let runId = 0;
@@ -80,6 +103,11 @@ process.on('message', (message) => {
 });
 `, { mode: 0o700 });
     process.env.RORCA_INTERNAL_SERVICE_TOKEN = serviceToken;
+    process.env.RORCA_PROVIDER_HUMAN_ISSUERS_JSON = JSON.stringify([{
+      issuerId: 'hermes-live-cert', keyId: 'live-cert-ed25519-1',
+      publicKeyPem: providerKeyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      provider: 'slack', providerTenantId, workspaceId,
+    }]);
     process.env.RORCA_TEST_EXECUTION_ENGINE_ENTRYPOINT = fakeEngine;
     process.env.RORCA_PGBOSS_SCHEMA = 'pgboss_live_cross_cert';
     process.env.RORCA_DISABLE_BACKGROUND_RUNTIME = 'true';
@@ -97,6 +125,16 @@ process.on('message', (message) => {
        ON CONFLICT (id) DO NOTHING`,
     );
 
+    const appDb = await import('../../db/index');
+    const applicationIdentity = await appDb.queryOne<{ user_name: string; database_name: string; schema_name: string }>(
+      'SELECT current_user AS user_name, current_database() AS database_name, current_schema() AS schema_name',
+    );
+    const visibleWorkspace = await appDb.queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!visibleWorkspace || applicationIdentity?.user_name !== 'rorca_test_runner'
+      || applicationIdentity.database_name !== 'rorca_cert_test' || applicationIdentity.schema_name !== 'rorca') {
+      throw new Error(`Live certification DB identity mismatch: ${JSON.stringify({ applicationIdentity, visibleWorkspace })}`);
+    }
+
     const { initBoss, getBoss } = await import('../../lib/pg-boss');
     const { handlePipelineRun } = await import('../../worker');
     await initBoss();
@@ -112,10 +150,28 @@ process.on('message', (message) => {
     process.env.PORT = String(address.port);
   }, 60_000);
 
+  beforeEach(async () => {
+    // Global Jest isolation intentionally truncates application tables after
+    // this suite's beforeAll. Re-seed only application-owned fixture rows here;
+    // pg-boss remains solely responsible for its configured transport schema.
+    await pool.query(
+      `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Live Hermes certification', $2)
+       ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+      [workspaceId, repository],
+    );
+    await pool.query(
+      `INSERT INTO execution_environments (id, label, kind, enabled, supported_agents)
+       VALUES ('remote-rorca', 'Remote Rorca certification runtime', 'remote-rorca', TRUE,
+               ARRAY['claude','codex','opencode','pi']::text[])
+       ON CONFLICT (id) DO NOTHING`,
+    );
+  });
+
   afterAll(async () => {
     globalThis.fetch = originalFetch ?? globalThis.fetch;
     if (boss) {
-      await boss.offWork('pipeline:run').catch(() => undefined);
+      const offWork = (boss as unknown as { offWork?: (name: string) => Promise<void> }).offWork;
+      if (typeof offWork === 'function') await offWork.call(boss, 'pipeline:run').catch(() => undefined);
       await boss.stop({ timeout: 5_000 }).catch(() => undefined);
     }
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -124,6 +180,7 @@ process.on('message', (message) => {
     // are scoped by this unique workspace/idempotency identity.
     await pool.end();
     delete process.env.RORCA_INTERNAL_SERVICE_TOKEN;
+    delete process.env.RORCA_PROVIDER_HUMAN_ISSUERS_JSON;
     delete process.env.RORCA_TEST_EXECUTION_ENGINE_ENTRYPOINT;
     delete process.env.RORCA_PGBOSS_SCHEMA;
     delete process.env.RORCA_TASK_MANIFEST_FAILPOINT;
@@ -137,7 +194,7 @@ process.on('message', (message) => {
     const hermesClientPath = process.env.HERMES_CERT_CLIENT_PATH!;
     const hermesManifestPath = process.env.HERMES_CERT_MANIFEST_PATH!;
     const { RorcaClient } = await nativeImport(pathToFileURL(path.resolve(hermesClientPath)).href);
-    const { compileTaskManifestIntent } = await nativeImport(pathToFileURL(path.resolve(hermesManifestPath)).href);
+    const { compileTaskManifestIntent, taskManifestApprovalTargetHash } = await nativeImport(pathToFileURL(path.resolve(hermesManifestPath)).href);
     const compiled = compileTaskManifestIntent({
       workspaceId,
       task: 'Add one bounded documentation note in the named README component and validate it in a branch',
@@ -152,10 +209,11 @@ process.on('message', (message) => {
         messageId: `cert-${crypto.randomUUID()}`, userId: 'cert-operator',
       },
       validationCommands: ['git diff --check'],
-      executionHints: { agentOverride: 'claude', terminalMode: 'ansi-html', mergeStrategy: 'branch-only' },
+      executionHints: { agentOverride: 'claude', terminalMode: 'ansi-html', mergeStrategy: 'draft-pr' },
     });
     expect(compiled.status).toBe('ok');
     const manifest = compiled.manifest;
+    const manifestApproval = signedApproval(taskManifestApprovalTargetHash(manifest), `approval-${manifest.manifestId}`);
     const client = new RorcaClient({
       RORCA_API_URL: apiUrl,
       RORCA_API_TOKEN: serviceToken,
@@ -179,9 +237,10 @@ process.on('message', (message) => {
       workspaceId,
       manifest,
       idempotencyKey: manifest.idempotencyKey,
+      humanApproval: manifestApproval,
       autoWorktree: true,
       autoMerge: false,
-      mergeStrategy: 'branch-only',
+      mergeStrategy: 'draft-pr',
       terminalMode: 'ansi-html',
     });
     expect(ambiguous).toMatchObject({ ok: false, status: 'feature-unavailable', httpStatus: 0 });
@@ -194,9 +253,10 @@ process.on('message', (message) => {
       workspaceId,
       manifest,
       idempotencyKey: manifest.idempotencyKey,
+      humanApproval: manifestApproval,
       autoWorktree: true,
       autoMerge: false,
-      mergeStrategy: 'branch-only',
+      mergeStrategy: 'draft-pr',
       terminalMode: 'ansi-html',
     });
     runId = Number(replay.runId ?? replay.dispatchOutcome?.runId ?? (replay.data as { runId?: number } | undefined)?.runId);
@@ -219,11 +279,15 @@ process.on('message', (message) => {
     const authority = await pool.query<{
       run_count: string; lineage_count: string; job_count: string; safety_deploy: boolean;
       merge_strategy: string; auto_merge: boolean; authority_version: number;
-      closeout_count: string; child_exit: number | null;
+      closeout_count: string; child_exit: number | null; provider_receipt_count: string;
     }>(
       `SELECT
          (SELECT COUNT(*) FROM pipeline_runs WHERE workspace_id = $1 AND idempotency_key = $2)::text AS run_count,
          (SELECT COUNT(*) FROM task_manifest_run_lineage WHERE run_id = $3)::text AS lineage_count,
+         (SELECT COUNT(*) FROM task_manifest_run_lineage lineage
+           JOIN provider_human_authority_receipts receipt ON receipt.id = lineage.provider_human_receipt_id
+          WHERE lineage.run_id = $3 AND receipt.purpose = 'task_manifest_dispatch'
+            AND receipt.target_hash = lineage.manifest_hash)::text AS provider_receipt_count,
          (SELECT COUNT(*) FROM pgboss_live_cross_cert.job
            WHERE name = 'pipeline:run' AND data->>'runId' = $3::text)::text AS job_count,
          (SELECT (effective_options->'safety'->>'deploy')::boolean FROM pipeline_runs WHERE id = $3) AS safety_deploy,
@@ -240,8 +304,8 @@ process.on('message', (message) => {
       [workspaceId, manifest.idempotencyKey, runId],
     );
     expect(authority.rows[0]).toMatchObject({
-      run_count: '1', lineage_count: '1', job_count: '1',
-      safety_deploy: false, merge_strategy: 'branch-only', auto_merge: false,
+      run_count: '1', lineage_count: '1', provider_receipt_count: '1', job_count: '1',
+      safety_deploy: false, merge_strategy: 'draft-pr', auto_merge: false,
       authority_version: 1, closeout_count: '1', child_exit: 17,
     });
 
@@ -249,9 +313,10 @@ process.on('message', (message) => {
       workspaceId,
       manifest,
       idempotencyKey: manifest.idempotencyKey,
+      humanApproval: manifestApproval,
       autoWorktree: true,
       autoMerge: false,
-      mergeStrategy: 'branch-only',
+      mergeStrategy: 'draft-pr',
       terminalMode: 'ansi-html',
     });
     expect(terminalReplay.dispatchOutcome?.disposition).toBe('terminal_failure');
@@ -273,18 +338,23 @@ process.on('message', (message) => {
       constraints: ['Do not deploy'],
       acceptanceCriteria: ['README remains valid'],
       validationCommands: ['git diff --check'],
-      executionHints: { agentOverride: 'claude', terminalMode: 'ansi-html', mergeStrategy: 'branch-only' },
+      executionHints: { agentOverride: 'claude', terminalMode: 'ansi-html', mergeStrategy: 'draft-pr' },
     });
     const interruptedManifest = interruptedCompiled.manifest;
+    const interruptedApproval = signedApproval(
+      taskManifestApprovalTargetHash(interruptedManifest),
+      `approval-${interruptedManifest.manifestId}`,
+    );
     process.env.RORCA_TASK_MANIFEST_FAILPOINT = 'after_reservation_before_preparation';
     try {
       await expect(client.triggerTaskManifestExecution({
         workspaceId,
         manifest: interruptedManifest,
         idempotencyKey: interruptedManifest.idempotencyKey,
+        humanApproval: interruptedApproval,
         autoWorktree: true,
         autoMerge: false,
-        mergeStrategy: 'branch-only',
+        mergeStrategy: 'draft-pr',
         terminalMode: 'ansi-html',
       })).rejects.toThrow();
     } finally {
@@ -313,9 +383,10 @@ process.on('message', (message) => {
       workspaceId,
       manifest: interruptedManifest,
       idempotencyKey: interruptedManifest.idempotencyKey,
+      humanApproval: interruptedApproval,
       autoWorktree: true,
       autoMerge: false,
-      mergeStrategy: 'branch-only',
+      mergeStrategy: 'draft-pr',
       terminalMode: 'ansi-html',
     });
     expect(interruptedReplay.dispatchOutcome?.runId).toBe(interruptedRunId);
@@ -341,7 +412,7 @@ process.on('message', (message) => {
       manifest: wrongScope,
       idempotencyKey: manifest.idempotencyKey,
       autoMerge: false,
-      mergeStrategy: 'branch-only',
+      mergeStrategy: 'draft-pr',
     })).rejects.toThrow();
     expect((await pool.query(
       'SELECT COUNT(*)::text AS count FROM pipeline_runs WHERE idempotency_key = $1',

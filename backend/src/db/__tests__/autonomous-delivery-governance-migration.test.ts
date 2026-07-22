@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkDuplicatePrefixes } from '../pg-index';
@@ -65,9 +66,10 @@ describe('autonomous delivery governance migration', () => {
 
   test('creates disabled, activates exact digest, freezes scope, and revokes one-way', async () => {
     const now = new Date();
-    await workspaceFixture('ws-delivery-policy');
+    const workspaceId = `ws-delivery-policy-${crypto.randomUUID()}`;
+    await workspaceFixture(workspaceId);
     const created = await createAutonomousDeliveryPolicy({
-      workspaceId: 'ws-delivery-policy',
+      workspaceId,
       draft: policyDraft(now),
       principal,
       sourceRequestId: 'policy-create-db-001',
@@ -75,7 +77,7 @@ describe('autonomous delivery governance migration', () => {
     });
     expect(created).toMatchObject({ replayed: false, policy: { status: 'disabled', deploymentAllowed: false } });
     const createReplay = await createAutonomousDeliveryPolicy({
-      workspaceId: 'ws-delivery-policy',
+      workspaceId,
       draft: policyDraft(now),
       principal,
       sourceRequestId: 'policy-create-db-001',
@@ -84,7 +86,7 @@ describe('autonomous delivery governance migration', () => {
     expect(createReplay).toMatchObject({ replayed: true, policy: { id: created.policy.id } });
 
     const activated = await activateAutonomousDeliveryPolicy({
-      workspaceId: 'ws-delivery-policy',
+      workspaceId,
       policyId: created.policy.id,
       expectedPolicyDigest: created.policy.policyDigest,
       confirmation: 'ENABLE_AUTONOMOUS_PR_DELIVERY',
@@ -94,7 +96,7 @@ describe('autonomous delivery governance migration', () => {
     });
     expect(activated.policy.status).toBe('active');
     const activationReplay = await activateAutonomousDeliveryPolicy({
-      workspaceId: 'ws-delivery-policy',
+      workspaceId,
       policyId: created.policy.id,
       expectedPolicyDigest: created.policy.policyDigest,
       confirmation: 'ENABLE_AUTONOMOUS_PR_DELIVERY',
@@ -110,7 +112,7 @@ describe('autonomous delivery governance migration', () => {
     )).rejects.toThrow('policy scope and authority are immutable');
 
     const revoked = await revokeAutonomousDeliveryPolicy({
-      workspaceId: 'ws-delivery-policy',
+      workspaceId,
       policyId: created.policy.id,
       reason: 'Operator revoked the standing policy after review.',
       principal,
@@ -120,7 +122,7 @@ describe('autonomous delivery governance migration', () => {
     expect(revoked.policy.status).toBe('revoked');
 
     await expect(activateAutonomousDeliveryPolicy({
-      workspaceId: 'ws-delivery-policy',
+      workspaceId,
       policyId: created.policy.id,
       expectedPolicyDigest: created.policy.policyDigest,
       confirmation: 'ENABLE_AUTONOMOUS_PR_DELIVERY',
@@ -131,27 +133,29 @@ describe('autonomous delivery governance migration', () => {
   });
 
   test('enforces exact evidence identity and blocks evidence update/delete', async () => {
-    await workspaceFixture('ws-delivery-evidence');
+    const workspaceId = `ws-delivery-evidence-${crypto.randomUUID()}`;
+    await workspaceFixture(workspaceId);
     const run = await queryOne<{ id: number }>(
       `INSERT INTO pipeline_runs (spec_path, workspace_id, status, branch_name)
-       VALUES ('forge/specs/approved/safe-delivery.json', 'ws-delivery-evidence', 'done', 'run/safe-delivery')
+       VALUES ('forge/specs/approved/safe-delivery.json', $1, 'done', 'run/safe-delivery')
        RETURNING id`,
+      [workspaceId],
     );
     expect(run).toBeDefined();
-    const evidenceId = '20000000-0000-4000-8000-000000000001';
+    const evidenceId = crypto.randomUUID();
     await execute(
       `INSERT INTO github_pr_delivery_evidence
-        (id, workspace_id, run_id, repo_owner, repo_name, pr_number, pr_url, pr_state,
-         draft, merged, head_ref, base_ref, head_sha, base_sha, mergeable,
+        (id, workspace_id, run_id, repo_owner, repo_name, repository_authority_source,
+         pr_number, pr_url, pr_state, draft, merged, head_ref, base_ref, head_sha, base_sha, mergeable,
          mergeable_state, comparison_status, ahead_by, behind_by, branch_fresh,
          checks, reviews, check_summary, review_summary, provider_observed_at,
          observed_by_principal_id, observed_by_display_label, payload_hash)
-       VALUES ($1, 'ws-delivery-evidence', $2, 'getrorca', 'rorca', 42,
+       VALUES ($1, $2, $3, 'getrorca', 'rorca', 'pat-oauth-fallback', 42,
          'https://github.com/getrorca/rorca/pull/42', 'open', FALSE, FALSE,
-         'run/safe-delivery', 'main', $3, $4, TRUE, 'clean', 'ahead', 2, 0, TRUE,
+         'run/safe-delivery', 'main', $4, $5, TRUE, 'clean', 'ahead', 2, 0, TRUE,
          '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb, NOW(),
-         'operator-1', 'operator@example.test', $5)`,
-      [evidenceId, run!.id, 'a'.repeat(40), 'b'.repeat(40), `sha256:${'c'.repeat(64)}`],
+         'operator-1', 'operator@example.test', $6)`,
+      [evidenceId, workspaceId, run!.id, 'a'.repeat(40), 'b'.repeat(40), `sha256:${'c'.repeat(64)}`],
     );
 
     await expect(execute(

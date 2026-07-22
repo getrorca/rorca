@@ -133,6 +133,8 @@ function hasDockerSidecar(dbMode: 'native' | 'docker' | 'byop'): boolean {
  *                         available: { type: boolean }
  *                         endpoint: { type: string }
  *                         idempotency: { type: string, enum: [stable-uuid] }
+ *                         humanAuthorityVersion: { type: string, enum: [provider-human-event.v1] }
+ *                         serviceRelayRequiresProviderHuman: { type: boolean, enum: [true] }
  *                 databaseCapability:
  *                   type: object
  *                   description: Canonical database runtime capability model used by frontend and operators.
@@ -178,6 +180,8 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
           replay: 'exact-request-by-stable-uuid',
           sourceTenantBinding: 'slack-team-v1',
           contextSafetyVersion: 'rorca-context-safety.v1',
+          humanAuthorityVersion: 'provider-human-event.v1',
+          serviceRelayRequiresProviderHuman: true,
         },
         governedRetry: {
           available: true,

@@ -21,6 +21,7 @@ import { cacheStats } from '../lib/context-cache';
 import { getMcpTransportCount } from '../lib/mcp-http';
 import { buildDatabaseCapability, buildDatabaseSetupGuidance, type DatabaseProvider } from '../lib/db-strategy';
 import { HealthProbeTimeoutError, withHealthProbeDeadline } from '../lib/bounded-health-probe';
+import { getPgBossTableSql } from '../lib/pg-boss-schema';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -545,7 +546,7 @@ async function getActiveJobs(): Promise<Array<{ id: string; name: string; state:
   try {
     const rows = await query<{ id: string; name: string; state: string; data: Record<string, unknown>; createdon: string }>(
       `SELECT id, name, state, data, createdon
-       FROM pgboss.job
+       FROM ${getPgBossTableSql('job')}
        WHERE name IN ('pipeline:run', 'pipeline:retry', 'pipeline:cancel')
          AND state IN ('created', 'active')
        ORDER BY createdon ASC
@@ -605,7 +606,7 @@ async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
   try {
     // pgboss.schedule table: columns name, cron, data, timezone
     const rows = await query<{ name: string; cron: string }>(
-      `SELECT name, cron FROM pgboss.schedule WHERE name LIKE 'pipeline:cron:%' ORDER BY name ASC`,
+      `SELECT name, cron FROM ${getPgBossTableSql('schedule')} WHERE name LIKE 'pipeline:cron:%' ORDER BY name ASC`,
       [],
     );
 

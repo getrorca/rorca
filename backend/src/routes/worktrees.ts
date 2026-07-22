@@ -59,8 +59,11 @@ async function emitWalEvent(eventType: string, workspaceId: string, payload: Rec
  *   branch refs/heads/main
  *   <blank line>
  */
-function isExistingGitWorktree(wtPath: string): boolean {
-  return fs.existsSync(path.join(wtPath, '.git'));
+function isExistingGitWorktree(wtPath: string, isBare = false): boolean {
+  if (fs.existsSync(path.join(wtPath, '.git'))) return true;
+  return isBare
+    && fs.existsSync(path.join(wtPath, 'HEAD'))
+    && fs.existsSync(path.join(wtPath, 'objects'));
 }
 
 function parsePorcelain(output: string): GitWorktree[] {
@@ -128,37 +131,6 @@ function parsePorcelain(output: string): GitWorktree[] {
  *                   type: array
  *                   items: { $ref: '#/components/schemas/GitWorktree' }
  *       404: { description: "Workspace not found" }
- *   post:
- *     x-rorca-native-api: true
- *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     tags: [Worktrees]
- *     summary: Create a new git worktree
- *     operationId: createWorktree
- *     description: Creates a new git worktree with a new branch in the workspace repository.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId, branchName]
- *             properties:
- *               workspaceId: { type: string }
- *               branchName: { type: string }
- *               baseBranch: { type: string }
- *               worktreePath: { type: string }
- *     responses:
- *       201:
- *         description: Worktree created
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok: { type: boolean }
- *                 worktreePath: { type: string }
- *                 branchName: { type: string }
- *       409: { description: "Branch already exists" }
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
@@ -181,7 +153,7 @@ router.get('/', async (req: Request, res: Response) => {
       // Non-fatal: list can still be parsed and stale paths filtered below.
     }
     const output = await git.raw(['worktree', 'list', '--porcelain']);
-    const worktrees = parsePorcelain(output).filter((wt) => isExistingGitWorktree(wt.path));
+    const worktrees = parsePorcelain(output).filter((wt) => isExistingGitWorktree(wt.path, wt.isBare));
 
     res.json({ worktrees });
   } catch (error: any) {

@@ -6,6 +6,7 @@
  */
 
 import type { RequestHandler } from 'express';
+import { INTERNAL_SERVICE_USER_ID } from './auth-utils';
 import { getEffectiveUser } from './get-user';
 import { verifyLicense } from './license-verifier';
 import { logger } from './logger';
@@ -52,9 +53,34 @@ export function planGate(): RequestHandler {
         return;
       }
       if (nativeApi) {
-        // Native operations are explicitly classified out of generated CLI/MCP
-        // surfaces. Preserve their route-level HTTP authorization semantics;
-        // this gate must not silently strengthen existing native contracts.
+        // Native operations are dashboard/local-operator surfaces, not service
+        // capabilities. Internal callers must use an explicitly tiered contract;
+        // their synthetic admin role must never collapse into human authority.
+        const authenticated = req.user;
+        const servicePrincipal = authenticated?.id === INTERNAL_SERVICE_USER_ID
+          || authenticated?.id === 'rorca-hermes-service'
+          || req.headers['x-rorca-service'] !== undefined;
+        if (servicePrincipal) {
+          res.status(403).json({
+            error: 'Native API requires human administrator authority',
+            code: 'NATIVE_API_SERVICE_DENIED',
+          });
+          return;
+        }
+
+        const user = await getEffectiveUser(req);
+        if (!user) {
+          res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
+          return;
+        }
+        if (user.role !== 'admin') {
+          res.status(403).json({
+            error: 'Native API requires local administrator authority',
+            code: 'NATIVE_API_ADMIN_REQUIRED',
+          });
+          return;
+        }
+
         next();
         return;
       }

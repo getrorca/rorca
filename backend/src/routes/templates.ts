@@ -163,28 +163,6 @@ async function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Template' }
  *       400: { description: "Missing required fields" }
- *   get:
- *     x-rorca-native-api: true
- *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     tags: [Templates]
- *     summary: List templates
- *     operationId: listTemplates
- *     description: Returns paginated templates filtered by scope (all, personal, or team) with ratings and author info.
- *     parameters:
- *       - in: query
- *         name: scope
- *         schema: { type: string, enum: [all, personal, team], default: all }
- *     responses:
- *       200:
- *         description: List of templates
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 templates:
- *                   type: array
- *                   items: { $ref: '#/components/schemas/Template' }
  */
 router.post('/', async (req: Request, res: Response) => {
   try {
@@ -499,21 +477,6 @@ router.post('/:id/use', async (req: Request, res: Response) => {
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Template' }
- *       404: { description: "Template not found" }
- *   delete:
- *     x-rorca-native-api: true
- *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     tags: [Templates]
- *     summary: Delete a template
- *     operationId: deleteTemplate
- *     description: Permanently deletes the specified template and its associated ratings.
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       204: { description: "Deleted" }
  *       404: { description: "Template not found" }
  */
 router.get('/:id', async (req: Request, res: Response) => {

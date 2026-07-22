@@ -290,7 +290,6 @@ export const TaskManifestSchema = z.object({
     addCustomIssue(ctx, ['boundedScope', 'allowedPaths'], 'Direct task-manifest execution requires at least one host-enforced allowed path');
   }
   const allowed = manifest.boundedScope.allowedPaths;
-  const forbidden = manifest.boundedScope.forbiddenPaths;
   for (const [taskIndex, task] of manifest.tasks.entries()) {
     if (task.targetPaths.length === 0) {
       addCustomIssue(ctx, ['tasks', taskIndex, 'targetPaths'], 'Every direct task-manifest task requires an explicit target path');

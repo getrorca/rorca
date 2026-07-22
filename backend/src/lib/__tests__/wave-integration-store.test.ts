@@ -15,7 +15,7 @@ import {
 const SHA = (character: string): string => character.repeat(40);
 const HASH = (character: string): string => character.repeat(64);
 
-test('production integration store persists and replays the exact validated state machine', async () => {
+test('production integration store persists exact identity and refuses validation without a host recovery packet', async () => {
   const workspaceId = `wave-store-${randomUUID()}`;
   let runId: number | undefined;
   try {
@@ -49,15 +49,15 @@ test('production integration store persists and replays the exact validated stat
     const validationIdentity = {
       validator: 'test-validator', revision: SHA('d'), treeHash: SHA('e'), contractHash: HASH('f'),
     };
-    expect((await advanceDurableWaveIntegration({
+    await expect(advanceDurableWaveIntegration({
       identity,
       from: 'integrated',
       to: 'integrated_validated',
       resultingHead: SHA('d'),
       validationIdentity,
-    }))).toMatchObject({ state: 'integrated_validated', resultingHead: SHA('d'), validationIdentity });
+    })).rejects.toThrow(/immutable host recovery packet/);
     expect(await readDurableWaveIntegration({ runId, storyId: identity.storyId, attempt: 1 }))
-      .toMatchObject({ state: 'integrated_validated', integrationOrder: 200_000 });
+      .toMatchObject({ state: 'integrated', integrationOrder: 200_000 });
     await expect(advanceDurableWaveIntegration({
       identity: { ...identity, expectedParentHead: SHA('9') },
       from: 'integrated',

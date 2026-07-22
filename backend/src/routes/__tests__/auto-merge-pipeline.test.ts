@@ -6,18 +6,12 @@
  */
 
 /**
- * auto-merge-pipeline.test.ts — Comprehensive integration tests for the
- * auto-merge backend pipeline.
+ * auto-merge-pipeline.test.ts — Release-1 fail-closed coverage for the retired
+ * auto-merge/retry actuator plus retained persistence/schema compatibility.
  *
- * Covers:
- *   1. retry-merge endpoint: 404 / 409 / 200 responses
- *   2. WAL event emission for merge lifecycle (worktree_merged, worktree_merge_failed)
- *   3. merge_status column transitions (null→merging→merged, null→merging→failed)
- *   4. pg-boss pipeline:merge job enqueue with correct payload
- *   5. performMerge() unit tests with mocked simple-git
- *   6. PipelineMergeJobPayload Zod schema validation
- *
- * Engine-agnostic — merge logic runs in the worker independently of agent type.
+ * The canonical release reconciler may integrate an exact immutable release
+ * identity. Legacy HTTP retry and direct performMerge calls cannot mint that
+ * authority, enqueue jobs, mutate merge state, write WAL, or touch Git.
  */
 
 import * as fs from 'fs';
@@ -27,10 +21,31 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
+import { performMerge } from '../../lib/merge-handler';
 
 jest.setTimeout(90_000);
 
-const WS_ID = 'ws-auto-merge-test';
+const WS_ID = `ws-auto-merge-test-${process.pid}-${Date.now()}`;
+const mockBossSend = jest.fn().mockResolvedValue('mock-merge-job-id');
+
+jest.mock('../../lib/llm-client', () => ({
+  chatComplete: jest.fn(),
+  getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+  isValidModel: jest.fn().mockReturnValue(true),
+  DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
+  SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+}));
+
+jest.mock('../../lib/pg-boss', () => ({
+  initBoss: jest.fn().mockResolvedValue(undefined),
+  getBoss: jest.fn().mockReturnValue({
+    send: mockBossSend,
+    work: jest.fn(),
+    stop: jest.fn().mockResolvedValue(undefined),
+  }),
+}));
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -89,49 +104,25 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
   let tmpDir: string;
   let wsDir: string;
   let authToken: string;
-  let mockBossSend: jest.Mock;
 
-  beforeEach(async () => {
-    jest.resetModules();
-
-    mockBossSend = jest.fn().mockResolvedValue('mock-merge-job-id');
-
-    jest.mock('../../lib/llm-client', () => ({
-      chatComplete: jest.fn(),
-      getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-      isValidModel: jest.fn().mockReturnValue(true),
-      DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-      resolveVaultProvider: jest.fn().mockReturnValue(null),
-      getModelInfo: jest.fn().mockReturnValue(undefined),
-      SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-    }));
-
-    jest.mock('../../lib/pg-boss', () => ({
-      initBoss: jest.fn().mockResolvedValue(undefined),
-      getBoss: jest.fn().mockReturnValue({
-        send: mockBossSend,
-        work: jest.fn(),
-        stop: jest.fn().mockResolvedValue(undefined),
-      }),
-    }));
-
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-auto-merge-test-'));
+  beforeAll(async () => {
     process.env.NODE_ENV = 'test';
-
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-auto-merge-test-'));
+    wsDir = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
     const serverMod = require('../../server');
     app = serverMod.default;
     authToken = await getAuthToken(app);
-
     await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
+  });
 
-    wsDir = path.join(tmpDir, 'workspace');
-    fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
-
+  beforeEach(async () => {
+    jest.clearAllMocks();
     await cleanupTestData();
     await ensureWorkspace(wsDir);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
     delete process.env.NODE_ENV;
   });
@@ -143,10 +134,14 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
       .send();
   }
 
-  test('returns 404 when runId does not exist', async () => {
-    const res = await postRetryMerge(999999);
-    expect(res.status).toBe(404);
-    expect(res.body.error).toBeDefined();
+  function expectRetired(response: { status: number; body: Record<string, any> }): void {
+    expect(response.status).toBe(409);
+    expect(response.body.error).toContain('Manual retry-merge is retired');
+    expect(mockBossSend).not.toHaveBeenCalled();
+  }
+
+  test('retires the actuator before looking up a nonexistent run', async () => {
+    expectRetired(await postRetryMerge(999999));
   });
 
   test('returns 400 for non-numeric runId', async () => {
@@ -158,42 +153,35 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
   test('returns 409 when merge_status is null (never attempted)', async () => {
     const runId = await seedRun({ merge_status: null });
     const res = await postRetryMerge(runId);
-    expect(res.status).toBe(409);
-    expect(res.body.error).toContain('null');
+    expectRetired(res);
   });
 
   test('returns 409 when merge_status is already merging', async () => {
     const runId = await seedRun({ merge_status: 'merging' });
     const res = await postRetryMerge(runId);
-    expect(res.status).toBe(409);
-    expect(res.body.error).toContain('merging');
+    expectRetired(res);
   });
 
   test('returns 409 when merge_status is already merged (success)', async () => {
     const runId = await seedRun({ merge_status: 'merged' });
     const res = await postRetryMerge(runId);
-    expect(res.status).toBe(409);
-    expect(res.body.error).toContain('merged');
+    expectRetired(res);
   });
 
   test('returns 409 when run has no branch_name', async () => {
     const runId = await seedRun({ merge_status: 'failed', branch_name: null });
     const res = await postRetryMerge(runId);
-    expect(res.status).toBe(409);
-    expect(res.body.error).toContain('branch_name');
+    expectRetired(res);
   });
 
-  test('returns 200 with { queued: true } on successful retry initiation', async () => {
+  test('returns the retired response for a formerly eligible retry', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
-    const res = await postRetryMerge(runId);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, runId: Number(runId), queued: true });
+    expectRetired(await postRetryMerge(runId));
   });
 
   // ── merge_status transition via endpoint ──
 
-  test('retry-merge sets merge_status from failed to merging', async () => {
+  test('retired retry-merge leaves failed merge state unchanged', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     const before = await queryOne<{ merge_status: string | null }>(
@@ -202,72 +190,40 @@ describe('POST /api/pipeline/runs/:runId/retry-merge', () => {
     );
     expect(before!.merge_status).toBe('failed');
 
-    await postRetryMerge(runId);
+    expectRetired(await postRetryMerge(runId));
 
     const after = await queryOne<{ merge_status: string | null }>(
       'SELECT merge_status FROM pipeline_runs WHERE id = $1',
       [runId],
     );
-    expect(after!.merge_status).toBe('merging');
+    expect(after!.merge_status).toBe('failed');
   });
 
   // ── pg-boss enqueue verification ──
 
-  test('enqueues pipeline:merge job with correct payload', async () => {
+  test('does not enqueue the retired pipeline:merge job', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
-    await postRetryMerge(runId);
-
-    expect(mockBossSend).toHaveBeenCalledTimes(1);
-    expect(mockBossSend).toHaveBeenCalledWith(
-      'pipeline:merge',
-      {
-        runId: Number(runId),
-        branch: 'feat/auto-merge-test-branch',
-        workspaceId: WS_ID,
-        posture: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', source: 'manual-retry' },
-      },
-      expect.objectContaining({
-        retryLimit: 0,
-        expireInSeconds: 3600,
-      }),
-    );
+    expectRetired(await postRetryMerge(runId));
   });
 
-  test('payload normalizes the positive BIGINT runId to the numeric worker contract', async () => {
+  test('does not create a BIGINT-normalized payload for the retired actuator', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
-    await postRetryMerge(runId);
-
-    const payload = mockBossSend.mock.calls[0][1];
-    expect(typeof payload.runId).toBe('number');
-    expect(payload.runId).toBe(Number(runId));
-    expect(Number.isSafeInteger(payload.runId)).toBe(true);
+    expectRetired(await postRetryMerge(runId));
   });
 
-  test('payload branch matches run branch_name', async () => {
+  test('does not copy a branch name into a retired merge payload', async () => {
     const runId = await seedRun({ merge_status: 'failed', branch_name: 'feat/my-branch-123' });
-    await postRetryMerge(runId);
-
-    const payload = mockBossSend.mock.calls[0][1];
-    expect(payload.branch).toBe('feat/my-branch-123');
+    expectRetired(await postRetryMerge(runId));
   });
 
-  test('payload workspaceId matches run workspace_id', async () => {
+  test('does not copy workspace authority into a retired merge payload', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
-    await postRetryMerge(runId);
-
-    const payload = mockBossSend.mock.calls[0][1];
-    expect(payload.workspaceId).toBe(WS_ID);
+    expectRetired(await postRetryMerge(runId));
   });
 
-  test('payload conforms to PipelineMergeJobPayload Zod schema', async () => {
-    const { PipelineMergeJobPayload } = require('../../lib/pg-boss-schemas');
-
+  test('does not construct a legacy PipelineMergeJobPayload', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
-    await postRetryMerge(runId);
-
-    const payload = mockBossSend.mock.calls[0][1];
-    const parsed = PipelineMergeJobPayload.safeParse(payload);
-    expect(parsed.success).toBe(true);
+    expectRetired(await postRetryMerge(runId));
   });
 
   test('does not enqueue job when merge_status is not failed', async () => {
@@ -526,40 +482,25 @@ describe('WAL events for merge lifecycle', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('performMerge()', () => {
-  let performMerge: typeof import('../../lib/merge-handler').performMerge;
   let mockGitInstance: Record<string, jest.Mock>;
   let tmpDir: string;
   let wsDir: string;
 
   beforeEach(async () => {
-    jest.resetModules();
-
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-perform-merge-test-'));
     wsDir = path.join(tmpDir, 'workspace');
     fs.mkdirSync(wsDir, { recursive: true });
 
+    // Legacy simple-git effects must remain absent when immutable release
+    // identity is missing; these spies document the no-effect boundary.
     mockGitInstance = {
-      status: jest.fn().mockResolvedValue({ files: [] }),
-      stash: jest.fn().mockResolvedValue(''),
-      merge: jest.fn().mockResolvedValue(''),
-      raw: jest.fn().mockResolvedValue(''),
-      add: jest.fn().mockResolvedValue(''),
-      commit: jest.fn().mockResolvedValue(''),
+      status: jest.fn(),
+      stash: jest.fn(),
+      merge: jest.fn(),
+      raw: jest.fn(),
+      add: jest.fn(),
+      commit: jest.fn(),
     };
-
-    jest.mock('simple-git', () => ({
-      __esModule: true,
-      default: jest.fn(() => mockGitInstance),
-    }));
-
-    jest.mock('../../lib/sse-hub', () => ({
-      broadcastAll: jest.fn(),
-      subscribe: jest.fn(() => jest.fn()),
-      attachSSE: jest.fn(),
-    }));
-
-    const mergeHandlerMod = require('../../lib/merge-handler');
-    performMerge = mergeHandlerMod.performMerge;
 
     await cleanupTestData();
     await ensureWorkspace(wsDir);
@@ -569,10 +510,10 @@ describe('performMerge()', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('returns { success: false } when run does not exist', async () => {
+  test('refuses missing host release identity before run lookup', async () => {
     const result = await performMerge(999999, 'feat/nonexistent', '/tmp/ws');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('not found');
+    expect(result.error).toContain('Host release identity is required');
   });
 
   test('refuses a final base merge for branch-only/no-auto-merge runs and preserves their worktree', async () => {
@@ -587,27 +528,27 @@ describe('performMerge()', () => {
 
     const result = await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
 
-    expect(result).toMatchObject({ success: false, error: expect.stringContaining('autoMerge=true') });
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('Host release identity is required') });
     expect(mockGitInstance.merge).not.toHaveBeenCalled();
     expect(mockGitInstance.raw).not.toHaveBeenCalledWith(['worktree', 'remove', '--force', worktreeDir]);
     expect(fs.existsSync(worktreeDir)).toBe(true);
   });
 
-  test('returns { success: false } when no branch name available', async () => {
+  test('refuses missing host release identity before branch fallback', async () => {
     const runId = await seedRun({ branch_name: null, merge_status: null });
 
     const result = await performMerge(runId, '', wsDir);
     expect(result.success).toBe(false);
-    expect(result.error).toContain('No branch name');
+    expect(result.error).toContain('Host release identity is required');
 
     const row = await queryOne<{ merge_status: string | null }>(
       'SELECT merge_status FROM pipeline_runs WHERE id = $1',
       [runId],
     );
-    expect(row!.merge_status).toBe('failed');
+    expect(row!.merge_status).toBeNull();
   });
 
-  test('sets merge_status to merging then to failed on error', async () => {
+  test('leaves failed state unchanged without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     mockGitInstance.merge.mockRejectedValueOnce(new Error('Pre-check: unexpected error'));
@@ -621,7 +562,7 @@ describe('performMerge()', () => {
     expect(row!.merge_status).toBe('failed');
   });
 
-  test('successful fast-forward merge returns { success: true, mergeCommitSha }', async () => {
+  test('does not fast-forward a legacy direct merge fixture', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     mockGitInstance.merge.mockResolvedValue('');
@@ -634,17 +575,17 @@ describe('performMerge()', () => {
 
     const result = await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
 
-    expect(result.success).toBe(true);
-    expect(result.mergeCommitSha).toBe('abc123sha');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Host release identity is required');
 
     const row = await queryOne<{ merge_status: string | null }>(
       'SELECT merge_status FROM pipeline_runs WHERE id = $1',
       [runId],
     );
-    expect(row!.merge_status).toBe('merged');
+    expect(row!.merge_status).toBe('failed');
   });
 
-  test('merge with code conflicts returns { success: false, conflictFiles }', async () => {
+  test('does not inspect conflict files without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     let mergeCallCount = 0;
@@ -666,9 +607,8 @@ describe('performMerge()', () => {
     const result = await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
 
     expect(result.success).toBe(false);
-    expect(result.conflictFiles).toContain('src/app.ts');
-    expect(result.conflictFiles).toContain('src/server.ts');
-    expect(result.error).toContain('Code conflicts');
+    expect(result.conflictFiles).toBeUndefined();
+    expect(result.error).toContain('Host release identity is required');
 
     const row = await queryOne<{ merge_status: string | null }>(
       'SELECT merge_status FROM pipeline_runs WHERE id = $1',
@@ -677,7 +617,7 @@ describe('performMerge()', () => {
     expect(row!.merge_status).toBe('failed');
   });
 
-  test('merge with only tracking file conflicts auto-resolves and succeeds', async () => {
+  test('does not auto-resolve tracking conflicts without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     let mergeCallCount = 0;
@@ -699,17 +639,17 @@ describe('performMerge()', () => {
 
     const result = await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
 
-    expect(result.success).toBe(true);
-    expect(result.mergeCommitSha).toBe('tracking-merge-sha');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Host release identity is required');
 
     const row = await queryOne<{ merge_status: string | null }>(
       'SELECT merge_status FROM pipeline_runs WHERE id = $1',
       [runId],
     );
-    expect(row!.merge_status).toBe('merged');
+    expect(row!.merge_status).toBe('failed');
   });
 
-  test('stash is created when workspace has uncommitted changes', async () => {
+  test('does not stash workspace changes without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     mockGitInstance.status.mockResolvedValue({ files: [{ path: 'dirty.ts' }] });
@@ -721,13 +661,10 @@ describe('performMerge()', () => {
 
     await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
 
-    expect(mockGitInstance.stash).toHaveBeenCalledWith(
-      expect.arrayContaining(['push', '--include-untracked']),
-    );
-    expect(mockGitInstance.stash).toHaveBeenCalledWith(['pop']);
+    expect(mockGitInstance.stash).not.toHaveBeenCalled();
   });
 
-  test('stash is restored even when merge fails', async () => {
+  test('does not enter stash restoration without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     mockGitInstance.status.mockResolvedValue({ files: [{ path: 'dirty.ts' }] });
@@ -737,10 +674,10 @@ describe('performMerge()', () => {
 
     const stashCalls = mockGitInstance.stash.mock.calls;
     const popCall = stashCalls.find((c: string[][]) => c[0]?.[0] === 'pop');
-    expect(popCall).toBeDefined();
+    expect(popCall).toBeUndefined();
   });
 
-  test('"Already up to date" merge is treated as clean pre-check', async () => {
+  test('does not execute the legacy merge pre-check without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     let mergeCallCount = 0;
@@ -758,10 +695,11 @@ describe('performMerge()', () => {
     });
 
     const result = await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Host release identity is required');
   });
 
-  test('worktree_merged WAL event is emitted on success', async () => {
+  test('does not emit a success WAL event without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     mockGitInstance.merge.mockResolvedValue('');
@@ -778,14 +716,10 @@ describe('performMerge()', () => {
       [WS_ID],
     );
 
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
-    expect(payload.run_id).toBe(Number(runId));
-    expect(payload.branchName).toBe('feat/auto-merge-test-branch');
-    expect(payload.mergeCommitSha).toBe('wal-test-sha');
+    expect(events).toHaveLength(0);
   });
 
-  test('worktree_merge_failed WAL event is emitted on conflict', async () => {
+  test('does not emit a conflict WAL event without host release identity', async () => {
     const runId = await seedRun({ merge_status: 'failed' });
 
     let mergeCallCount = 0;
@@ -812,13 +746,10 @@ describe('performMerge()', () => {
       [WS_ID],
     );
 
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    const payload = typeof events[0].payload === 'string' ? JSON.parse(events[0].payload) : events[0].payload;
-    expect(payload.run_id).toBe(Number(runId));
-    expect(payload.conflictFiles).toContain('src/conflict-file.ts');
+    expect(events).toHaveLength(0);
   });
 
-  test('worktree directory removal is attempted after successful merge', async () => {
+  test('does not remove a worktree without host release identity', async () => {
     const worktreeDir = path.join(tmpDir, 'worktree-to-remove');
     fs.mkdirSync(worktreeDir, { recursive: true });
 
@@ -836,12 +767,10 @@ describe('performMerge()', () => {
 
     await performMerge(runId, 'feat/auto-merge-test-branch', wsDir);
 
-    expect(mockGitInstance.raw).toHaveBeenCalledWith(
-      ['worktree', 'remove', '--force', worktreeDir],
-    );
+    expect(mockGitInstance.raw).not.toHaveBeenCalled();
   });
 
-  test('worktree_path is cleared in pipeline_runs after successful merge', async () => {
+  test('does not clear worktree_path without host release identity', async () => {
     const runId = await seedRun({
       merge_status: 'failed',
       worktree_path: '/tmp/worktree-to-clear',
@@ -859,10 +788,10 @@ describe('performMerge()', () => {
       'SELECT worktree_path FROM pipeline_runs WHERE id = $1',
       [runId],
     );
-    expect(row!.worktree_path).toBeNull();
+    expect(row!.worktree_path).toBe('/tmp/worktree-to-clear');
   });
 
-  test('uses branch_name from DB when branchName arg is empty', async () => {
+  test('does not use DB branch fallback to mint host release identity', async () => {
     const runId = await seedRun({
       merge_status: 'failed',
       branch_name: 'feat/from-db-branch',
@@ -876,10 +805,9 @@ describe('performMerge()', () => {
 
     const result = await performMerge(runId, '', wsDir);
 
-    expect(result.success).toBe(true);
-    expect(mockGitInstance.merge).toHaveBeenCalledWith(
-      expect.arrayContaining(['feat/from-db-branch']),
-    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Host release identity is required');
+    expect(mockGitInstance.merge).not.toHaveBeenCalled();
   });
 });
 

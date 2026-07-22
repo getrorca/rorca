@@ -8,13 +8,10 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { z } from 'zod';
-import { query, queryOne, execute, transaction } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
-import { logger } from '../lib/logger';
-import { ValidationError, AuthError, ConflictError } from '../lib/errors';
+import { ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
-import { validateBody } from '../lib/validate';
 import { authRequired } from '../lib/auth-utils';
 
 const router = Router();
@@ -88,9 +85,9 @@ router.get('/me', async (req: Request, res: Response) => {
  *     x-rorca-native-api: true
  *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Users]
- *     summary: Delete current Supabase user account
+ *     summary: Report hosted account deletion as unavailable in OSS local mode
  *     operationId: deleteCurrentUser
- *     description: Permanently deletes the authenticated user's account via the Supabase Admin API. Confirmation must match DELETE or the user's email.
+ *     description: Account deletion requires the hosted identity authority and is explicitly unavailable in the OSS local release.
  *     requestBody:
  *       required: true
  *       content:
@@ -102,12 +99,8 @@ router.get('/me', async (req: Request, res: Response) => {
  *               confirmation:
  *                 type: string
  *     responses:
- *       200:
- *         description: Account deleted
- *       400:
- *         description: Invalid confirmation
- *       401:
- *         description: Not authenticated
+ *       501:
+ *         description: Hosted account deletion is unavailable in the OSS edition
  */
 router.delete('/me', authRequired, async (_req: Request, res: Response) => {
   res.status(501).json({
@@ -308,107 +301,6 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
   } catch (error: any) {
     handleRouteError(res, error, '[Users] List workspace members');
   }
-});
-
-/**
- * @swagger
- * /api/users/me:
- *   delete:
- *     x-rorca-native-api: true
- *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     tags: [Users]
- *     summary: Permanently delete user account
- *     operationId: deleteMyAccount
- *     description: |
- *       Hard-deletes personal data stored by the OSS edition and anonymizes
- *       operational records (pipeline_runs.triggered_by → 'deleted_user',
- *       story_comments.user_id → NULL). Requires password confirmation.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [confirmation]
- *             properties:
- *               confirmation: { type: string, example: delete my account }
- *     responses:
- *       200: { description: Account deleted }
- *       400: { description: Confirmation text required }
- *       409: { description: Active pipeline run prevents deletion }
- */
-const deleteBodySchema = z.object({
-  confirmation: z.string().trim().min(1, 'Confirmation is required'),
-});
-
-router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: Response) => {
-  const { confirmation } = req.body as z.infer<typeof deleteBodySchema>;
-  if (confirmation.toLowerCase() !== 'delete my account') {
-    throw new ValidationError('Confirmation must be exactly "delete my account"');
-  }
-
-  // Identify user — route-level auth since global auth is bypassed
-  const effectiveUser = await getEffectiveUser(req);
-  if (!effectiveUser) {
-    throw new AuthError('Authentication required');
-  }
-  const userId = effectiveUser.id;
-
-  const user = await queryOne<{ id: string; email: string }>(
-    'SELECT id, email FROM users WHERE id = $1',
-    [userId],
-  );
-  if (!user) {
-    throw new AuthError('Authentication required');
-  }
-
-  // Block deletion if any pipeline run is active for user's workspaces
-  const activeRun = await queryOne<{ id: number }>(
-    `SELECT id FROM pipeline_runs
-     WHERE status = 'running'
-       AND workspace_id IN (SELECT id FROM workspaces WHERE owner_id = $1)
-     LIMIT 1`,
-    [userId],
-  );
-  if (activeRun) {
-    throw new ConflictError(
-      'Cannot delete account while a pipeline run is active. Cancel all running pipelines first.',
-    );
-  }
-
-  // Emit WAL event before deletion (audit trail)
-  await execute(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('account_deleted', '', $1)",
-    [JSON.stringify({ userId: user.id, email: user.email, deletedAt: new Date().toISOString() })],
-  );
-
-  await transaction(async (client) => {
-    // Anonymize operational records BEFORE user delete (avoids FK violations)
-    await client.query(
-      `UPDATE pipeline_runs SET triggered_by = 'deleted_user'
-       WHERE workspace_id IN (SELECT id FROM workspaces WHERE owner_id = $1)`,
-      [userId],
-    );
-    await client.query(
-      'UPDATE story_comments SET user_id = NULL WHERE user_id = $1',
-      [userId],
-    );
-
-    // Hard-delete personal data (child tables first, respecting FK order)
-    // Most have ON DELETE CASCADE, but explicit deletion ensures completeness
-    // and works even if FK cascades are changed later.
-    await client.query('DELETE FROM api_key_vault WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM notification_history WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM user_settings WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM provider_defaults WHERE user_id = $1', [userId]);
-
-    // Delete the user row last — CASCADE handles any remaining FKs
-    await client.query('DELETE FROM users WHERE id = $1', [userId]);
-  });
-
-  logger.info(`[Users] Account deleted: ${user.email} (id: ${userId}). Personal data removed, operational records anonymized.`);
-
-  res.json({ message: 'Your account has been deleted.' });
 });
 
 export default router;

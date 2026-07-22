@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
@@ -6,11 +6,10 @@
  */
 
 /**
- * jest.setup.ts — Jest globalSetup for PostgreSQL test database
+ * Jest global setup for the pre-provisioned certification database.
  *
- * Connects only to an explicitly configured PostgreSQL test database, verifies
- * the server-reported database name, runs migrations, and enables extensions.
- * Database/role provisioning is intentionally outside Jest.
+ * Authority objects are human-provisioned and immutable here. The harness
+ * verifies them, then applies only already-authorized application migrations.
  */
 
 import { Pool } from 'pg';
@@ -22,130 +21,70 @@ import {
 
 const TEST_DB_URL = resolveTestDatabaseUrl();
 
+interface AuthorityReadinessRow {
+  authenticated_role: boolean;
+  auth_schema: boolean;
+  rorca_schema: boolean;
+  auth_uid: boolean;
+  auth_jwt: boolean;
+  pgcrypto_extension: boolean;
+  vector_extension: boolean;
+  age_extension: boolean;
+  migrations_table: boolean;
+  age_skip_receipt: boolean;
+  password_hash_column: boolean;
+  workspace_members_table: boolean;
+}
+
+function missingAuthorityObjects(row: AuthorityReadinessRow | undefined): string[] {
+  if (!row) return ['authority readiness row'];
+  return Object.entries(row)
+    .filter(([, ready]) => ready !== true)
+    .map(([name]) => name);
+}
+
 export default async function globalSetup(): Promise<void> {
-  // Database creation is deliberately outside Jest. The configured login must
-  // already own a dedicated *_test database and need not have CREATEDB or any
-  // production privileges. Verify server truth before schema or data changes.
-  const verificationPool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
+  const pool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
   try {
-    const connected = await assertConnectedTestDatabase(verificationPool, TEST_DB_URL);
-    console.log(`[jest-setup] Verified dedicated database ${connected.database} as ${connected.user}`);
+    const connected = await assertConnectedTestDatabase(pool, TEST_DB_URL);
+    const readiness = await pool.query<AuthorityReadinessRow>(`
+      SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') AS authenticated_role,
+             to_regnamespace('auth') IS NOT NULL AS auth_schema,
+             to_regnamespace('rorca') IS NOT NULL AS rorca_schema,
+             to_regprocedure('auth.uid()') IS NOT NULL AS auth_uid,
+             to_regprocedure('auth.jwt()') IS NOT NULL AS auth_jwt,
+             EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto') AS pgcrypto_extension,
+             EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS vector_extension,
+             EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'age') AS age_extension,
+             to_regclass('public.schema_migrations') IS NOT NULL AS migrations_table,
+             EXISTS (
+               SELECT 1
+                 FROM public.schema_migrations
+                WHERE version = 50
+                  AND skipped_in_lite_mode = TRUE
+             ) AS age_skip_receipt,
+             EXISTS (
+               SELECT 1
+                 FROM information_schema.columns
+                WHERE table_schema = 'rorca'
+                  AND table_name = 'users'
+                  AND column_name = 'password_hash'
+             ) AS password_hash_column,
+             to_regclass('rorca.workspace_members') IS NOT NULL AS workspace_members_table
+    `);
+    const missing = missingAuthorityObjects(readiness.rows[0]);
+    if (missing.length > 0) {
+      throw new Error(
+        `[jest-setup] Pre-provisioned certification database is incomplete: ${missing.join(', ')}`,
+      );
+    }
+
+    // The migration runner verifies and advances application-owned migration
+    // state only. Authority objects above are never provisioned by this harness.
+    await runPgMigrations(pool);
+    console.log(`[jest-setup] Verified ${connected.user}@${connected.database}; application migrations are current`);
   } finally {
-    await verificationPool.end();
-  }
-
-  // Install AGE on a short-lived bootstrap connection so the main test pool
-  // doesn't inherit any extension setup instability during migrations.
-  const agePool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
-  try {
-    await assertConnectedTestDatabase(agePool, TEST_DB_URL);
-    await agePool.query('CREATE EXTENSION IF NOT EXISTS age');
-  } catch {
-    /* AGE may be unavailable on some hosts, non-fatal */
-  } finally {
-    await agePool.end();
-  }
-
-  // 2. Connect to the test DB and enable extensions + run migrations
-  //    Pool size 1 prevents AGE LOAD 'age' from poisoning idle connections
-  const testPool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
-  try {
-    await assertConnectedTestDatabase(testPool, TEST_DB_URL);
-
-    // Test harness shim for Supabase/PostgREST auth helpers used by RLS migrations.
-    // Local Postgres doesn't provide auth schema/functions, so create minimal stubs.
-    await testPool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-          CREATE ROLE authenticated;
-        END IF;
-      END $$;
-    `);
-
-    await testPool.query(`CREATE SCHEMA IF NOT EXISTS auth`);
-
-    await testPool.query(`
-      CREATE OR REPLACE FUNCTION auth.uid()
-      RETURNS UUID
-      LANGUAGE sql
-      STABLE
-      AS $$
-        SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid
-      $$
-    `);
-
-    await testPool.query(`
-      CREATE OR REPLACE FUNCTION auth.jwt()
-      RETURNS JSONB
-      LANGUAGE sql
-      STABLE
-      AS $$
-        SELECT COALESCE(NULLIF(current_setting('request.jwt.claims', true), ''), '{}')::jsonb
-      $$
-    `);
-
-    // Enable extensions — these are safe to run multiple times
-    try {
-      await testPool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto');
-    } catch { /* extension may not be available, non-fatal */ }
-    // Wave qualification requires pgvector; fail immediately rather than
-    // silently reducing coverage when the platform image is incomplete.
-    await testPool.query('CREATE EXTENSION IF NOT EXISTS vector');
-    // Tests run in lite-mode semantics. Pre-mark the AGE graph migration as
-    // skipped so globalSetup never executes LOAD 'age', which poisons later DDL
-    // in this local harness even when the migration is rolled back.
-    await testPool.query(`
-      CREATE TABLE IF NOT EXISTS public.schema_migrations (
-        version BIGINT PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        filename TEXT NOT NULL,
-        skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
-      )
-    `);
-    await testPool.query(`
-      INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode)
-      VALUES (50, '050_knowledge_graph.sql [skipped: test lite mode]', TRUE)
-      ON CONFLICT (version) DO NOTHING
-    `);
-
-    // 3. Run all pg-migrations
-    await runPgMigrations(testPool);
-    await testPool.query('SET search_path TO rorca, public');
-
-    // Test-compatibility shim: many legacy tests still insert password_hash even
-    // though the migrated local schema drops it. Re-add a harmless column in the
-    // test database only so older fixtures keep working.
-    await testPool.query(`
-      ALTER TABLE rorca.users
-      ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT 'x'
-    `);
-
-    // Test-compatibility shim: production auth-utils (and every RLS-aware route +
-    // test fixture) resolves workspace membership via a `workspace_members` table
-    // keyed by (workspace_id, user_auth_id, role). That table is not provisioned
-    // by the local pg-migrations set, so create it in the test DB only. Without it
-    // the shared analytics/RLS test fixtures fail in beforeEach before any
-    // assertion runs ("relation workspace_members does not exist").
-    await testPool.query(`
-      CREATE TABLE IF NOT EXISTS rorca.workspace_members (
-        workspace_id TEXT NOT NULL REFERENCES rorca.workspaces(id) ON DELETE CASCADE,
-        user_auth_id UUID NOT NULL,
-        role TEXT NOT NULL DEFAULT 'viewer',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (workspace_id, user_auth_id)
-      )
-    `);
-
-    // Test-only grant shim so RLS tests exercise policies instead of failing on SQL GRANTs.
-    await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
-    await testPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, rorca, auth TO authenticated`);
-    await testPool.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public, rorca TO authenticated`);
-    await testPool.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public, rorca, auth TO authenticated`);
-
-    console.log('[jest-setup] Migrations applied to test database');
-  } finally {
-    await testPool.end();
+    await pool.end();
   }
 
   // Pin the same immutable URL for worker processes.

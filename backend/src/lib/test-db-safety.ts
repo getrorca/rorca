@@ -10,6 +10,8 @@ import * as os from 'os';
 import * as path from 'path';
 
 export const TEST_DATABASE_SUFFIX = '_test';
+export const AUTHORIZED_TEST_DATABASE = 'rorca_cert_test';
+export const AUTHORIZED_TEST_USER = 'rorca_test_runner';
 const DEFAULT_LOCAL_ENV_PATH = path.join(os.homedir(), '.rorca', 'test-db.env');
 
 interface Queryable {
@@ -57,6 +59,24 @@ export function assertTestDatabaseUrl(databaseUrl: string, source = 'test databa
   return assertTestDatabaseName(databaseNameFromUrl(databaseUrl), source);
 }
 
+/**
+ * Certification is intentionally pinned to one pre-provisioned, mode-0600
+ * identity. A merely test-suffixed database is not sufficient authority.
+ */
+export function assertAuthorizedTestDatabaseUrl(
+  databaseUrl: string,
+  source = 'test database URL',
+): string {
+  const database = assertTestDatabaseUrl(databaseUrl, source);
+  const user = decodeURIComponent(new URL(databaseUrl).username);
+  if (database !== AUTHORIZED_TEST_DATABASE || user !== AUTHORIZED_TEST_USER) {
+    throw new Error(
+      `[test-db-safety] Refusing ${source}: only ${AUTHORIZED_TEST_USER}@${AUTHORIZED_TEST_DATABASE} is authorized`,
+    );
+  }
+  return database;
+}
+
 function parseEnvFile(content: string): Record<string, string> {
   const values: Record<string, string> = {};
   for (const rawLine of content.split(/\r?\n/)) {
@@ -97,19 +117,29 @@ function readLocalTestDatabaseUrl(env: NodeJS.ProcessEnv): string | undefined {
  * ignored: a test target must be explicit or come from the local 0600 file.
  */
 export function resolveTestDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
-  const databaseUrl = env.RORCA_TEST_DATABASE_URL
-    || readLocalTestDatabaseUrl(env)
-    || env.DATABASE_URL_TEST;
-
-  if (!databaseUrl) {
+  const fileDatabaseUrl = readLocalTestDatabaseUrl(env);
+  if (!fileDatabaseUrl) {
     throw new Error(
-      '[test-db-safety] No dedicated test database configured. Set RORCA_TEST_DATABASE_URL, '
-      + 'DATABASE_URL_TEST, or create ~/.rorca/test-db.env with mode 0600.',
+      `[test-db-safety] No authorized mode-0600 credential file configured for ${AUTHORIZED_TEST_USER}@${AUTHORIZED_TEST_DATABASE}`,
     );
   }
+  assertAuthorizedTestDatabaseUrl(fileDatabaseUrl, 'credential file test database URL');
 
-  assertTestDatabaseUrl(databaseUrl);
-  return databaseUrl;
+  // Worker/global-setup propagation may repeat the same immutable URL, but an
+  // ambient override must never redirect destructive fixtures to another host
+  // or identity.
+  for (const [key, value] of [
+    ['RORCA_TEST_DATABASE_URL', env.RORCA_TEST_DATABASE_URL],
+    ['DATABASE_URL_TEST', env.DATABASE_URL_TEST],
+  ] as const) {
+    if (value && value !== fileDatabaseUrl) {
+      throw new Error(
+        `[test-db-safety] Refusing ${key}: it does not match the authorized mode-0600 credential file for ${AUTHORIZED_TEST_USER}@${AUTHORIZED_TEST_DATABASE}`,
+      );
+    }
+  }
+
+  return fileDatabaseUrl;
 }
 
 /** Verify server truth immediately before any destructive test operation. */
@@ -117,8 +147,8 @@ export async function assertConnectedTestDatabase(
   client: Queryable,
   expectedUrl: string,
 ): Promise<ConnectedTestDatabase> {
-  const expectedDatabase = assertTestDatabaseUrl(expectedUrl);
-  const expectedUser = decodeURIComponent(new URL(expectedUrl).username);
+  const expectedDatabase = assertAuthorizedTestDatabaseUrl(expectedUrl);
+  const expectedUser = AUTHORIZED_TEST_USER;
   const result = await client.query<{ database: string; user: string; owner: string }>(
     `SELECT current_database() AS database,
             current_user AS user,

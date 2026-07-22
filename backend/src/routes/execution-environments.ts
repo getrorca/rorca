@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
 import { ConflictError, ValidationError } from '../lib/errors';
+import { assertReleaseOneCapabilityEnabled } from '../lib/release-one-capability-profile';
 import {
   authenticateRunner,
   getExecutionEnvironmentById,
@@ -125,6 +126,9 @@ router.get('/', async (_req: Request, res: Response) => {
  */
 router.get('/:id/readiness', async (req: Request, res: Response) => {
   try {
+    if (paramValue(req.params.id) === 'local-user') {
+      assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
+    }
     res.json({ environment: await getExecutionEnvironmentReadiness(paramValue(req.params.id)) });
   } catch (err) {
     handleRouteError(res, err);
@@ -143,6 +147,7 @@ router.get('/:id/readiness', async (req: Request, res: Response) => {
  */
 router.put('/:id', validateBody(UpsertEnvironmentSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('unattended_control_plane_mutation');
     const env = await upsertExecutionEnvironment({ id: paramValue(req.params.id), ...req.body });
     res.json({ environment: env, readiness: await getExecutionEnvironmentReadiness(env.id) });
   } catch (err) {
@@ -162,6 +167,7 @@ router.put('/:id', validateBody(UpsertEnvironmentSchema), async (req: Request, r
  */
 router.post('/:id/runner-token', validateBody(RunnerTokenSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     const requiredRegistrationToken = process.env.RORCA_RUNNER_REGISTRATION_TOKEN?.trim();
     if (requiredRegistrationToken && req.body.registrationToken !== requiredRegistrationToken) {
       throw new ConflictError('invalid_runner_registration_token');
@@ -187,6 +193,7 @@ router.post('/:id/runner-token', validateBody(RunnerTokenSchema), async (req: Re
  */
 router.post('/:id/runner/heartbeat', validateBody(RunnerHeartbeatSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const environmentId = paramValue(req.params.id);
     await recordRunnerHeartbeat(environmentId, req.body);
@@ -208,6 +215,7 @@ router.post('/:id/runner/heartbeat', validateBody(RunnerHeartbeatSchema), async 
  */
 router.post('/:id/runner/poll', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const job = await claimNextRunnerJob(paramValue(req.params.id), req.body.runnerId);
     res.json({ job: job ? serializeRunnerJob(job) : null });
@@ -228,6 +236,7 @@ router.post('/:id/runner/poll', validateBody(RunnerPollSchema), async (req: Requ
  */
 router.post('/:id/runner/jobs/:jobId/running', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const job = await markRunnerJobRunning(paramValue(req.params.jobId), req.body.runnerId);
     res.json({ job: serializeRunnerJob(job) });
@@ -257,6 +266,7 @@ router.post('/:id/runner/jobs/:jobId/running', validateBody(RunnerPollSchema), a
  */
 router.post('/:id/runner/jobs/:jobId/revalidate', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const policy = await revalidateRunnerJobPolicy(paramValue(req.params.jobId), req.body.runnerId);
     res.json({
@@ -285,6 +295,7 @@ router.post('/:id/runner/jobs/:jobId/revalidate', validateBody(RunnerPollSchema)
  */
 router.post('/:id/runner/jobs/:jobId/complete', validateBody(CompleteJobSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const job = await completeRunnerJob({
       jobId: paramValue(req.params.jobId),

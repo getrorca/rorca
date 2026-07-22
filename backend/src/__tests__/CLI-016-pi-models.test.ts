@@ -12,9 +12,9 @@ const mockDetectPi = jest.fn();
 const mockListPiModels = jest.fn();
 
 jest.mock('../db/index', () => ({
-  query: (...args) => mockQuery(...args),
-  queryOne: (...args) => mockQueryOne(...args),
-  execute: (...args) => mockExecute(...args),
+  query: (...args: unknown[]) => mockQuery(...args),
+  queryOne: (...args: unknown[]) => mockQueryOne(...args),
+  execute: (...args: unknown[]) => mockExecute(...args),
 }));
 
 jest.mock('../lib/logger', () => ({
@@ -28,8 +28,8 @@ jest.mock('../lib/pi-detector', () => ({
     bun: 'bun add -g @mariozechner/pi-coding-agent',
     curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
   },
-  detectPi: (...args) => mockDetectPi(...args),
-  listPiModels: (...args) => mockListPiModels(...args),
+  detectPi: (...args: unknown[]) => mockDetectPi(...args),
+  listPiModels: (...args: unknown[]) => mockListPiModels(...args),
 }));
 
 async function buildApp() {

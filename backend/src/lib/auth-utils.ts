@@ -221,14 +221,14 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
     const invalidBearer = bearerToken !== null && !validInternalBearer;
     const missingServiceCredential = serviceHeader !== undefined && !validInternalHeader && !validInternalBearer;
     if (invalidInternalHeader || invalidBearer || missingServiceCredential) {
-      res.status(401).json({ error: 'Invalid internal service credential' });
+      res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
       return;
     }
     try {
       req.user = internalServiceUser(req);
       next();
     } catch {
-      res.status(401).json({ error: 'Invalid internal service identity' });
+      res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
     }
     return;
   }
@@ -240,21 +240,21 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
   }
 
   if (!bearerToken) {
-    res.status(401).json({ error: 'Authentication required' });
+    res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
     return;
   }
 
   try {
     const resolvedUser = await resolveAuthUserFromToken(bearerToken);
     if (!resolvedUser) {
-      res.status(401).json({ error: 'Invalid token' });
+      res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
       return;
     }
 
     req.user = resolvedUser;
     next();
   } catch {
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
   }
 }
 
@@ -294,7 +294,7 @@ export function requireWorkspaceRole(minRole: WorkspaceRole) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.user;
     if (!user) {
-      res.status(401).json({ error: 'Authentication required' });
+      res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
       return;
     }
 
@@ -336,7 +336,7 @@ export function requireWorkspaceRole(minRole: WorkspaceRole) {
 export function requirePlatformAdmin() {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {
-      res.status(401).json({ error: 'Authentication required' });
+      res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
       return;
     }
     if (!isSuperUser(req.user)) {
@@ -355,7 +355,7 @@ export function requireRole(minRole: TeamRole) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.user;
     if (!user) {
-      res.status(401).json({ error: 'Authentication required' });
+      res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
       return;
     }
 

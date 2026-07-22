@@ -237,8 +237,11 @@ describe('pipeline reconciliation ordering', () => {
     const triggerSource = source.slice(triggerStart, retryRoute);
     const retrySource = source.slice(retryStart, retryEnd);
 
-    expect(triggerSource.indexOf('await reconcileApprovedSpecPasses(')).toBeGreaterThan(-1);
-    expect(triggerSource.indexOf('await reconcileApprovedSpecPasses(')).toBeLessThan(triggerSource.indexOf("send('pipeline:run'"));
+    const triggerReconciliation = triggerSource.indexOf('await reconcileApprovedSpecPasses(');
+    const triggerPublication = triggerSource.indexOf('await publishPreparedDispatch({');
+    expect(triggerReconciliation).toBeGreaterThan(-1);
+    expect(triggerPublication).toBeGreaterThan(-1);
+    expect(triggerReconciliation).toBeLessThan(triggerPublication);
     const retryReconciliation = retrySource.indexOf('await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)(');
     expect(retryReconciliation).toBeGreaterThan(-1);
     expect(retryReconciliation).toBeLessThan(retrySource.indexOf('const retrySpecPath'));

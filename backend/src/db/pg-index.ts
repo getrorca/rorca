@@ -410,7 +410,9 @@ export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promis
 }
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────
-const isDirectRun = typeof require !== 'undefined' && require.main === module;
+const isDirectRun = typeof require !== 'undefined'
+  && typeof module !== 'undefined'
+  && require.main === module;
 if (isDirectRun) {
   runPgMigrations()
     .then(() => {

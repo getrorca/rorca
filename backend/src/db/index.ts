@@ -190,8 +190,13 @@ interface AdvisoryLockContext {
   key: string;
   transactionOwner?: symbol;
 }
+interface TransactionContext {
+  client: PoolClient;
+  active: boolean;
+}
 const advisoryLockClient = new AsyncLocalStorage<AdvisoryLockContext>();
 const advisoryTransactionOwner = new AsyncLocalStorage<symbol>();
+const transactionClient = new AsyncLocalStorage<TransactionContext>();
 
 function currentAdvisoryClient(): PoolClient | undefined {
   const context = advisoryLockClient.getStore();
@@ -200,6 +205,19 @@ function currentAdvisoryClient(): PoolClient | undefined {
     throw new Error('Concurrent query attempted outside the active fenced transaction');
   }
   return context.client;
+}
+
+function currentTransactionClient(): PoolClient | undefined {
+  const context = transactionClient.getStore();
+  if (!context) return undefined;
+  if (!context.active) {
+    throw new Error('Query attempted after its managed transaction completed');
+  }
+  return context.client;
+}
+
+function currentManagedClient(): PoolClient | undefined {
+  return currentAdvisoryClient() ?? currentTransactionClient();
 }
 let _operationalPool: Pool | null = null;
 let _migrationsDone = false;
@@ -227,6 +245,9 @@ function getPool(): Pool {
  */
 export async function withPgAdvisoryLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
   await ensureMigrations();
+  if (transactionClient.getStore()) {
+    throw new Error('PostgreSQL advisory authority fences inside managed transactions are forbidden');
+  }
   if (advisoryLockClient.getStore()?.active) {
     throw new Error('Nested PostgreSQL advisory authority fences are forbidden');
   }
@@ -434,10 +455,10 @@ export async function query<T = Record<string, unknown>>(
   params?: unknown[],
 ): Promise<T[]> {
   await ensureMigrations();
-  const fencedClient = currentAdvisoryClient();
+  const managedClient = currentManagedClient();
   const start = Date.now();
-  if (fencedClient) {
-    const result = await fencedClient.query(sql, params);
+  if (managedClient) {
+    const result = await managedClient.query(sql, params);
     logSlowQuery(sql, params, Date.now() - start);
     return result.rows as T[];
   }
@@ -460,10 +481,10 @@ export async function queryOne<T = Record<string, unknown>>(
   params?: unknown[],
 ): Promise<T | undefined> {
   await ensureMigrations();
-  const fencedClient = currentAdvisoryClient();
+  const managedClient = currentManagedClient();
   const start = Date.now();
-  if (fencedClient) {
-    const result = await fencedClient.query(sql, params);
+  if (managedClient) {
+    const result = await managedClient.query(sql, params);
     logSlowQuery(sql, params, Date.now() - start);
     return (result.rows[0] as T) ?? undefined;
   }
@@ -502,10 +523,10 @@ export async function execute(
   params?: unknown[],
 ): Promise<{ rowCount: number }> {
   await ensureMigrations();
-  const fencedClient = currentAdvisoryClient();
+  const managedClient = currentManagedClient();
   const start = Date.now();
-  if (fencedClient) {
-    const result = await fencedClient.query(sql, params);
+  if (managedClient) {
+    const result = await managedClient.query(sql, params);
     logSlowQuery(sql, params, Date.now() - start);
     return { rowCount: result.rowCount ?? 0 };
   }
@@ -552,17 +573,27 @@ export async function transaction<T>(
     }
   }
 
+  if (transactionClient.getStore()) {
+    throw new Error('Nested managed transactions are forbidden');
+  }
+
   const client = await getPool().connect();
+  const context: TransactionContext = { client, active: true };
   try {
     await resetSessionState(client);
     await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
+    try {
+      const result = await transactionClient.run(context, () => fn(client));
+      context.active = false;
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      context.active = false;
+      await client.query('ROLLBACK');
+      throw err;
+    }
   } finally {
+    context.active = false;
     client.release();
   }
 }

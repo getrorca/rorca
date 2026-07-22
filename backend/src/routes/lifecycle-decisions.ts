@@ -106,6 +106,19 @@ function lifecycleDecisionInput(body: Record<string, unknown>, sourceId = 'targe
   };
 }
 
+function lifecycleDecisionResponseScope(input: RecordSsdlcDecisionInput) {
+  return {
+    workspaceId: input.workspaceId,
+    specSlug: input.specSlug,
+    specVersion: input.specVersion ?? null,
+    runId: input.runId ?? null,
+    storyId: input.storyId ?? null,
+    phaseId: input.phaseId,
+    gateId: input.gateId ?? null,
+    decisionType: input.decisionType,
+  };
+}
+
 export function lifecycleDecisionProviderTarget(input: RecordSsdlcDecisionInput): string {
   return providerHumanActionHash({
     purpose: 'lifecycle_decision',
@@ -133,8 +146,39 @@ export function lifecycleDecisionProviderTarget(input: RecordSsdlcDecisionInput)
  *     operationId: resolveLifecycleDecisionTarget
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Returns the canonical hash a provider human must sign; it grants no decision authority and performs no mutation."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, specSlug, phaseId, decisionType, rationale]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               specSlug: { type: string }
+ *               specVersion: { oneOf: [{ type: string }, { type: integer }], nullable: true }
+ *               runId: { type: integer, nullable: true }
+ *               storyId: { type: string, nullable: true }
+ *               phaseId: { type: string }
+ *               gateId: { type: string, nullable: true }
+ *               decisionType: { type: string, enum: [defer, not_applicable_confirmation, gate_override, qa_approval, merge_approval, production_approval] }
+ *               rationale: { type: string }
+ *               expiresAt: { type: string, format: date-time, nullable: true }
+ *               evidenceGap: { type: string, nullable: true }
+ *               subject: { type: object, nullable: true }
  *     responses:
- *       200: { description: Canonical provider-human target hash }
+ *       200:
+ *         description: Canonical provider-human target hash and exact request identity
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [targetHash, command, workspaceId, responseIdentity]
+ *               properties:
+ *                 targetHash: { type: string }
+ *                 command: { type: string }
+ *                 workspaceId: { type: string }
+ *                 responseIdentity: { type: object }
  */
 router.post('/decisions/target', async (req, res, next) => {
   try {
@@ -142,11 +186,17 @@ router.post('/decisions/target', async (req, res, next) => {
     rejectActorClaims(body);
     requestPrincipal(req);
     const input = lifecycleDecisionInput(body);
+    const targetHash = lifecycleDecisionProviderTarget(input);
     res.json({
       ok: true,
       workspaceId: input.workspaceId,
-      targetHash: lifecycleDecisionProviderTarget(input),
-      command: `approve lifecycle decision ${lifecycleDecisionProviderTarget(input)}`,
+      targetHash,
+      command: `approve lifecycle decision ${targetHash}`,
+      responseIdentity: {
+        schemaVersion: 'rorca.lifecycle-decision-target-identity.v1',
+        ...lifecycleDecisionResponseScope(input),
+        targetHash,
+      },
     });
   } catch (error) {
     next(error);
@@ -177,17 +227,23 @@ router.post('/decisions/target', async (req, res, next) => {
  *             properties:
  *               workspaceId: { type: string }
  *               specSlug: { type: string }
+ *               specVersion: { oneOf: [{ type: string }, { type: integer }], nullable: true }
+ *               runId: { type: integer, nullable: true }
+ *               storyId: { type: string, nullable: true }
  *               phaseId: { type: string }
- *               gateId: { type: string }
+ *               gateId: { type: string, nullable: true }
  *               decisionType: { type: string, enum: [defer, not_applicable_confirmation, gate_override, qa_approval, merge_approval, production_approval] }
  *               rationale: { type: string }
  *               expiresAt: { type: string, format: date-time }
  *               evidenceGap: { type: string }
  *               subject: { type: object }
- *               humanApproval: { type: object, description: Exact signed provider-human event required for service-relayed governed decisions }
+ *               humanApproval:
+ *                 type: object
+ *                 description: Exact signed provider-human event required for service-relayed governed decisions
+ *                 required: [schemaVersion, issuerId, keyId, provider, providerTenantId, actorId, conversationId, threadId, messageId, occurredAt, normalizedCommandHash, ingressIdempotencyKey, signature]
  *     responses:
- *       201: { description: Governed decision durably recorded }
- *       200: { description: Exact idempotent replay returned }
+ *       201: { description: Governed decision durably recorded with exact responseIdentity }
+ *       200: { description: Exact idempotent replay returned with the same responseIdentity }
  *       400: { description: Invalid scope or decision contract }
  *       403: { description: Principal or policy is not authorized }
  *       409: { description: Conflicting active decision or revision mismatch }
@@ -224,7 +280,19 @@ router.post('/decisions', async (req, res, next) => {
       })()
       : requestPrincipal(req);
     const result = await recordSsdlcDecision(input, principal);
-    res.status(result.replayed ? 200 : 201).json(result);
+    const targetHash = lifecycleDecisionProviderTarget(input);
+    res.status(result.replayed ? 200 : 201).json({
+      ...result,
+      responseIdentity: {
+        schemaVersion: 'rorca.lifecycle-decision-response-identity.v1',
+        ...lifecycleDecisionResponseScope(input),
+        targetHash,
+        sourceRequestId: input.sourceRequestId,
+        actorId: principal.principalId,
+        providerHumanReceiptId: principal.providerHumanReceiptId ?? null,
+        decisionId: String(result.decision.id),
+      },
+    });
   } catch (error) {
     next(error);
   }

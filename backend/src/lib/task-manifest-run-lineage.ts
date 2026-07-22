@@ -33,6 +33,7 @@ export interface TaskManifestRunLineage {
   manifestPath: string;
   syntheticSpecPath: string;
   lineageIdentityHash: string;
+  providerHumanReceiptId: string | null;
 }
 
 interface LineageRow {
@@ -49,6 +50,7 @@ interface LineageRow {
   manifest_path: string;
   synthetic_spec_path: string;
   lineage_identity_hash: string;
+  provider_human_receipt_id: string | null;
 }
 
 interface RunRow {
@@ -105,12 +107,14 @@ function fromRow(row: LineageRow): TaskManifestRunLineage {
     manifestPath: row.manifest_path,
     syntheticSpecPath: row.synthetic_spec_path,
     lineageIdentityHash: row.lineage_identity_hash,
+    providerHumanReceiptId: row.provider_human_receipt_id,
   };
 }
 
 export function createTaskManifestRunLineage(input: Omit<TaskManifestRunLineage, 'schemaVersion' | 'lineageIdentityHash'>): TaskManifestRunLineage {
-  const base = { ...input, schemaVersion: TASK_MANIFEST_RUN_LINEAGE_VERSION };
-  return { ...base, lineageIdentityHash: retryHash(base) };
+  const { providerHumanReceiptId, ...hashAuthority } = input;
+  const base = { ...hashAuthority, schemaVersion: TASK_MANIFEST_RUN_LINEAGE_VERSION };
+  return { ...base, lineageIdentityHash: retryHash(base), providerHumanReceiptId };
 }
 
 export async function insertTaskManifestRunLineage(
@@ -135,13 +139,15 @@ export async function insertTaskManifestRunLineage(
     `INSERT INTO task_manifest_run_lineage (
        run_id, workspace_id, root_run_id, parent_run_id, lineage_depth,
        schema_version, manifest_id, source_idempotency_key, manifest_hash,
-       synthetic_spec_hash, manifest_path, synthetic_spec_path, lineage_identity_hash
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       synthetic_spec_hash, manifest_path, synthetic_spec_path, lineage_identity_hash,
+       provider_human_receipt_id
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      ON CONFLICT (run_id) DO NOTHING
      RETURNING *`,
     [input.runId, input.workspaceId, input.rootRunId, input.parentRunId, input.lineageDepth,
       input.schemaVersion, input.manifestId, input.sourceIdempotencyKey, input.manifestHash,
-      input.syntheticSpecHash, input.manifestPath, input.syntheticSpecPath, input.lineageIdentityHash],
+      input.syntheticSpecHash, input.manifestPath, input.syntheticSpecPath, input.lineageIdentityHash,
+      input.providerHumanReceiptId],
   );
   const inserted = result.rows[0];
   if (inserted) return fromRow(inserted);
@@ -181,6 +187,7 @@ async function loadVerified(
     syntheticSpecHash: lineage.syntheticSpecHash,
     manifestPath: lineage.manifestPath,
     syntheticSpecPath: lineage.syntheticSpecPath,
+    providerHumanReceiptId: lineage.providerHumanReceiptId,
   });
   if (expected.lineageIdentityHash !== lineage.lineageIdentityHash || row.task_manifest_id !== lineage.manifestId) {
     throw new ConflictError('TaskManifest lineage differs from canonical run authority');
@@ -228,7 +235,8 @@ async function loadVerified(
       || parent.lineage.manifestHash !== lineage.manifestHash
       || parent.lineage.syntheticSpecHash !== lineage.syntheticSpecHash
       || parent.lineage.manifestPath !== lineage.manifestPath
-      || parent.lineage.syntheticSpecPath !== lineage.syntheticSpecPath) {
+      || parent.lineage.syntheticSpecPath !== lineage.syntheticSpecPath
+      || parent.lineage.providerHumanReceiptId !== lineage.providerHumanReceiptId) {
       throw new ConflictError('TaskManifest descendant lineage differs from its parent authority');
     }
   }
@@ -241,26 +249,63 @@ function scopeContains(scope: string, candidate: string): boolean {
   return pathValue === root || pathValue.startsWith(`${root}/`);
 }
 
-/** Recheck exact committed file scope at host closeout; prose is never authority. */
+export function changedFilesBetweenTaskManifestRevisions(
+  repositoryPath: string,
+  baseRevision: string,
+  terminalRevision: string,
+): string[] {
+  if (!/^[0-9a-f]{40}$/.test(baseRevision) || !/^[0-9a-f]{40}$/.test(terminalRevision)) {
+    throw new ConflictError('TaskManifest base or terminal revision is invalid');
+  }
+  try {
+    execFileSync('git', ['cat-file', '-e', `${baseRevision}^{commit}`], {
+      cwd: repositoryPath, stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    execFileSync('git', ['cat-file', '-e', `${terminalRevision}^{commit}`], {
+      cwd: repositoryPath, stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    execFileSync('git', ['merge-base', '--is-ancestor', baseRevision, terminalRevision], {
+      cwd: repositoryPath, stdio: ['ignore', 'ignore', 'pipe'],
+    });
+  } catch {
+    throw new ConflictError('TaskManifest terminal revision is not descended from the frozen base revision');
+  }
+  const output = execFileSync(
+    'git',
+    ['diff', '--name-only', '--no-renames', '-z', baseRevision, terminalRevision, '--'],
+    { cwd: repositoryPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  return [...new Set(output.split('\0').map((value) => value.trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
+/** Recheck complete frozen-base to terminal file scope at host closeout. */
 export async function assertTaskManifestHostFileScope(input: {
   runId: number;
   workspacePath: string;
   repositoryPath: string;
-  commitShas: string[];
+  terminalRevision: string;
 }): Promise<void> {
   const verified = await loadVerified(input.runId, input.workspacePath, new Set<number>());
   const allowed = verified.manifest.boundedScope.allowedPaths;
   const forbidden = verified.manifest.boundedScope.forbiddenPaths;
   if (allowed.length === 0) throw new ConflictError('TaskManifest host file scope is empty');
-  const changed = new Set<string>();
-  for (const sha of input.commitShas) {
-    const output = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', sha], {
-      cwd: input.repositoryPath,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    for (const file of output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) changed.add(file);
+  const manifestBases = await queryOne<{ base_revisions: string[] | null }>(
+    `SELECT ARRAY_AGG(DISTINCT payload #>> '{execution,worktree,baseRevision}')
+              FILTER (WHERE payload #>> '{execution,worktree,baseRevision}' IS NOT NULL) AS base_revisions
+       FROM story_execution_manifests
+      WHERE run_id = $1`,
+    [input.runId],
+  );
+  const baseRevisions = manifestBases?.base_revisions ?? [];
+  if (baseRevisions.length !== 1 || !/^[0-9a-f]{40}$/.test(baseRevisions[0] ?? '')) {
+    throw new ConflictError('TaskManifest run lacks one exact frozen base revision');
   }
+  const changed = changedFilesBetweenTaskManifestRevisions(
+    input.repositoryPath,
+    baseRevisions[0],
+    input.terminalRevision,
+  );
   for (const file of changed) {
     if (forbidden.some((scope) => scopeContains(scope, file))) {
       throw new ConflictError(`TaskManifest changed forbidden path '${file}'`);

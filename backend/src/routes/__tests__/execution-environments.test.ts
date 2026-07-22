@@ -7,7 +7,6 @@
 
 import request from 'supertest';
 import app from '../../server';
-import { execute } from '../../db/index';
 
 describe('execution environments routes', () => {
   it('lists default environments with readiness', async () => {
@@ -19,54 +18,41 @@ describe('execution environments routes', () => {
     });
   });
 
-  it('pairs runner token, accepts heartbeat, then exposes local readiness', async () => {
-    const token = 'test-local-runner-token-that-is-long-enough';
-    const setToken = await request(app)
-      .post('/api/execution-environments/local-user/runner-token')
-      .send({ token });
-    expect(setToken.status).toBe(200);
-
-    const hb = await request(app)
-      .post('/api/execution-environments/local-user/runner/heartbeat')
-      .set('Authorization', `Bearer ${token}`)
-      .send({
-        runnerId: 'test-runner',
-        agents: {
-          claude: { installed: true, credentialsReady: true, version: 'test' },
-          codex: { installed: true, credentialsReady: false, version: 'test' },
-        },
-      });
-    expect(hb.status).toBe(200);
-    expect(hb.body.environment.ready).toBe(true);
-    expect(hb.body.environment.agents.claude.ready).toBe(true);
-    expect(hb.body.environment.agents.codex.ready).toBe(false);
+  it('rejects execution-environment control-plane mutation in Release-1', async () => {
+    const response = await request(app)
+      .put('/api/execution-environments/future-runner')
+      .send({ label: 'Future runner', kind: 'local-runner' });
+    expect(response.status).toBe(422);
+    expect(response.body.details).toMatchObject({ capabilityId: 'unattended_control_plane_mutation' });
   });
 
-  it('runner can poll and complete an outbound job', async () => {
-    const token = 'test-local-runner-token-two-that-is-long-enough';
-    await request(app).post('/api/execution-environments/local-user/runner-token').send({ token });
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', '/tmp/ws-test') ON CONFLICT (id) DO NOTHING`);
-    await execute(`INSERT INTO pipeline_runs (id, spec_path, workspace_id, status, execution_environment) VALUES (99000001, 'spec.json', 'ws-test', 'queued', 'local-user') ON CONFLICT (id) DO NOTHING`);
-    await execute(`INSERT INTO execution_runner_jobs (run_id, environment_id, payload, status) VALUES (99000001, 'local-user', $1::jsonb, 'queued') ON CONFLICT (run_id) DO UPDATE SET status = 'queued', payload = EXCLUDED.payload`, [JSON.stringify({ runId: 99000001, specPath: 'spec.json' })]);
+  it('rejects local-user readiness and token pairing at the immutable Release-1 gate', async () => {
+    const readiness = await request(app).get('/api/execution-environments/local-user/readiness');
+    expect(readiness.status).toBe(422);
+    expect(readiness.body.details).toMatchObject({ capabilityId: 'local_user_execution_bridge' });
 
-    const poll = await request(app)
-      .post('/api/execution-environments/local-user/runner/poll')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ runnerId: 'test-runner-2' });
-    expect(poll.status).toBe(200);
-    expect(poll.body.job.runId).toBe(99000001);
+    const setToken = await request(app)
+      .post('/api/execution-environments/local-user/runner-token')
+      .send({ token: 'test-local-runner-token-that-is-long-enough' });
+    expect(setToken.status).toBe(422);
+    expect(setToken.body.details).toMatchObject({ capabilityId: 'local_user_execution_bridge' });
+  });
 
-    const running = await request(app)
-      .post(`/api/execution-environments/local-user/runner/jobs/${poll.body.job.id}/running`)
-      .set('Authorization', `Bearer ${token}`)
-      .send({ runnerId: 'test-runner-2' });
-    expect(running.status).toBe(200);
+  it('rejects every outbound runner actuator before token, job, or result mutation', async () => {
+    const cases = [
+      { path: '/api/execution-environments/local-user/runner/heartbeat', body: { runnerId: 'runner', agents: {} } },
+      { path: '/api/execution-environments/local-user/runner/poll', body: { runnerId: 'runner' } },
+      { path: '/api/execution-environments/local-user/runner/jobs/job-1/running', body: { runnerId: 'runner' } },
+      { path: '/api/execution-environments/local-user/runner/jobs/job-1/revalidate', body: { runnerId: 'runner' } },
+      { path: '/api/execution-environments/local-user/runner/jobs/job-1/complete', body: { runnerId: 'runner', status: 'succeeded', result: { ok: true } } },
+    ];
 
-    const complete = await request(app)
-      .post(`/api/execution-environments/local-user/runner/jobs/${poll.body.job.id}/complete`)
-      .set('Authorization', `Bearer ${token}`)
-      .send({ runnerId: 'test-runner-2', status: 'succeeded', result: { ok: true } });
-    expect(complete.status).toBe(200);
-    expect(complete.body.job.status).toBe('succeeded');
+    for (const item of cases) {
+      const response = await request(app)
+        .post(item.path)
+        .send(item.body);
+      expect(response.status).toBe(422);
+      expect(response.body.details).toMatchObject({ capabilityId: 'local_user_execution_bridge' });
+    }
   });
 });

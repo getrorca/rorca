@@ -10,6 +10,26 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { detectPi } from '../pi-detector';
 
+jest.mock('../autonomous-cli-probe', () => {
+  const childProcess = jest.requireActual<typeof import('node:child_process')>('node:child_process');
+  const probe = (command: string, args: readonly string[], options: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}) => {
+    const result = childProcess.spawnSync(command, [...args], {
+      encoding: 'utf8', timeout: options.timeoutMs, env: options.env ?? process.env,
+    });
+    return {
+      status: result.status,
+      signal: result.signal,
+      stdout: String(result.stdout ?? ''),
+      stderr: String(result.stderr ?? ''),
+      ...(result.error ? { error: result.error } : {}),
+    };
+  };
+  return {
+    probeAutonomousCliSync: probe,
+    probeAutonomousCli: async (...args: Parameters<typeof probe>) => probe(...args),
+  };
+});
+
 const fixturePath = path.join(__dirname, '..', '..', '__tests__', 'fixtures', 'pi', 'pi-parity.jsonl');
 const replayScriptPath = path.join(__dirname, '..', '..', '__tests__', 'fixtures', 'pi', 'mock-pi-replay.sh');
 

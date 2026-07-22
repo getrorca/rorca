@@ -9,11 +9,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import crypto from 'node:crypto';
 import type { Express } from 'express';
 import request from 'supertest';
 import { gzipSync } from 'zlib';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
+import { computeTaskManifestHash } from '../../lib/task-manifest-artifacts';
+import { safeParseTaskManifest } from '../../lib/task-manifest';
+import { stableWalJson } from '../../lib/trusted-wal';
 
 // Server initialization + migrations can take > 30s on first run
 jest.setTimeout(90_000);
@@ -48,7 +52,7 @@ jest.mock('../../lib/pg-boss', () => ({
   getPgBossSchemaSql: jest.fn(() => '"pgboss"'),
   getBoss: jest.fn().mockReturnValue({
     createQueue: jest.fn().mockResolvedValue(undefined),
-    send: jest.fn().mockResolvedValue('mock-job-id'),
+    send: jest.fn().mockImplementation(async (_name: string, _data: unknown, options?: { id?: string }) => options?.id ?? '00000000-0000-4000-8000-000000000001'),
     work: jest.fn(),
     stop: jest.fn().mockResolvedValue(undefined),
   }),
@@ -63,6 +67,8 @@ let app: Express;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
+let serviceAuthToken: string;
+const LIST_WORKSPACE_ID = `ws-pipe-list-${process.pid}`;
 
 // Load the server ONCE per test file to avoid creating 54 separate DB connection pools
 // (one per jest.resetModules() + require('../../server') call).
@@ -73,8 +79,13 @@ beforeAll(async () => {
   const serverMod = require('../../server');
   app = serverMod.default;
   authToken = await getAuthToken(app);
+  serviceAuthToken = await getAuthToken(app, {
+    email: 'hermes-pipeline-test@rorca.internal',
+    role: 'admin',
+    displayName: 'Hermes Pipeline Test Service',
+  });
 
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
+  await execute(`UPDATE users SET plan = 'pro' WHERE email IN ('testauth@example.com', 'hermes-pipeline-test@rorca.internal')`);
   await execute(
     `INSERT INTO users (id, email, display_name, password_hash, plan)
      VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
@@ -104,16 +115,26 @@ beforeEach(async () => {
   execSync('git add README.md', { cwd: wsDir, stdio: 'pipe' });
   execSync('git commit -m "init"', { cwd: wsDir, stdio: 'pipe' });
 
-  // Clean up DB state from previous tests (FK chain: token_usage/story_results → pipeline_runs)
-  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs)`);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs)`);
-  await execute(`DELETE FROM pipeline_runs`);
-  await execute(`DELETE FROM wal_events`);
-  await execute(`DELETE FROM spec_post_save_stage_dependencies`).catch(() => {});
-  await execute(`DELETE FROM spec_post_save_workflow_stages`).catch(() => {});
-  await execute(`DELETE FROM spec_post_save_workflow_runs`).catch(() => {});
-  await execute(`DELETE FROM spec_jobs`).catch(() => {});
-  await execute(`DELETE FROM spec_generation_logs`).catch(() => {});
+  // Isolate mutable rows owned by this suite without deleting canonical runs
+  // that may be referenced by append-only governance or TaskManifest evidence.
+  await execute(`DELETE FROM token_usage usage USING pipeline_runs run WHERE usage.run_id = run.id AND run.workspace_id = 'ws-pipe'`);
+  await execute(`DELETE FROM story_results result USING pipeline_runs run WHERE result.run_id = run.id AND run.workspace_id = 'ws-pipe'`);
+  await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = COALESCE(finished_at, NOW()) WHERE workspace_id = 'ws-pipe' AND status NOT IN ('done', 'failed', 'cancelled')`);
+  await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-pipe'`);
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [LIST_WORKSPACE_ID]);
+  await execute(
+    `DELETE FROM spec_post_save_stage_dependencies dependency
+      USING spec_post_save_workflow_stages stage, spec_post_save_workflow_runs run
+      WHERE dependency.stage_id = stage.id AND stage.run_id = run.id AND run.workspace_id = 'ws-pipe'`,
+  ).catch(() => {});
+  await execute(
+    `DELETE FROM spec_post_save_workflow_stages stage
+      USING spec_post_save_workflow_runs run
+      WHERE stage.run_id = run.id AND run.workspace_id = 'ws-pipe'`,
+  ).catch(() => {});
+  await execute(`DELETE FROM spec_post_save_workflow_runs WHERE workspace_id = 'ws-pipe'`).catch(() => {});
+  await execute(`DELETE FROM spec_jobs WHERE workspace_id = 'ws-pipe'`).catch(() => {});
+  await execute(`DELETE FROM spec_generation_logs WHERE context_summary_json->>'workspaceId' = 'ws-pipe'`).catch(() => {});
 
   // Ensure both users exist with plan='pro' (global teardown truncates users between test files).
   // Use ON CONFLICT DO UPDATE covering both id and email unique constraints.
@@ -129,8 +150,18 @@ beforeEach(async () => {
     VALUES ('claude-sonnet-4-5-20250929', 0.003, 0.015, 3.0, 15.0)
     ON CONFLICT (model_id) DO NOTHING`);
 
-  // Point workspace at fresh tmpDir
+  // Point workspaces at the fresh repository. List-route assertions use a
+  // process-unique workspace so append-only prior-run evidence cannot leak in.
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-pipe', 'Pipeline WS', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [wsDir]);
+  await execute(
+    `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
+     VALUES ('ws-pipe', '00000000-0000-0000-0000-000000000001', 'owner')
+     ON CONFLICT (workspace_id, user_auth_id) DO UPDATE SET role = 'owner'`,
+  );
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Pipeline List WS', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [LIST_WORKSPACE_ID, wsDir],
+  );
 });
 
 afterEach(async () => {
@@ -223,6 +254,8 @@ async function seedRun(overrides: Partial<{ status: string; workspace_id: string
 function cloneTaskManifestFixture(): Record<string, any> {
   const fixturePath = path.join(__dirname, '..', '..', 'lib', '__tests__', 'fixtures', 'hermes-task-manifest.json');
   const manifest = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Record<string, any>;
+  manifest.manifestId = crypto.randomUUID();
+  manifest.idempotencyKey = crypto.randomUUID();
   manifest.workspaceId = 'ws-pipe';
   manifest.source.rorca.specPath = 'forge/specs/approved/source-spec.json';
   manifest.boundedScope.allowedPaths.push('forge/specs/approved/source-spec.json');
@@ -239,6 +272,43 @@ function taskManifestTriggerBody(overrides: Record<string, any> = {}): Record<st
     idempotencyKey: manifest.idempotencyKey,
     manifest,
     ...overrides,
+  };
+}
+
+function signedTaskManifestApproval(manifest: Record<string, any>): {
+  event: Record<string, unknown>;
+  issuerConfig: string;
+} {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const parsedManifest = safeParseTaskManifest(manifest);
+  if (!parsedManifest.success) throw new Error('TaskManifest test fixture is invalid');
+  const unsigned = {
+    schemaVersion: 'provider-human-event.v1' as const,
+    issuerId: 'hermes-pipeline-test',
+    keyId: 'ed25519-test-1',
+    provider: 'slack',
+    providerTenantId: manifest.source.slack.teamId,
+    actorId: 'U-HUMAN-1',
+    conversationId: 'C-PIPELINE',
+    threadId: 'THREAD-PIPELINE',
+    messageId: `approval-${manifest.manifestId}`,
+    occurredAt: new Date().toISOString(),
+    normalizedCommandHash: computeTaskManifestHash(parsedManifest.data),
+    ingressIdempotencyKey: `ingress-${manifest.manifestId}`,
+  };
+  return {
+    event: {
+      ...unsigned,
+      signature: crypto.sign(null, Buffer.from(stableWalJson(unsigned), 'utf8'), privateKey).toString('base64url'),
+    },
+    issuerConfig: JSON.stringify([{
+      issuerId: unsigned.issuerId,
+      keyId: unsigned.keyId,
+      publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      provider: unsigned.provider,
+      providerTenantId: unsigned.providerTenantId,
+      workspaceId: manifest.workspaceId,
+    }]),
   };
 }
 
@@ -270,11 +340,69 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.status).toBe(422);
   });
 
-  test('returns 404 for nonexistent workspace', async () => {
+  test('Release-1 rejects every disabled execution shape before run, Git, or queue mutation', async () => {
+    const before = await queryOne<{ total: number }>(
+      `SELECT COUNT(*)::int AS total FROM pipeline_runs WHERE workspace_id = 'ws-pipe'`,
+    );
+    const base = {
+      specPath: 'forge/specs/approved/not-read-before-release-gate.json',
+      workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
+    };
+    const cases = [
+      { body: { ...base, triggerType: 'scheduled' }, capabilityId: 'scheduled_autonomy' },
+      { body: { ...base, orchestrationMode: 'wave-parallel', parallelism: 2 }, capabilityId: 'high_risk_parallel_autonomy' },
+      { body: { ...base, autoMerge: true }, capabilityId: 'auto_merge' },
+      { body: { ...base, autoWorktree: false }, capabilityId: 'protected_branch_direct_update' },
+      { body: { ...base, mergeStrategy: 'direct' }, capabilityId: 'protected_branch_direct_update' },
+      { body: { ...base, mergeStrategy: 'branch-only' }, capabilityId: 'branch_only_external_push' },
+      { body: { ...base, executionEnvironment: 'local-user' }, capabilityId: 'local_user_execution_bridge' },
+    ];
+
+    for (const entry of cases) {
+      const res = await request(app)
+        .post('/api/pipeline/trigger')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send(entry.body);
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({
+        code: 'RELEASE_ONE_CAPABILITY_DISABLED',
+        details: {
+          profileId: 'release-1-supervised-core',
+          capabilityId: entry.capabilityId,
+        },
+      });
+    }
+    const manifestless = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(base);
+    expect(manifestless.status).toBe(422);
+    expect(manifestless.body).toMatchObject({
+      code: 'RELEASE_ONE_TASK_MANIFEST_REQUIRED',
+      details: {
+        profileId: 'release-1-supervised-core',
+        capabilityId: 'bounded_task_manifest',
+        endpoint: '/api/pipeline/task-manifests/trigger',
+      },
+    });
+
+    const after = await queryOne<{ total: number }>(
+      `SELECT COUNT(*)::int AS total FROM pipeline_runs WHERE workspace_id = 'ws-pipe'`,
+    );
+    expect(after?.total).toBe(before?.total);
+  });
+
+  test('returns 404 for nonexistent workspace during a Release-1 dry-run preview', async () => {
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ specPath: 'forge/specs/approved/test.json', workspaceId: 'nonexistent' });
+      .send({
+        specPath: 'forge/specs/approved/test.json',
+        workspaceId: 'nonexistent',
+        dryRun: true,
+      });
 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Workspace not found');
@@ -412,7 +540,7 @@ describe('POST /api/pipeline/trigger', () => {
     }));
   });
 
-  test('production refuses explicit parallel execution even when the experiment variable is set', async () => {
+  test('production auth mode refuses test-only bearer credentials before wave mutation', async () => {
     process.env.NODE_ENV = 'production';
     process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL = 'true';
     await seedRunnableSpec('parallel-production-refused');
@@ -426,12 +554,9 @@ describe('POST /api/pipeline/trigger', () => {
         parallelism: 2,
       });
 
-    expect(res.status).toBe(422);
-    expect(res.body.code).toBe('WAVE_PARALLEL_POLICY_DENIED');
-    expect(res.body.details).toEqual(expect.objectContaining({
-      reason: 'production_forbidden',
-      experimentalOptInIgnored: true,
-    }));
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ error: 'Unauthorized', code: 'AUTH_ERROR' });
+    expect(await queryOne('SELECT id FROM pipeline_runs WHERE spec_path = $1', ['forge/specs/approved/parallel-production-refused.json'])).toBeUndefined();
   });
 
   test('blocks when another pipeline run is already active for the same spec', async () => {
@@ -576,8 +701,12 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.body.dryRun).toBe(true);
     expect(res.body.estimate).toBeDefined();
 
-    // No pipeline run should be created
-    const runs = await query(`SELECT * FROM pipeline_runs WHERE workspace_id = 'ws-pipe'`);
+    // No pipeline run should be created for the dry-run request. Canonical runs
+    // from earlier tests remain append-only and are intentionally retained.
+    const runs = await query(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pipe' AND spec_path = $1`,
+      ['forge/specs/approved/dry-run-spec.json'],
+    );
     expect(runs).toHaveLength(0);
   });
 
@@ -618,10 +747,17 @@ describe('POST /api/pipeline/trigger', () => {
 
     expect(res.status).toBe(201);
 
-    // Excluded story should have a story_results row
+    // Exclusion authority is frozen on the run; a story-result journal row would
+    // incorrectly look like worker completion evidence.
     const excluded = await queryOne(`SELECT * FROM story_results WHERE run_id = $1 AND story_id = 'US-002'`, [res.body.runId]) as any;
-    expect(excluded).toBeDefined();
-    expect(excluded.status).toBe('excluded');
+    expect(excluded).toBeUndefined();
+    const run = await queryOne<{ excluded_story_ids: string[] }>('SELECT excluded_story_ids FROM pipeline_runs WHERE id = $1', [res.body.runId]);
+    expect(run?.excluded_story_ids).toEqual(['US-002']);
+    const event = await queryOne<{ event_type: string }>(
+      `SELECT event_type FROM wal_events WHERE workspace_id = 'ws-pipe' AND story_id = 'US-002' AND payload->>'run_id' = $1`,
+      [String(res.body.runId)],
+    );
+    expect(event?.event_type).toBe('story_excluded_from_run');
   });
 
   test('unauthenticated request is handled (auth bypass active in local mode)', async () => {
@@ -730,7 +866,7 @@ describe('GET /api/pipeline/runs', () => {
 
   test('returns empty list for workspace with no runs', async () => {
     const res = await request(app)
-      .get('/api/pipeline/runs?workspaceId=ws-pipe')
+      .get(`/api/pipeline/runs?workspaceId=${LIST_WORKSPACE_ID}`)
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
@@ -738,11 +874,11 @@ describe('GET /api/pipeline/runs', () => {
   });
 
   test('returns runs for a given workspace, newest first', async () => {
-    const runId1 = await seedRun({ status: 'done' });
-    const runId2 = await seedRun({ status: 'running' });
+    const runId1 = await seedRun({ workspace_id: LIST_WORKSPACE_ID, status: 'done' });
+    const runId2 = await seedRun({ workspace_id: LIST_WORKSPACE_ID, status: 'running' });
 
     const res = await request(app)
-      .get('/api/pipeline/runs?workspaceId=ws-pipe')
+      .get(`/api/pipeline/runs?workspaceId=${LIST_WORKSPACE_ID}`)
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
@@ -753,22 +889,22 @@ describe('GET /api/pipeline/runs', () => {
   });
 
   test('does not return runs from other workspaces', async () => {
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-other', 'Other', $1) ON CONFLICT (id) DO NOTHING`, [wsDir]);
-    await seedRun({ workspace_id: 'ws-pipe' });
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-other', 'Other', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [wsDir]);
+    await seedRun({ workspace_id: LIST_WORKSPACE_ID });
     await seedRun({ workspace_id: 'ws-other' });
 
     const res = await request(app)
-      .get('/api/pipeline/runs?workspaceId=ws-pipe')
+      .get(`/api/pipeline/runs?workspaceId=${LIST_WORKSPACE_ID}`)
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(1);
-    expect(res.body.items[0].workspace_id).toBe('ws-pipe');
+    expect(res.body.items[0].workspace_id).toBe(LIST_WORKSPACE_ID);
   });
 
   test('unauthenticated request is handled (auth bypass active in local mode)', async () => {
     // Auth is bypassed in local mode — returns 200 (list) not 401
-    const res = await request(app).get('/api/pipeline/runs?workspaceId=ws-pipe');
+    const res = await request(app).get(`/api/pipeline/runs?workspaceId=${LIST_WORKSPACE_ID}`);
     expect(res.status).toBe(200);
   });
 });
@@ -1071,9 +1207,12 @@ describe('GET /api/pipeline/runs/:runId/log', () => {
   });
 
   test('returns 404 when no log file exists', async () => {
-    // Use a high ID to avoid collision with legacy /tmp/rorca-run-{id}.log files
-    const runId = 999999;
-    await execute(`INSERT INTO pipeline_runs (id, spec_path, workspace_id, status) VALUES ($1, $2, $3, $4)`, [runId, 'forge/specs/approved/test-spec.json', 'ws-pipe', 'done']);
+    const run = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ($1, $2, $3) RETURNING id`,
+      ['forge/specs/approved/no-log-file.json', 'ws-pipe', 'done'],
+    );
+    const runId = run!.id;
 
     // Ensure no legacy log file exists
     const legacyPath = path.join(os.tmpdir(), `rorca-run-${runId}.log`);
@@ -1139,7 +1278,7 @@ describe('POST /api/pipeline/runs/:runId/stories/:storyId/tokens', () => {
       .send({});
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('inputTokens or outputTokens');
+    expect(res.body.error).toContain('At least one accounting value is required');
   });
 
   test('returns 404 when story result does not exist', async () => {
@@ -1192,7 +1331,15 @@ describe('POST /api/pipeline/runs/:runId/stories/:storyId/tokens', () => {
 // ─── POST /api/pipeline/story-result ────────────────────────────────────────
 
 describe('POST /api/pipeline/story-result', () => {
-  test('records explicit pi cost into story_results and token_usage', async () => {
+  beforeEach(() => {
+    process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS = '1';
+  });
+
+  afterEach(() => {
+    delete process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS;
+  });
+
+  test('records an explicit non-governing pi compatibility cost into story_results and token_usage', async () => {
     const runId = await seedRun({ status: 'running' });
 
     const res = await request(app)
@@ -1209,8 +1356,10 @@ describe('POST /api/pipeline/story-result', () => {
         idempotencyKey: `story-result-${runId}-US-PI-002`,
       });
 
-    expect(res.status).toBe(201);
-    expect(res.body.ok).toBe(true);
+    expect({ status: res.status, body: res.body }).toMatchObject({
+      status: 201,
+      body: { ok: true, governing: false, outcome: 'compatibility_proposal_recorded' },
+    });
 
     const story = await queryOne(
       `SELECT input_tokens, output_tokens, model_used, cost_usd
@@ -1521,7 +1670,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(payload.startFromStoryId).toBeUndefined();
   });
 
-  test('forceRerun preserves passed story state and continues from the first unfinished story', async () => {
+  test('forceRerun cannot bypass pass reconciliation authority', async () => {
     const spec = await seedRunnableSpec('force-rerun-continuation');
     spec.userStories[0].passes = true;
     spec.userStories[1].passes = false;
@@ -1538,27 +1687,21 @@ describe('OC-006: Pipeline trigger agent integration', () => {
       .send({
         specPath: 'forge/specs/approved/force-rerun-continuation.json',
         workspaceId: 'ws-pipe',
-        agentOverride: 'pi',
         forceRerun: true,
       });
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('PASS_RECONCILIATION_REQUIRED');
     const persisted = JSON.parse(fs.readFileSync(specFile, 'utf8'));
     expect(persisted.userStories.map((story: any) => [story.id, story.passes])).toEqual([
       ['US-001', true],
       ['US-002', false],
     ]);
-
-    expect(mockSend).toHaveBeenCalled();
-    const [, payload] = mockSend.mock.calls.at(-1) as [string, Record<string, unknown>];
-    expect(payload.startFromStoryId).toBe('US-002');
-    expect(payload.specificStory).toBeUndefined();
-
-    const skipped = await queryOne<{ status: string; reason: string }>(
-      `SELECT status, reason FROM story_results WHERE run_id = $1 AND story_id = 'US-001'`,
-      [res.body.runId],
-    );
-    expect(skipped).toEqual({ status: 'skip', reason: 'previously_passed' });
+    expect(await queryOne('SELECT id FROM pipeline_runs WHERE spec_path = $1 AND status <> $2', [
+      'forge/specs/approved/force-rerun-continuation.json',
+      'failed',
+    ])).toBeUndefined();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   test('GET /runs/:runId returns agentType and agentModel fields', async () => {
@@ -1833,7 +1976,7 @@ describe('GET /api/pipeline/runs/:runId/output', () => {
 // ─── POST /api/pipeline/runs/:runId/retry ───────────────────────────────────
 
 describe('POST /api/pipeline/runs/:runId/retry', () => {
-  test('accepts forceSequential and persists retry parallelism = 1', async () => {
+  test('rejects forceSequential dispatch when the legacy run lacks canonical closeout authority', async () => {
     seedSpec('approved', 'retry-sequential');
 
     const originalRun = await queryOne<{ id: number }>(
@@ -1858,30 +2001,13 @@ describe('POST /api/pipeline/runs/:runId/retry', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ forceSequential: true });
 
-    expect(res.status).toBe(201);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.runId).toBeDefined();
-
-    const retryRun = await queryOne<{ parallelism: number; retried_from_run_id: number | null }>(
-      `SELECT parallelism, retried_from_run_id FROM pipeline_runs WHERE id = $1`,
-      [res.body.runId],
-    );
-
-    expect(retryRun).toBeDefined();
-    expect(retryRun!.parallelism).toBe(1);
-    expect(retryRun!.retried_from_run_id).toBe(originalRun!.id);
-    expect(mockSend).toHaveBeenCalledWith(
-      'pipeline:retry',
-      expect.objectContaining({
-        runId: Number(res.body.runId),
-        originalRunId: Number(originalRun!.id),
-        storyIds: ['US-001'],
-      }),
-      expect.any(Object),
-    );
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Canonical host closeout is unavailable for the retry target');
+    expect(await query(`SELECT id FROM pipeline_runs WHERE retried_from_run_id = $1`, [originalRun!.id])).toHaveLength(0);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('preserves original agent, model, terminal, graph, merge, and reasoning options when retrying', async () => {
+  test('does not replay legacy agent/model/terminal options without canonical closeout authority', async () => {
     seedSpec('approved', 'retry-preserve-options');
 
     const originalRun = await queryOne<{ id: number }>(
@@ -1889,7 +2015,7 @@ describe('POST /api/pipeline/runs/:runId/retry', () => {
          (spec_path, workspace_id, status, parallelism, agent, agent_type, agent_model,
           auto_worktree, auto_merge, include_graph, merge_strategy, terminal_mode, trigger_options)
        VALUES ('forge/specs/approved/retry-preserve-options.json', 'ws-pipe', 'failed', 4,
-          'pi', 'pi', 'openai-codex/gpt-5.5', true, false, true, 'branch-only', 'pty',
+          'claude', 'claude', NULL, false, false, true, 'direct', 'pty',
           $1::jsonb)
        RETURNING id`,
       [JSON.stringify({ thinkingEnabled: true, thinkingBudget: 4096, effortLevel: 'xhigh', reasoningEffort: 'xhigh' })],
@@ -1911,59 +2037,13 @@ describe('POST /api/pipeline/runs/:runId/retry', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ forceSequential: true });
 
-    expect(res.status).toBe(201);
-
-    const retryRun = await queryOne<{
-      parallelism: number;
-      agent: string;
-      agent_type: string;
-      agent_model: string | null;
-      auto_worktree: boolean;
-      auto_merge: boolean;
-      include_graph: boolean;
-      merge_strategy: string | null;
-      terminal_mode: string | null;
-      retried_from_run_id: number | null;
-    }>(
-      `SELECT parallelism, agent, agent_type, agent_model, auto_worktree, auto_merge,
-              include_graph, merge_strategy, terminal_mode, retried_from_run_id
-       FROM pipeline_runs WHERE id = $1`,
-      [res.body.runId],
-    );
-
-    expect(retryRun).toMatchObject({
-      parallelism: 1,
-      agent: 'pi',
-      agent_type: 'pi',
-      agent_model: 'openai-codex/gpt-5.5',
-      auto_worktree: true,
-      auto_merge: false,
-      include_graph: true,
-      merge_strategy: 'branch-only',
-      terminal_mode: 'pty',
-      retried_from_run_id: originalRun!.id,
-    });
-
-    expect(mockSend).toHaveBeenCalledWith(
-      'pipeline:retry',
-      expect.objectContaining({
-        runId: Number(res.body.runId),
-        originalRunId: Number(originalRun!.id),
-        storyIds: ['US-001'],
-        agent: 'pi',
-        model: 'openai-codex/gpt-5.5',
-        includeGraph: true,
-        terminalMode: 'pty',
-        thinkingEnabled: true,
-        thinkingBudget: 4096,
-        effortLevel: 'xhigh',
-        reasoningEffort: 'xhigh',
-      }),
-      expect.any(Object),
-    );
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Canonical host closeout is unavailable for the retry target');
+    expect(await query(`SELECT id FROM pipeline_runs WHERE retried_from_run_id = $1`, [originalRun!.id])).toHaveLength(0);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('rejects retry when the original reusable worktree is stale before queueing', async () => {
+  test('rejects an unauthoritative legacy retry before evaluating reusable worktree state', async () => {
     seedSpec('approved', 'retry-stale-worktree');
     const { branchName, worktreePath } = createDeterministicSpecWorktree('retry-stale-worktree');
     advanceWorkspaceMain('advance-main-before-retry');
@@ -1992,8 +2072,7 @@ describe('POST /api/pipeline/runs/:runId/retry', () => {
       .send({});
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toContain('Reusable worktree is stale or invalid');
-    expect(res.body.error).toContain(worktreePath);
+    expect(res.body.error).toContain('Canonical host closeout is unavailable for the retry target');
     expect(mockSend).not.toHaveBeenCalled();
 
     const retryRuns = await query(
@@ -2271,7 +2350,15 @@ describe('auto_merge column in pipeline_runs', () => {
 // ─── POST /api/pipeline/orphan-sweep ────────────────────────────────────────
 
 describe('POST /api/pipeline/orphan-sweep', () => {
-  test('returns 200 with empty swept array when no orphans exist', async () => {
+  async function drainPriorOrphans(): Promise<void> {
+    const baseline = await request(app)
+      .post('/api/pipeline/orphan-sweep')
+      .set('Authorization', `Bearer ${authToken}`);
+    expect(baseline.status).toBe(200);
+  }
+
+  test('returns an empty swept array after the orphan sweep is drained', async () => {
+    await drainPriorOrphans();
     const res = await request(app)
       .post('/api/pipeline/orphan-sweep')
       .set('Authorization', `Bearer ${authToken}`);
@@ -2284,6 +2371,7 @@ describe('POST /api/pipeline/orphan-sweep', () => {
   });
 
   test('returns 200 with swept runs when orphan processes exist', async () => {
+    await drainPriorOrphans();
     // Create orphan runs with status='running' and no worker_id
     // (simulates runs from a crashed worker)
     const runId1 = await seedRun({ status: 'running', pid: 999999 });
@@ -2675,8 +2763,10 @@ describe('GET /api/pipeline/runs/:runId/retrieval-telemetry/:telemetryId', () =>
   });
 
   test('returns 404 when run does not exist', async () => {
+    const maxRun = await queryOne<{ id: number }>('SELECT COALESCE(MAX(id), 0) AS id FROM pipeline_runs');
+    const missingRunId = Number(maxRun?.id ?? 0) + 1_000_000;
     const res = await request(app)
-      .get('/api/pipeline/runs/999999/retrieval-telemetry/rt-nonexistent')
+      .get(`/api/pipeline/runs/${missingRunId}/retrieval-telemetry/rt-nonexistent`)
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(404);
@@ -3082,6 +3172,78 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     });
   });
 
+  test('internal service token cannot replace the exact provider-human TaskManifest command', async () => {
+    const body = taskManifestTriggerBody({ dryRun: false, mergeStrategy: 'draft-pr' });
+    const artifactDir = path.join(wsDir, 'forge', 'task-manifests', body.manifest.manifestId);
+
+    const res = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${serviceAuthToken}`)
+      .send(body);
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toContain('exact signed provider-human TaskManifest approval command');
+    expect(fs.existsSync(artifactDir)).toBe(false);
+    const run = await queryOne<{ id: number }>(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pipe' AND idempotency_key = $1`,
+      [body.idempotencyKey],
+    );
+    expect(run).toBeUndefined();
+  });
+
+  test('service-relayed signed command binds one provider-human receipt to immutable TaskManifest lineage', async () => {
+    const body = taskManifestTriggerBody({ dryRun: false, queue: true, mergeStrategy: 'draft-pr' });
+    const approval = signedTaskManifestApproval(body.manifest);
+    process.env.RORCA_PROVIDER_HUMAN_ISSUERS_JSON = approval.issuerConfig;
+    try {
+      const res = await request(app)
+        .post('/api/pipeline/task-manifests/trigger')
+        .set('Authorization', `Bearer ${serviceAuthToken}`)
+        .send({ ...body, humanApproval: approval.event });
+
+      expect(res.body).not.toHaveProperty('error');
+      expect(res.status).toBe(202);
+      expect(res.body.responseIdentity).toEqual(expect.objectContaining({
+        manifestHash: approval.event.normalizedCommandHash,
+        providerHumanReceiptId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      }));
+      const replay = await request(app)
+        .post('/api/pipeline/task-manifests/trigger')
+        .set('Authorization', `Bearer ${serviceAuthToken}`)
+        .send({ ...body, humanApproval: approval.event });
+      expect(replay.status).toBe(202);
+      expect(replay.body.runId).toBe(res.body.runId);
+      expect(replay.body.responseIdentity.providerHumanReceiptId).toBe(res.body.responseIdentity.providerHumanReceiptId);
+
+      const binding = await queryOne<{
+        provider_human_receipt_id: string;
+        purpose: string;
+        target_hash: string;
+        manifest_hash: string;
+        receipt_count: string;
+      }>(
+        `SELECT lineage.provider_human_receipt_id, receipt.purpose, receipt.target_hash, lineage.manifest_hash,
+                (SELECT COUNT(*) FROM provider_human_authority_receipts candidate
+                  WHERE candidate.workspace_id = lineage.workspace_id
+                    AND candidate.purpose = receipt.purpose
+                    AND candidate.target_hash = receipt.target_hash)::text AS receipt_count
+           FROM task_manifest_run_lineage lineage
+           JOIN provider_human_authority_receipts receipt ON receipt.id = lineage.provider_human_receipt_id
+          WHERE lineage.run_id = $1`,
+        [res.body.runId],
+      );
+      expect(binding).toEqual({
+        provider_human_receipt_id: res.body.responseIdentity.providerHumanReceiptId,
+        purpose: 'task_manifest_dispatch',
+        target_hash: approval.event.normalizedCommandHash,
+        manifest_hash: approval.event.normalizedCommandHash,
+        receipt_count: '1',
+      });
+    } finally {
+      delete process.env.RORCA_PROVIDER_HUMAN_ISSUERS_JSON;
+    }
+  });
+
   test('dry-run validates, writes artifacts, returns estimated plan, and does not enqueue', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
@@ -3136,7 +3298,10 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     expect(fs.existsSync(path.join(wsDir, res.body.artifacts.tasksMdPath))).toBe(true);
     expect(fs.existsSync(path.join(wsDir, res.body.artifacts.specPath))).toBe(true);
 
-    const runCount = await queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM pipeline_runs`);
+    const runCount = await queryOne<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM pipeline_runs WHERE workspace_id = 'ws-pipe' AND task_manifest_id = $1`,
+      [body.manifest.manifestId],
+    );
     expect(Number(runCount?.count ?? '0')).toBe(0);
     expect(getBoss().send).not.toHaveBeenCalled();
   });
@@ -3144,8 +3309,8 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
   test('queues through pipeline broker with manifest correlation metadata and option pass-through', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
-      autoWorktree: false,
-      mergeStrategy: 'branch-only',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       agentOverride: 'pi',
       modelOverride: 'gpt-5.4',
       effortLevel: 'high',
@@ -3154,6 +3319,7 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       executionEnvironmentId: 'tm-test-env',
     });
 
+    body.manifest.policy.commandDenylist = ['git commit'];
     const executionEnvironmentSupported = hasExecutionEnvironmentSupportInTest();
 
     const res = await request(app)
@@ -3188,9 +3354,9 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     expect(run).toMatchObject({
       idempotency_key: body.idempotencyKey,
       task_manifest_id: body.manifest.manifestId,
-      merge_strategy: 'branch-only',
+      merge_strategy: 'draft-pr',
       auto_merge: false,
-      auto_worktree: false,
+      auto_worktree: true,
       terminal_mode: 'ansi-html',
       agent_type: 'pi',
     });
@@ -3222,9 +3388,10 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
         agent: 'pi',
         effortLevel: 'high',
         terminalMode: 'ansi-html',
-        autoWorktree: false,
+        autoWorktree: true,
         autoMerge: false,
-        mergeStrategy: 'branch-only',
+        mergeStrategy: 'draft-pr',
+        commandDenylist: expect.arrayContaining(['git commit', 'git push --force']),
       }),
       expect.objectContaining({ retryLimit: 0 }),
     );
@@ -3236,7 +3403,7 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
   test('request agentOverride=codex beats manifest agentOverride=pi for queued execution', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
-      autoWorktree: false,
+      autoWorktree: true,
       agentOverride: 'codex',
       terminal_mode: 'ansi-html',
     });
@@ -3267,7 +3434,7 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
   test('request agentOverride=opencode with openrouter model passes model through unchanged', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
-      autoWorktree: false,
+      autoWorktree: true,
       agentOverride: 'opencode',
       modelOverride: 'openrouter/z-ai/glm-5',
       terminal_mode: 'ansi-html',
@@ -3304,7 +3471,7 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
 
   test('manifest opencode with Claude model uses shared Claude-to-OpenRouter translation', async () => {
     const body = taskManifestTriggerBody({
-      autoWorktree: false,
+      autoWorktree: true,
       terminal_mode: 'ansi-html',
     });
     body.manifest.execution.agentOverride = 'opencode';
@@ -3338,7 +3505,7 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     delete process.env.RORCA_MODEL;
 
     const body = taskManifestTriggerBody({
-      autoWorktree: false,
+      autoWorktree: true,
       terminal_mode: 'ansi-html',
     });
     delete body.agentOverride;
@@ -3367,9 +3534,9 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     }));
   });
 
-  test('active run conflict returns structured activeRunId before artifact write or enqueue', async () => {
+  test('isolated task-manifest run remains worktree-contained when another run is active', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
-    const body = taskManifestTriggerBody({ autoWorktree: false });
+    const body = taskManifestTriggerBody({ autoWorktree: true });
     const activeRun = await queryOne<{ id: number }>(
       `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
        VALUES ('forge/specs/approved/existing.json', 'ws-pipe', 'running')
@@ -3381,24 +3548,27 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send(body);
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     expect(res.body).toEqual(expect.objectContaining({
-      ok: false,
-      conflict: true,
-      activeRunId: Number(activeRun!.id),
+      ok: true,
+      queued: true,
       manifestId: body.manifest.manifestId,
       idempotencyKey: body.idempotencyKey,
-      manifestHash: expect.stringMatching(/^sha256:/),
+      worktreePath: expect.any(String),
+      branchName: expect.any(String),
+      responseIdentity: expect.objectContaining({ manifestHash: expect.stringMatching(/^sha256:/) }),
     }));
-    expect(getBoss().send).not.toHaveBeenCalled();
-    expect(fs.existsSync(path.join(wsDir, 'forge', 'task-manifests', body.manifest.manifestId, 'manifest.json'))).toBe(false);
+    expect(res.body.runId).not.toBe(Number(activeRun!.id));
+    expect(path.resolve(res.body.worktreePath)).not.toBe(path.resolve(wsDir));
+    expect(getBoss().send).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(path.join(wsDir, 'forge', 'task-manifests', body.manifest.manifestId, 'manifest.json'))).toBe(true);
   });
 
   test('duplicate identical request returns the existing manifest run without a second enqueue', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
-      autoWorktree: false,
-      mergeStrategy: 'branch-only',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       terminal_mode: 'ansi-html',
     });
 
@@ -3438,8 +3608,8 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
   test('duplicate same idempotencyKey with different manifest hash returns ConflictError without artifacts or enqueue', async () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
-      autoWorktree: false,
-      mergeStrategy: 'branch-only',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       terminal_mode: 'ansi-html',
     });
 
@@ -3486,8 +3656,8 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
     const body = taskManifestTriggerBody({
       queue: true,
-      autoWorktree: false,
-      mergeStrategy: 'branch-only',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       terminal_mode: 'ansi-html',
     });
 
@@ -3544,11 +3714,52 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     }));
   });
 
+  test('queue=true TaskManifest promotion acquires one shared publication and publishes once', async () => {
+    const { getBoss } = require('../../lib/pg-boss') as typeof import('../../lib/pg-boss');
+    const body = taskManifestTriggerBody({
+      queue: true,
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
+      terminal_mode: 'ansi-html',
+    });
+    const queued = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send(body);
+    expect(queued.status).toBe(202);
+
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const promoted = await request(app)
+        .post('/api/pipeline/trigger')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send(JSON.parse(String(init?.body ?? '{}')));
+      return new Response(JSON.stringify(promoted.body), {
+        status: promoted.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    const { advanceQueue } = require('../../lib/run-queue');
+    await advanceQueue('ws-pipe');
+    const promotionDeadline = Date.now() + 3_000;
+    while ((getBoss().send as jest.Mock).mock.calls.length === 0 && Date.now() < promotionDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(getBoss().send).toHaveBeenCalledTimes(1);
+    const publication = await queryOne<{ state: string; payload_hash: string | null }>(
+      'SELECT state, payload_hash FROM pipeline_dispatch_publications WHERE run_id = $1',
+      [queued.body.runId],
+    );
+    expect(publication).toEqual({ state: 'published', payload_hash: expect.stringMatching(/^sha256:/) });
+    fetchSpy.mockRestore();
+  });
+
   test('run detail retrieval exposes persisted manifest source metadata after queue restart', async () => {
     const body = taskManifestTriggerBody({
       queue: true,
-      autoWorktree: false,
-      mergeStrategy: 'branch-only',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       terminal_mode: 'ansi-html',
     });
 
@@ -3588,7 +3799,10 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
     ['missing workspaceId', (body: Record<string, any>) => { delete body.workspaceId; }, 400],
     ['missing idempotencyKey', (body: Record<string, any>) => { delete body.idempotencyKey; }, 400],
     ['autoMerge=true', (body: Record<string, any>) => { body.autoMerge = true; }, 422],
+    ['autoWorktree=false', (body: Record<string, any>) => { body.autoWorktree = false; }, 422],
     ['mergeStrategy=direct', (body: Record<string, any>) => { body.mergeStrategy = 'direct'; }, 422],
+    ['mergeStrategy=branch-only', (body: Record<string, any>) => { body.mergeStrategy = 'branch-only'; body.manifest.execution.mergeStrategy = 'branch-only'; }, 422],
+    ['outer mergeStrategy differs from manifest', (body: Record<string, any>) => { body.mergeStrategy = 'pr'; body.manifest.execution.mergeStrategy = 'draft-pr'; }, 422],
     ['invalid source authority', (body: Record<string, any>) => { body.workspaceId = 'other-workspace'; }, 400],
     ['direct-repair-ineligible route decision', (body: Record<string, any>) => { body.manifest.routeDecision = { route: 'rorca.spec.run', reason: 'Route through normal spec run.' }; }, 400],
   ])('rejects %s', async (_caseName, mutate, expectedStatus) => {
@@ -3615,7 +3829,8 @@ describe('POST /api/pipeline/task-manifests/trigger', () => {
       'x-rorca-tier': 'public',
       'x-rorca-public-api': true,
     }));
-    expect(operation['x-rorca-rationale']).toContain('rejects autoMerge=true');
+    expect(operation['x-rorca-rationale']).toContain('requires a host-created isolated worktree');
+    expect(operation.requestBody.content['application/json'].schema.properties.mergeStrategy.enum).toEqual(['pr', 'draft-pr']);
     expect(operation.requestBody.content['application/json'].schema.required).toEqual(expect.arrayContaining(['workspaceId', 'manifest', 'idempotencyKey']));
 
     const toolsRes = await request(app)

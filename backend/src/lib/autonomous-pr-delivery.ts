@@ -46,6 +46,10 @@ import { logger } from './logger';
 import { paginateQuery, type PaginationParams } from './paginate';
 import { compileSpecPlan } from './ssdlc-plan-service';
 import { SSDLC_PLAN_COMPILER_VERSION } from './ssdlc-plan-compiler';
+import {
+  assertReleaseOneCapabilityEnabled,
+  isReleaseOneCapabilityEnabled,
+} from './release-one-capability-profile';
 
 export const AUTONOMOUS_PR_DELIVERY_QUEUE = 'pipeline:pr-delivery' as const;
 export const AUTONOMOUS_PR_DELIVERY_POLL_SECONDS = 60;
@@ -129,11 +133,15 @@ export interface DeliveryObservationClassification {
   reason: string;
 }
 
+export interface AutonomousDeliveryPolicyActuationContext {
+  revalidatePolicy(): Promise<void>;
+}
+
 export interface AutonomousDeliveryJobDependencies {
   observe: typeof observeGithubPrDeliveryEvidence;
   bridge: typeof bridgeGithubEvidenceToLifecycle;
   schedule(deliveryId: string, expectedHeadSha: string, delaySeconds: number): Promise<string | null>;
-  merge(delivery: DeliveryRow, evidence: GithubPrDeliveryEvidence): Promise<{ mergedSha: string; responseHash: `sha256:${string}`; mergedAt: string }>;
+  merge(delivery: DeliveryRow, evidence: GithubPrDeliveryEvidence, actuation: AutonomousDeliveryPolicyActuationContext): Promise<{ mergedSha: string; responseHash: `sha256:${string}`; mergedAt: string }>;
   startCiRecovery(delivery: DeliveryRow, evidence: GithubPrDeliveryEvidence): Promise<boolean>;
   recoverConflict(delivery: DeliveryRow): Promise<string>;
   now(): Date;
@@ -476,6 +484,31 @@ async function assertPolicyStillActive(delivery: DeliveryRow, now: Date): Promis
   return policy;
 }
 
+/** Hold the exact immutable policy row through the external provider effect. */
+export async function withActiveAutonomousDeliveryPolicyActuation<T>(
+  authority: { policyId: string; workspaceId: string; policyDigest: string },
+  effect: (actuation: AutonomousDeliveryPolicyActuationContext) => Promise<T>,
+): Promise<T> {
+  return transaction(async (client) => {
+    const revalidatePolicy = async (): Promise<void> => {
+      const policy = (await client.query<{ id: string }>(`
+        SELECT id FROM autonomous_delivery_policies
+        WHERE id = $1 AND workspace_id = $2 AND policy_digest = $3
+          AND status = 'active' AND expires_at > clock_timestamp()
+      `, [authority.policyId, authority.workspaceId, authority.policyDigest])).rows[0];
+      if (!policy) throw new ConflictError('Standing delivery policy is no longer active at provider actuation');
+    };
+    const locked = (await client.query<{ id: string }>(`
+      SELECT id FROM autonomous_delivery_policies
+      WHERE id = $1 AND workspace_id = $2 AND policy_digest = $3
+        AND status = 'active' AND expires_at > clock_timestamp()
+      FOR SHARE
+    `, [authority.policyId, authority.workspaceId, authority.policyDigest])).rows[0];
+    if (!locked) throw new ConflictError('Standing delivery policy is no longer active at provider actuation');
+    return effect({ revalidatePolicy });
+  });
+}
+
 async function authorize(delivery: DeliveryRow, evidence: GithubPrDeliveryEvidence, lifecycle: DeliveryLifecycleBridgeResult): Promise<void> {
   await transaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`autonomous-delivery-merge:${delivery.id}`]);
@@ -657,7 +690,12 @@ async function assertMergeDecisionHumanAuthority(delivery: DeliveryRow): Promise
 async function providerMerge(
   delivery: DeliveryRow,
   evidence: GithubPrDeliveryEvidence,
+  actuation: AutonomousDeliveryPolicyActuationContext,
 ): Promise<{ mergedSha: string; responseHash: `sha256:${string}`; mergedAt: string }> {
+  assertReleaseOneCapabilityEnabled('autonomous_provider_merge', {
+    deliveryId: delivery.id,
+    runId: Number(delivery.run_id),
+  });
   const releaseIdentity = await loadRunReleaseIdentity(Number(delivery.run_id), delivery.current_head_sha);
   return withGithubReleaseActuation(releaseIdentity, 'merge', async ({ authority, credential }) => transaction(async (client) => {
   // Hold the exact decision row through the provider actuation. Revocation
@@ -712,6 +750,9 @@ async function providerMerge(
   const body = { sha: delivery.current_head_sha, merge_method: delivery.merge_method };
   await revalidateRunReleaseIdentity(releaseIdentity);
   await assertMergeDecisionHumanAuthority(delivery);
+  // The outer policy share lock prevents revocation while this final DB-clock
+  // check and the conditional provider PUT cross the point of no return.
+  await actuation.revalidatePolicy();
   let response: Response | null = null;
   let transportError: unknown = null;
   try {
@@ -776,6 +817,10 @@ export async function processAutonomousPrDelivery(
   if (terminal(delivery.status)) return;
   if (!['queued', 'awaiting_checks', 'awaiting_review', 'awaiting_human_approval'].includes(delivery.status)) return;
   if (delivery.current_head_sha !== input.expectedHeadSha) return; // stale queued observation
+  if (!isReleaseOneCapabilityEnabled('autonomous_provider_merge')) {
+    await terminateDelivery(delivery, 'blocked', 'release_one_capability_disabled:autonomous_provider_merge');
+    return;
+  }
   if (deps.now().getTime() >= new Date(delivery.deadline_at).getTime()) {
     await terminateDelivery(delivery, 'budget_exhausted', 'maximum_elapsed_time_exceeded');
     return;
@@ -913,7 +958,11 @@ export async function processAutonomousPrDelivery(
   await updateStatus(delivery.id, 'merging');
   await event({ delivery, eventType: 'merge_started', evidenceId: finalObserved.evidence.id, decisionId: finalLifecycle.mergeDecisionId });
   try {
-    const merged = await deps.merge(delivery, finalObserved.evidence);
+    const merged = await withActiveAutonomousDeliveryPolicyActuation({
+      policyId: delivery.policy_id,
+      workspaceId: delivery.workspace_id,
+      policyDigest: delivery.policy_digest,
+    }, (actuation) => deps.merge(delivery, finalObserved.evidence, actuation));
     await persistMerged({ delivery, evidence: finalObserved.evidence, lifecycle: finalLifecycle, ...merged });
   } catch (error) {
     if (error instanceof ConflictError) {

@@ -129,6 +129,7 @@ import diagnosticsRouter from './routes/diagnostics';
 import mcpToolsRouter from './routes/mcp-tools';
 import executionEnvironmentsRouter from './routes/execution-environments';
 import { initBoss } from './lib/pg-boss';
+import { recoverPendingDispatchPublications } from './lib/dispatch-publication';
 import {
   ensureMcpToken,
   isAllowedMcpOrigin,
@@ -545,18 +546,18 @@ if (BACKGROUND_RUNTIME_ENABLED) {
   });
 }
 
-// Safety net: log unhandled rejections instead of crashing the process.
-// Routes should handle their own errors, but this prevents a single bad request
-// from taking down the entire backend.
-process.on('unhandledRejection', (reason) => {
-  logger.error({ err: reason }, '[UnhandledRejection] Caught — process kept alive');
-});
-process.on('uncaughtException', (err) => {
-  logger.error({ err }, '[UncaughtException] Caught — process kept alive');
-});
-
 /* istanbul ignore next -- only when run directly, not in tests */
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV !== 'test' && !process.env.JEST_WORKER_ID) {
+  // Safety net: log unhandled rejections instead of crashing the process.
+  // Routes should handle their own errors, but this prevents a single bad request
+  // from taking down the entire backend. Test imports must never mutate process-
+  // global listener state, especially when Jest reloads the server module.
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, '[UnhandledRejection] Caught — process kept alive');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error({ err }, '[UncaughtException] Caught — process kept alive');
+  });
   const tierSummary = summarizeRorcaTiers(swaggerSpec as any);
   const mcpToolDefinitions = getMcpToolDefinitions(swaggerSpec as any);
   logger.info(`[Rorca Tier] Route exposure: ${tierSummary.public} public, ${tierSummary.auth} auth, ${tierSummary.paid} paid, ${tierSummary.admin} admin (${tierSummary.denied} default-denied)`);
@@ -611,8 +612,6 @@ if (process.env.NODE_ENV !== 'test') {
       return;
     }
 
-    // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
-    cleanupOrphanRuns();
     // Scheduler runs in-process with API — see CLI-035 Supervisor decision.
     startScheduler();
     cleanupOldLogs();
@@ -624,8 +623,16 @@ if (process.env.NODE_ENV !== 'test') {
       .catch((err) => logger.error({ err }, '[pty-archive] Startup reconciliation failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
-    // PG-004: Initialise pg-boss so the Express process can send jobs
-    initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
+    // PG-004: Initialise the configured pg-boss schema before orphan cleanup.
+    // Cleanup must never interpret an absent/unstarted transport schema as proof
+    // that application-owned running state is orphaned.
+    initBoss()
+      .then(async () => {
+        const recovery = await recoverPendingDispatchPublications();
+        if (recovery.scanned > 0) logger.info({ recovery }, '[pipeline-dispatch] startup publication recovery complete');
+        await cleanupOrphanRuns();
+      })
+      .catch(err => logger.error({ err }, '[pg-boss] startup init/recovery/cleanup failed'));
     // US-004: Recover in-flight stories from before server restart
     storyLogFollower.recover().catch(err => logger.error({ err }, '[story-log-follower] Recovery failed'));
     // US-003: Start dedicated LISTEN/NOTIFY clients for real-time WAL and

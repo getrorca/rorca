@@ -58,6 +58,7 @@ type Operation = {
   'x-rorca-rationale'?: string;
   'x-rorca-public-api'?: boolean;
   'x-rorca-native-api'?: boolean;
+  'x-rorca-native-authority'?: string;
   'x-rorca-intentionally-denied'?: boolean;
 };
 
@@ -131,8 +132,9 @@ function main(): void {
       if (!operation['x-rorca-rationale']) {
         errors.push(`Classified native/default-denied route ${key} is missing x-rorca-rationale`);
       }
-      if (nativeApi && isSensitiveRoute(key)) {
-        errors.push(`Sensitive route must remain intentionally denied: ${key}`);
+      if (nativeApi && isSensitiveRoute(key)
+        && operation['x-rorca-native-authority'] !== 'local-admin') {
+        errors.push(`Sensitive native route ${key} must declare x-rorca-native-authority: local-admin`);
       }
       continue;
     }

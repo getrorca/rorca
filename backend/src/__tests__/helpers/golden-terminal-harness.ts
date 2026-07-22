@@ -404,6 +404,14 @@ function firstDifference(left: string, right: string): string {
   return 'no textual diff available';
 }
 
+function normalizedPtyChunkIds(chunkIds: string[]): { sequences: string[]; valid: boolean } {
+  const matches = chunkIds.map((id) => /^v1\|run_pty_output_chunks\|[0-9a-f-]{36}\|(\d+)$/.exec(id));
+  return {
+    sequences: matches.map((match, index) => match?.[1] ?? chunkIds[index]),
+    valid: matches.every((match) => match !== null),
+  };
+}
+
 export function compareGoldenReplay(
   fixture: GoldenFixtureData,
   replayBytes: Buffer,
@@ -418,13 +426,14 @@ export function compareGoldenReplay(
     .map((chunk) => String(chunk.sequence));
   const pinnedVersion = extractSemver(entry.pinnedVersion);
   const installedVersion = extractSemver(availability.installedVersion);
+  const normalizedChunkIds = normalizedPtyChunkIds(chunkIds);
 
   return {
     directNormalizedSha256: sha256(fixture.normalizedText),
     replayNormalizedSha256: sha256(replayNormalizedText),
     replayEventOrderSha256: sha256(fixture.eventOrderTokens.join('\n')),
     replayTerminalStateSha256: sha256(extractTerminalStateTokens(replayNormalizedText).join('\n')),
-    chunkIds,
+    chunkIds: normalizedChunkIds.sequences,
     expectedChunkIds,
     rawMatches: fixture.directBytes.equals(replayBytes),
     contracts: {
@@ -432,7 +441,8 @@ export function compareGoldenReplay(
       layout: sha256(fixture.normalizedText) === entry.normalizedSha256
         && sha256(replayNormalizedText) === entry.normalizedSha256,
       eventOrder: sha256(fixture.eventOrderTokens.join('\n')) === entry.eventOrderSha256
-        && JSON.stringify(chunkIds) === JSON.stringify(expectedChunkIds),
+        && normalizedChunkIds.valid
+        && JSON.stringify(normalizedChunkIds.sequences) === JSON.stringify(expectedChunkIds),
       terminalState: sha256(extractTerminalStateTokens(replayNormalizedText).join('\n')) === entry.terminalStateSha256,
       byteOrder: fixture.directBytes.equals(replayBytes),
     },
@@ -454,6 +464,7 @@ export function buildGoldenDiffReport(
     .map((chunk) => String(chunk.sequence));
   const pinnedVersion = entry.pinnedVersion;
   const installedVersion = availability.installedVersion ?? '<unavailable>';
+  const normalizedChunkIds = normalizedPtyChunkIds(chunkIds);
   const contracts: string[] = [];
 
   if (extractSemver(pinnedVersion) !== null && extractSemver(installedVersion) !== null && extractSemver(pinnedVersion) !== extractSemver(installedVersion)) {
@@ -468,8 +479,8 @@ export function buildGoldenDiffReport(
     contracts.push(`byte order mismatch: expected ${fixture.directBytes.length} bytes, received ${replayBytes.length} bytes`);
   }
 
-  if (JSON.stringify(chunkIds) !== JSON.stringify(expectedChunkIds)) {
-    contracts.push(`event-order mismatch: expected chunk ids [${expectedChunkIds.join(', ')}] but received [${chunkIds.join(', ')}]`);
+  if (!normalizedChunkIds.valid || JSON.stringify(normalizedChunkIds.sequences) !== JSON.stringify(expectedChunkIds)) {
+    contracts.push(`event-order mismatch: expected opaque PTY chunk ids ending [${expectedChunkIds.join(', ')}] but received [${chunkIds.join(', ')}]`);
   }
 
   if (sha256(replayTerminalTokens.join('\n')) !== entry.terminalStateSha256) {

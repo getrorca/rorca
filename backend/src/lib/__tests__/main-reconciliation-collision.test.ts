@@ -91,12 +91,14 @@ describe('GitHub authority × parallel-wave reconciliation collisions', () => {
 
   test('public done follows durable closeout while retired local-user transport terminates failed', () => {
     const reconcile = RELEASE.slice(RELEASE.indexOf('export async function reconcileRunReleaseIntent('));
-    const closeout = reconcile.indexOf("VALUES ('run_closeout'");
-    const terminal = reconcile.indexOf('terminal = await persistTerminalIntent(row)', closeout);
+    const closeout = reconcile.indexOf('const closeout = await loadHostRunCloseoutReference(runId)');
+    const closeoutValidation = reconcile.indexOf('if (closeout.reference.id !== row.host_closeout_event_id', closeout);
+    const terminal = reconcile.indexOf('terminal = await persistTerminalIntent(row)', closeoutValidation);
     const publicDone = reconcile.indexOf('await commitPublicDoneAndTerminalReady(row, terminal)', terminal);
     const relay = reconcile.indexOf('await relayTrustedWalEvent(terminal)', publicDone);
     expect(closeout).toBeGreaterThan(0);
-    expect(terminal).toBeGreaterThan(closeout);
+    expect(closeoutValidation).toBeGreaterThan(closeout);
+    expect(terminal).toBeGreaterThan(closeoutValidation);
     expect(publicDone).toBeGreaterThan(terminal);
     expect(relay).toBeGreaterThan(publicDone);
     expect(RELEASE).toContain('semantic_closeout: true');

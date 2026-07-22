@@ -81,29 +81,6 @@ async function getTeamLayers(workspaceId: string): Promise<{ teamL1?: string; te
  *                 contentYaml: { type: string }
  *                 preferredModel: { type: string, nullable: true, description: "Only returned for L3" }
  *       400: { description: "Invalid layer" }
- *   put:
- *     x-rorca-native-api: true
- *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     tags: [Direction Stack]
- *     summary: Upsert a direction layer
- *     operationId: upsertDirectionLayer
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [layer, contentYaml]
- *             properties:
- *               layer: { type: integer, enum: [1, 2, 3] }
- *               workspaceId: { type: string }
- *               domain: { type: string }
- *               contentYaml: { type: string }
- *               preferredModel: { type: string, description: "Only valid for layer 3" }
- *     responses:
- *       200: { description: "Saved", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
- *       400: { description: "Missing fields or invalid layer" }
- *       422: { description: "Invalid YAML or schema validation error" }
  */
 router.get('/', authRequired, async (req: Request, res: Response, next: NextFunction) => {
   try {

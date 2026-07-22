@@ -15,6 +15,7 @@ import { logger } from './logger';
 import { pruneExpiredMcpAuditLogs, runMcpAuditAnomalyScan } from './mcp-audit';
 import { getRunPtyRetentionDays, pruneExpiredRunPtyCaptures } from './run-pty-store';
 import { runPtyRetention } from './pty-operations';
+import { isReleaseOneCapabilityEnabled } from './release-one-capability-profile';
 
 interface ScheduleRow {
   id: number;
@@ -41,6 +42,9 @@ export async function triggerScheduledRun(schedule: {
   agent?: string | null;
   model?: string | null;
 }, requestKey?: string): Promise<{ accepted: boolean; runId: number | null; reason: string }> {
+  if (!isReleaseOneCapabilityEnabled('scheduled_autonomy')) {
+    return { accepted: false, runId: null, reason: 'RELEASE_ONE_CAPABILITY_DISABLED:scheduled_autonomy' };
+  }
   const specPath = `forge/specs/approved/${schedule.spec_id}.json`;
 
   const port = process.env.PORT || 3030;
@@ -150,6 +154,7 @@ async function dispatchScheduleOccurrence(occurrence: ScheduleOccurrenceRow): Pr
 }
 
 export async function checkAndFireDueSchedules(): Promise<void> {
+  if (!isReleaseOneCapabilityEnabled('scheduled_autonomy')) return;
   try {
     const pending = await query<ScheduleOccurrenceRow>(
       `SELECT schedule.*, occurrence.id AS occurrence_id, occurrence.request_key
@@ -227,6 +232,10 @@ export async function registerSchedulesWithBoss(
   boss: PgBoss,
   cronJobHandler: CronJobHandler,
 ): Promise<void> {
+  if (!isReleaseOneCapabilityEnabled('scheduled_autonomy')) {
+    logger.info('[Scheduler] Release-1 scheduled autonomy is disabled; meta-cron was not registered');
+    return;
+  }
   // 1. Register the meta-cron: fires every minute, handler checks all due schedules.
   // pipeline:cron queue is already created by ensureQueues() in initBoss(), but
   // createQueue() is idempotent — safe to call again for explicit documentation.

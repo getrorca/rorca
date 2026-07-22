@@ -41,6 +41,7 @@ import {
   withRunReleaseLock,
   type RunReleaseIdentity,
 } from './release-identity';
+import { assertReleaseOneCapabilityEnabled } from './release-one-capability-profile';
 
 export type RunMergeStrategy = 'direct' | 'pr' | 'draft-pr' | 'branch-only';
 export type RunReleaseStepStatus = 'pending' | 'processing' | 'completed' | 'not_required' | 'failed';
@@ -237,6 +238,12 @@ function assertCleanCanonicalBase(workspace: string, branch: string, expectedSha
 }
 
 export async function prepareRunReleaseIntent(input: PrepareRunReleaseInput): Promise<RunReleaseIdentity> {
+  if (input.autoMerge) {
+    assertReleaseOneCapabilityEnabled('auto_merge', { mergeStrategy: input.mergeStrategy });
+  }
+  if (input.mergeStrategy === 'branch-only' && input.externalSend) {
+    assertReleaseOneCapabilityEnabled('branch_only_external_push', { mergeStrategy: input.mergeStrategy });
+  }
   const authority = input.hostAuthority;
   if (!authority.releaseEligible || !isGitSha(authority.finalCommitSha)) {
     throw new Error('complete exact host authority is required before release preparation');

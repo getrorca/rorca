@@ -13,7 +13,7 @@ const mockBoss = {
   on: jest.fn().mockReturnThis(),
   start: jest.fn().mockResolvedValue(undefined),
   stop: jest.fn().mockResolvedValue(undefined),
-  send: jest.fn().mockResolvedValue('mock-job-id'),
+  send: jest.fn().mockResolvedValue('00000000-0000-4000-8000-000000000001'),
   cancel: jest.fn().mockResolvedValue(undefined),
   work: jest.fn().mockResolvedValue(undefined),
   createQueue: jest.fn().mockResolvedValue(undefined),

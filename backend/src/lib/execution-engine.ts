@@ -1147,7 +1147,19 @@ function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = bui
   const profile = baseEnv.RORCA_AUTONOMOUS_GUARD_PROFILE === 'conflict-resolution'
     ? 'conflict-resolution' as const
     : 'general' as const;
-  return createAutonomousCommandGuard({ cwd, env: baseEnv, profile }).env;
+  let commandDenylist: string[] = [];
+  const serializedDenylist = baseEnv.RORCA_TASK_MANIFEST_COMMAND_DENYLIST_JSON;
+  if (serializedDenylist) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(serializedDenylist) as unknown; }
+    catch { throw new Error('TaskManifest command denylist environment is invalid'); }
+    if (!Array.isArray(parsed) || parsed.length > 50
+      || parsed.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 512)) {
+      throw new Error('TaskManifest command denylist environment is invalid');
+    }
+    commandDenylist = parsed as string[];
+  }
+  return createAutonomousCommandGuard({ cwd, env: baseEnv, profile, commandDenylist }).env;
 }
 
 function isolatedAgentLaunch(

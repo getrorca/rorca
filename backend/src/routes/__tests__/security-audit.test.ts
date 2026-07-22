@@ -12,6 +12,7 @@ describe('security audit regressions', () => {
   test('state-changing route rejects missing CSRF token with 403', async () => {
     const res = await request(app)
       .post('/api/workspaces')
+      .set('Origin', 'http://localhost:5210')
       .send({ path: '/tmp/demo', label: 'Demo' });
 
     expect(res.status).toBe(403);

@@ -311,6 +311,10 @@ export async function claimWaveProductionDispatch(input: {
           FROM pipeline_runs WHERE id = $1 FOR UPDATE`, [input.runId]);
     const row = run.rows[0];
     if (!row || row.status !== 'queued') return { claimed: false, reason: 'run_not_queued' };
+    const cancellation = await client.query<{ run_id: number }>(
+      'SELECT run_id FROM pipeline_run_cancellation_requests WHERE run_id = $1 FOR UPDATE', [input.runId],
+    );
+    if (cancellation.rows[0]) return { claimed: false, reason: 'cancellation_requested' };
     if (row.workspace_id !== input.envelope.workspaceId || row.wave_policy_fence !== input.envelope.fence
       || Number(row.wave_policy_epoch ?? 0) !== input.envelope.rollout.policyEpoch) {
       return { claimed: false, reason: 'persisted_policy_mismatch' };
@@ -368,13 +372,25 @@ export async function claimWaveProductionDispatch(input: {
 export async function advanceClaimedWaveDispatch(input: {
   runId: number; owner: string; fence: string; lifecycle: 'starting' | 'running';
 }): Promise<boolean> {
-  const result = await queryOne<{ id: number }>(
-    `UPDATE pipeline_runs SET status = 'running', lifecycle_status = $4,
-       lifecycle_updated_at = NOW(), lifecycle_diagnostics = lifecycle_diagnostics || $5::jsonb
-     WHERE id = $1 AND dispatch_owner = $2 AND dispatch_fence = $3
-       AND dispatch_lease_expires_at > NOW() AND status = 'starting'
-     RETURNING id`,
-    [input.runId, input.owner, input.fence, input.lifecycle, JSON.stringify({ owner: input.owner, process: 'engine_spawned' })],
-  );
-  return Boolean(result);
+  return transaction(async (client: PoolClient) => {
+    const run = await client.query(
+      `SELECT id FROM pipeline_runs WHERE id = $1 FOR UPDATE`,
+      [input.runId],
+    );
+    if (run.rowCount !== 1) return false;
+    const cancellation = await client.query(
+      `SELECT run_id FROM pipeline_run_cancellation_requests WHERE run_id = $1 FOR UPDATE`,
+      [input.runId],
+    );
+    if (cancellation.rowCount === 1) return false;
+    const result = await client.query(
+      `UPDATE pipeline_runs SET status = 'running', lifecycle_status = $4,
+         lifecycle_updated_at = NOW(), lifecycle_diagnostics = lifecycle_diagnostics || $5::jsonb
+       WHERE id = $1 AND dispatch_owner = $2 AND dispatch_fence = $3
+         AND dispatch_lease_expires_at > NOW() AND status = 'starting'
+       RETURNING id`,
+      [input.runId, input.owner, input.fence, input.lifecycle, JSON.stringify({ owner: input.owner, process: 'engine_spawned' })],
+    );
+    return result.rowCount === 1;
+  });
 }

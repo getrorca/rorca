@@ -33,7 +33,9 @@ function parseArgs(argv: string[]) {
     base?: string;
     head?: string;
     staged?: boolean;
+    worktree?: boolean;
     allowReview?: boolean;
+    reportReviewBoundary?: boolean;
     verbose?: boolean;
     help?: boolean;
   } = {};
@@ -50,8 +52,14 @@ function parseArgs(argv: string[]) {
       case '--staged':
         options.staged = true;
         break;
+      case '--worktree':
+        options.worktree = true;
+        break;
       case '--allow-review':
         options.allowReview = true;
+        break;
+      case '--report-review-boundary':
+        options.reportReviewBoundary = true;
         break;
       case '--verbose':
         options.verbose = true;
@@ -70,7 +78,7 @@ function parseArgs(argv: string[]) {
 
 function usage(): string {
   return [
-    'Usage: npm run split:check -- [--base <git-ref> --head <git-ref> | --staged] [--allow-review] [--verbose]',
+    'Usage: npm run split:check -- [--base <git-ref> --head <git-ref> | --staged | --worktree] [--allow-review | --report-review-boundary] [--verbose]',
     '',
     'Examples:',
     '  npm run split:check -- --base origin/main --head HEAD',
@@ -106,7 +114,12 @@ function classify(file: string, config: BoundaryConfig): { kind: Classification;
   };
 }
 
-function changedFiles(options: { base?: string; head?: string; staged?: boolean }): string[] {
+function changedFiles(options: { base?: string; head?: string; staged?: boolean; worktree?: boolean }): string[] {
+  if (options.worktree) {
+    const tracked = git(['diff', '--name-only', '--diff-filter=ACDMR', 'HEAD']);
+    const untracked = git(['ls-files', '--others', '--exclude-standard']);
+    return [...new Set(`${tracked}\n${untracked}`.split('\n').map((line) => line.trim()).filter(Boolean))].sort();
+  }
   const output = options.staged
     ? git(['diff', '--cached', '--name-only', '--diff-filter=ACDMR'])
     : git(['diff', '--name-only', '--diff-filter=ACDMR', `${options.base ?? 'HEAD~1'}..${options.head ?? 'HEAD'}`]);
@@ -155,8 +168,14 @@ function main() {
     process.exit(0);
   }
 
-  if (!options.staged && (Boolean(options.base) !== Boolean(options.head))) {
-    throw new Error('Provide both --base and --head together, or neither.');
+  if (!options.staged && !options.worktree && (Boolean(options.base) !== Boolean(options.head))) {
+    throw new Error('Provide both --base and --head together, or choose --staged/--worktree.');
+  }
+  if ([options.staged, options.worktree, Boolean(options.base || options.head)].filter(Boolean).length > 1) {
+    throw new Error('--staged, --worktree, and --base/--head are mutually exclusive');
+  }
+  if (options.allowReview && options.reportReviewBoundary) {
+    throw new Error('--allow-review and --report-review-boundary are mutually exclusive');
   }
 
   const config = loadConfig();
@@ -202,7 +221,7 @@ function main() {
     console.log('\nTip: rerun with --verbose to list every matching file.');
   }
 
-  if (!options.staged) {
+  if (!options.staged && !options.worktree) {
     const base = options.base ?? 'HEAD~1';
     const head = options.head ?? 'HEAD';
     const commits = commitsForRange(base, head);
@@ -215,6 +234,11 @@ function main() {
   if (blockedRows.length > 0 || unknownRows.length > 0) {
     console.error('\nExport is NOT safe yet. Remove blocked files from the export set or extend the boundary manifest deliberately.');
     process.exit(1);
+  }
+
+  if (reviewRows.length > 0 && options.reportReviewBoundary) {
+    console.log('\nOpenCore boundary scan passed with HUMAN REVIEW REQUIRED. This is a publication prerequisite, not an approval; --allow-review was not used.');
+    return;
   }
 
   if (reviewRows.length > 0 && !options.allowReview) {

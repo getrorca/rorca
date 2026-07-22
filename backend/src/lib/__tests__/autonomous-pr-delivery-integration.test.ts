@@ -19,11 +19,12 @@ jest.mock('../run-git-authority', () => ({
 }));
 
 import { execute, queryOne } from '../../db/index';
-import { activateAutonomousDeliveryPolicy, createAutonomousDeliveryPolicy } from '../autonomous-delivery-policy';
+import { activateAutonomousDeliveryPolicy, createAutonomousDeliveryPolicy, revokeAutonomousDeliveryPolicy } from '../autonomous-delivery-policy';
 import { createCanonicalEvidence, persistCanonicalEvidence } from '../ssdlc-evidence';
 import {
   processAutonomousPrDelivery,
   reconcileAutonomousPrDeliveryMerge,
+  withActiveAutonomousDeliveryPolicyActuation,
 } from '../autonomous-pr-delivery';
 import type { GithubPrDeliveryEvidence } from '../github-pr-delivery-evidence';
 
@@ -124,21 +125,34 @@ async function fixture() {
       evidenceRequirementIds: ['evidence-requirement-merge'], providerEvidenceId: providerId,
     },
   }));
+  const providerReceiptId = crypto.randomUUID();
+  await execute(`
+    INSERT INTO provider_human_authority_receipts (
+      id, workspace_id, purpose, target_hash, issuer_id, key_id, key_fingerprint,
+      provider, provider_tenant_id, actor_id, conversation_id, thread_id, message_id,
+      occurred_at, normalized_command_hash, ingress_idempotency_key, attestation_hash
+    ) VALUES (
+      $1, $2, 'lifecycle_decision', $3, 'integration-issuer', 'integration-key', $4,
+      'slack', 'team-integration', 'release-human', 'channel-integration', 'thread-integration', $5,
+      NOW(), $3, $6, $7
+    )
+  `, [providerReceiptId, workspaceId, `sha256:${'3'.repeat(64)}`, `sha256:${'4'.repeat(64)}`,
+    `message-${providerReceiptId}`, `ingress-${providerReceiptId}`, `sha256:${crypto.createHash('sha256').update(providerReceiptId).digest('hex')}`]);
   const decision = await queryOne<{ id: string }>(`
     INSERT INTO ssdlc_decisions (
       workspace_id, spec_slug, run_id, phase_id, gate_id, decision_type, rationale,
       subject_type, subject_value, policy_version, policy_reference, policy_authorized,
       principal_type, principal_id, principal_display_label, actor, source_request_id,
-      source_channel, scope_key, request_hash, expires_at
+      source_channel, scope_key, request_hash, expires_at, provider_human_receipt_id
     ) VALUES (
-      $1, 'reviewed-delivery', $2, 'merge', 'gate-merge', 'policy_approval',
-      'Standing operator policy authorized this exact reviewed revision.',
-      'commit_sha', $3, 'policy-v1', $4, TRUE, 'internal_service',
-      'autonomous-delivery-steward', 'Autonomous Delivery Steward', 'Autonomous Delivery Steward',
-      'actuation-policy-approval-001', 'internal', 'reviewed-delivery|merge|gate-merge|*|run',
-      $5, '2026-08-01T00:00:00.000Z'
+      $1, 'reviewed-delivery', $2, 'merge', 'gate-merge', 'merge_approval',
+      'Provider human authorized this exact reviewed revision.',
+      'commit_sha', $3, 'policy-v1', $4, TRUE, 'provider_human',
+      'release-human', 'slack:release-human', 'slack:release-human',
+      'actuation-human-merge-approval-001', 'provider', 'reviewed-delivery|merge|gate-merge|*|run',
+      $5, '2026-08-01T00:00:00.000Z', $6
     ) RETURNING id::text
-  `, [workspaceId, runId, headSha, `autonomous-delivery:${created.policy.id}:${created.policy.policyDigest}`, `sha256:${'f'.repeat(64)}`]);
+  `, [workspaceId, runId, headSha, `autonomous-delivery:${created.policy.id}:${created.policy.policyDigest}`, `sha256:${'f'.repeat(64)}`, providerReceiptId]);
   if (!decision) throw new Error('decision insert failed');
   const deliveryId = crypto.randomUUID();
   await execute(`
@@ -184,26 +198,11 @@ async function fixture() {
   };
 }
 
-test('merges exact SHA once and durably closes out merged-SHA/WAL evidence idempotently', async () => {
+test('Release-1 terminalizes autonomous merge before observation or provider effects', async () => {
   const seeded = await fixture();
-  const observe = jest.fn(async () => ({ evidence: seeded.evidence, replayed: false }));
-  const bridge = jest.fn(async () => ({
-    validationEvidenceId: '100',
-    mergeEvidenceId: seeded.lifecycleEvidenceId,
-    mergeDecisionId: seeded.decisionId,
-    lifecycleReady: true,
-    blockers: [],
-    mergeGateStatus: 'passed',
-    planApprovalRequirement: 'policy' as const,
-    snapshotId: 'snapshot-actuation-1',
-    evidenceHighWaterMark: `evidence:${seeded.lifecycleEvidenceId}`,
-    decisionHighWaterMark: `decision:${seeded.decisionId}:1000`,
-  }));
-  const merge = jest.fn(async () => ({
-    mergedSha,
-    responseHash: `sha256:${'1'.repeat(64)}` as const,
-    mergedAt: '2026-07-17T00:03:00.000Z',
-  }));
+  const observe = jest.fn();
+  const bridge = jest.fn();
+  const merge = jest.fn();
   const deps = {
     observe,
     bridge,
@@ -216,12 +215,17 @@ test('merges exact SHA once and durably closes out merged-SHA/WAL evidence idemp
   await processAutonomousPrDelivery({ deliveryId: seeded.deliveryId, expectedHeadSha: headSha }, deps as any);
   await processAutonomousPrDelivery({ deliveryId: seeded.deliveryId, expectedHeadSha: headSha }, deps as any);
 
-  expect(merge).toHaveBeenCalledTimes(1);
-  expect(observe).toHaveBeenCalledTimes(2); // observation + point-of-no-return recheck
-  const delivery = await queryOne<{ status: string; merged_sha: string }>(
-    'SELECT status, merged_sha FROM autonomous_pr_deliveries WHERE id = $1', [seeded.deliveryId],
+  expect(observe).not.toHaveBeenCalled();
+  expect(bridge).not.toHaveBeenCalled();
+  expect(merge).not.toHaveBeenCalled();
+  const delivery = await queryOne<{ status: string; merged_sha: string | null; terminal_reason: string }>(
+    'SELECT status, merged_sha, terminal_reason FROM autonomous_pr_deliveries WHERE id = $1', [seeded.deliveryId],
   );
-  expect(delivery).toEqual({ status: 'merged', merged_sha: mergedSha });
+  expect(delivery).toEqual({
+    status: 'blocked',
+    merged_sha: null,
+    terminal_reason: 'release_one_capability_disabled:autonomous_provider_merge',
+  });
   const evidenceCount = await queryOne<{ total: number }>(
     'SELECT COUNT(*)::int AS total FROM autonomous_pr_delivery_merge_evidence WHERE delivery_id = $1', [seeded.deliveryId],
   );
@@ -229,8 +233,41 @@ test('merges exact SHA once and durably closes out merged-SHA/WAL evidence idemp
     `SELECT COUNT(*)::int AS total FROM wal_events WHERE event_type = 'autonomous_pr_merged' AND payload->>'deliveryId' = $1`,
     [seeded.deliveryId],
   );
-  expect(evidenceCount?.total).toBe(1);
-  expect(walCount?.total).toBe(1);
+  expect(evidenceCount?.total).toBe(0);
+  expect(walCount?.total).toBe(0);
+});
+
+test('dormant policy actuation lock still prevents revocation overtaking its point-of-no-return', async () => {
+  const seeded = await fixture();
+  let enteredEffect!: () => void;
+  const effectEntered = new Promise<void>((resolve) => { enteredEffect = resolve; });
+  let releaseEffect!: () => void;
+  const effectRelease = new Promise<void>((resolve) => { releaseEffect = resolve; });
+  const processing = withActiveAutonomousDeliveryPolicyActuation({
+    policyId: seeded.policyId,
+    workspaceId,
+    policyDigest: seeded.policyDigest,
+  }, async ({ revalidatePolicy }) => {
+    enteredEffect();
+    await effectRelease;
+    await revalidatePolicy();
+  });
+  await effectEntered;
+
+  let revocationSettled = false;
+  const revocation = revokeAutonomousDeliveryPolicy({
+    workspaceId, policyId: seeded.policyId,
+    reason: 'Operator revoked policy during the deterministic dormant-actuation race.',
+    principal: { principalId: 'operator', displayLabel: 'operator@example.test' },
+    sourceRequestId: 'actuation-policy-revoke-race-001', now: new Date(),
+  }).then((result) => { revocationSettled = true; return result; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const revocationOvertookEffect = revocationSettled;
+  releaseEffect();
+  await processing;
+  await revocation;
+
+  expect(revocationOvertookEffect).toBe(false);
 });
 
 test('reconciles a crash after provider merge without issuing a second merge', async () => {

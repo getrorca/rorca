@@ -236,3 +236,28 @@ Legacy spec generation now participates in canonical authoring preflight and dur
 ## 2026-07-21 resumable batch authoring identity
 
 Batch persistence now requires a caller-provided `idempotencyKey` bound to the accepted parent plan and complete draft set. Replays resume incomplete children and reject changed material instead of creating ambiguous duplicate specs.
+
+<!-- contract-break-v2: 2026-07-22 GET /api/version sha256:4ace065af3de1d868abffc084748b8bcbd6abab61e1b36c85a56c90d70b92527 sha256:72a0aa64ef3a271d53455d40ce47bcc1314fbed093b28ae653c493a0460b1186 -->
+## 2026-07-22 TaskManifest human-authority capability discovery
+
+The version capability response now advertises `provider-human-event.v1` and explicitly states that service-relayed TaskManifest execution requires that authority. Tolerant clients may ignore the additive fields; Hermes and other relays should require them before sending non-dry execution.
+
+<!-- contract-break-v2: 2026-07-22 GET /api/workspaces sha256:17b8dea2ff89bb1d8c7acb63659fe62b73747dbc118c3047bf30ce80e029ef69 sha256:36b714a951707ea8427910f3d15a69beb3868a16e4f37a8726a566d240a87269 -->
+## 2026-07-22 Canonical paginated workspace list
+
+The public contract no longer documents the stale `workspaces` response alias that the implementation did not return. Clients must consume the canonical paginated `items`, `total`, `hasMore`, and `cursor` fields.
+
+<!-- contract-break-v2: 2026-07-22 POST /api/pipeline/task-manifests/trigger sha256:8beff74c282556146184c8baf891822626022fecfb02d921d3caa877f56c1bab sha256:1b9c02173e53d7b448170cc25b5b2cb06e7c3c4f1baa94f763ac81c5f7d478ba -->
+## 2026-07-22 Provider-human bounded TaskManifest dispatch
+
+Non-dry internal-service dispatch now carries an exact signed provider-human event, requires a host-created isolated worktree, preserves `pr` or `draft-pr`, and rejects auto-merge or branch-only delivery. Direct authenticated human callers retain their human-origin authority; supervisory relays must use the exact manifest approval target and replay the same receipt.
+
+<!-- contract-break-v2: 2026-07-22 POST /api/pipeline/trigger sha256:08173cdf717250a248c5d3c595351e631d30e5181803ec2ef169f0faf263de1d sha256:eb224389c6832a728aea0bae84ce7ef3739a86911bc00ba2914c64bb44cf48e7 -->
+## 2026-07-22 Release-1 manifestless trigger retirement
+
+The legacy public trigger remains usable for dry-run preview and typed redirect only. Release-1 implementation execution requires the bounded TaskManifest route, a host-created worktree, sequential execution, and `pr`/`draft-pr` delivery; scheduled, parallel, direct, branch-only, auto-merge, and local-user execution shapes fail closed.
+
+<!-- contract-break-v2: 2026-07-22 POST /api/specs/{specId}/approve sha256:c1559e4cfceab749f9fe0fce76661f431c9f82c4d9ea17a4434b447d8503c4d4 sha256:52925baf6176170c234b70c940d045c94f947315e2f4298696a688745756086c -->
+## 2026-07-22 Exact governed spec approval identity
+
+Governed approval no longer permits readiness override and service-mediated approval requires an accepted authoring identity plus signed provider-human attestation. Callers must consume `approvedPath`, readiness, mutation receipt, optional provider approval, and `rorca.spec-approval-response-identity.v1` instead of relying on the legacy `specPath`-only response.

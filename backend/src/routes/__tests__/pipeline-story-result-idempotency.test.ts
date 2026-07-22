@@ -115,7 +115,7 @@ function restore<T>(target: T[], snapshot: T[]): void {
 const client = {
   query: jest.fn(async (sqlValue: unknown, params: unknown[] = []) => {
     const sql = String(sqlValue);
-    if (sql.includes('SELECT pr.workspace_id, pr.spec_path')) {
+    if (sql.includes('SELECT pr.workspace_id, pr.status')) {
       return { rows: [{
         workspace_id: 'ws-integrated-result',
         spec_path: 'forge/specs/approved/integrated-result.json',
