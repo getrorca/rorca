@@ -43,10 +43,12 @@ import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express, type Request, type Response } from 'express';
 import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // ── DB URL ─────────────────────────────────────────────────────────────────────
 
 const DB_URL = resolveTestDatabaseUrl();
+const BOSS_SCHEMA = pgBossTestSchema('dlq');
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
 
@@ -133,7 +135,7 @@ beforeAll(async () => {
   // 4. Start pg-boss with fast polling AND fast archiving (for DLQ tests)
   boss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
     maintenanceIntervalSeconds: 2,        // Run maintenance every 2s (archive failed/completed jobs)
     archiveCompletedAfterSeconds: 1,      // Archive jobs 1s after completion (minimum allowed)
@@ -360,7 +362,7 @@ async function pollDlqOnce(): Promise<void> {
   };
   const rows = await pool.query<DlqRow>(
     `SELECT id, name, output, retry_count, archived_on, data
-     FROM pgboss.archive
+     FROM ${BOSS_SCHEMA}.archive
      WHERE name IN ('pipeline:run', 'pipeline:retry')
        AND state = 'failed'
        AND archived_on > NOW() - INTERVAL '1 day'
@@ -499,7 +501,7 @@ function buildMiniServer(): Express {
         data: unknown;
       }>(
         `SELECT id, output, retry_count, archived_on, data
-         FROM pgboss.archive
+         FROM ${BOSS_SCHEMA}.archive
          WHERE name IN ('pipeline:run', 'pipeline:retry')
            AND state = 'failed'
            AND data->>'runId' = $1
@@ -581,7 +583,7 @@ function buildMiniServer(): Express {
           originalRun.agent_model,
         ],
       );
-      const newRunId = newRunRows[0].id;
+      const newRunId = Number(newRunRows[0].id);
       testRunIds.push(newRunId);
 
       const jobPayload = {
@@ -717,7 +719,7 @@ async function triggerFailingRun(
      RETURNING id`,
     [specPath, workspaceId],
   );
-  const runId = rows[0].id;
+  const runId = Number(rows[0].id);
   testRunIds.push(runId);
 
   // Send job with retryLimit:2 (3 total attempts) and retryDelay:1s
@@ -761,7 +763,7 @@ describe('pg-boss DLQ — complete lifecycle', () => {
     const archivedAsFailed = await waitFor(
       async () => {
         const { rows } = await pool.query<{ state: string }>(
-          `SELECT state::text FROM pgboss.archive
+          `SELECT state::text FROM ${BOSS_SCHEMA}.archive
            WHERE name IN ('pipeline:run', 'pipeline:retry')
              AND state = 'failed'
              AND (data->>'runId')::int = $1
@@ -784,7 +786,7 @@ describe('pg-boss DLQ — complete lifecycle', () => {
       data: Record<string, unknown>;
     }>(
       `SELECT id, state::text, retry_count, data
-       FROM pgboss.archive
+       FROM ${BOSS_SCHEMA}.archive
        WHERE name IN ('pipeline:run', 'pipeline:retry')
          AND state = 'failed'
          AND (data->>'runId')::int = $1
@@ -809,9 +811,8 @@ describe('pg-boss DLQ — complete lifecycle', () => {
     // Verify WAL event was emitted
     const { rows: dlqWalRows } = await pool.query<{ payload: Record<string, unknown> }>(
       `SELECT payload FROM wal_events
-       WHERE event_type = 'run_dlq'
-         AND (payload->>'runId')::int = $1`,
-      [runId],
+       WHERE event_type = 'run_dlq' AND workspace_id = $1`,
+      [workspaceId],
     );
 
     expect(dlqWalRows).toHaveLength(1);
@@ -875,7 +876,7 @@ describe('pg-boss DLQ — complete lifecycle', () => {
     );
 
     expect(newRunRows).toHaveLength(1);
-    expect(newRunRows[0].retried_from_run_id).toBe(runId);
+    expect(Number(newRunRows[0].retried_from_run_id)).toBe(runId);
     expect(newRunRows[0].trigger_type).toBe('dlq-retry');
 
     // ── Step 8: Original run remains 'failed' (not mutated) ──────────────────
@@ -930,7 +931,7 @@ describe('pg-boss DLQ — complete lifecycle', () => {
        RETURNING id`,
       [specPath, workspaceId],
     );
-    const runId = rows[0].id;
+    const runId = Number(rows[0].id);
     testRunIds.push(runId);
 
     const resp = await fetchJSON<{ error: string }>('GET', `/api/pipeline/runs/${runId}/dlq`);
@@ -949,7 +950,7 @@ describe('pg-boss DLQ — complete lifecycle', () => {
        RETURNING id`,
       [specPath, workspaceId],
     );
-    const runId = rows[0].id;
+    const runId = Number(rows[0].id);
     testRunIds.push(runId);
 
     const resp = await fetchJSON<{ error: string }>('POST', `/api/pipeline/runs/${runId}/dlq/retry`);

@@ -46,6 +46,10 @@ if (!DB_URL) {
 }
 
 const WORKER_PORT = process.env.WORKER_PORT ?? '3030';
+const BOSS_SCHEMA = process.env.PGBOSS_TEST_SCHEMA ?? 'pgboss_zero_downtime';
+if (!/^pgboss(?:_[a-z0-9_]+)?$/.test(BOSS_SCHEMA) || Buffer.byteLength(BOSS_SCHEMA, 'utf8') > 63) {
+  throw new Error('[rolling-worker] invalid PGBOSS_TEST_SCHEMA');
+}
 const WORKER_ID = crypto.randomUUID();
 const CHUNK_SIZE = 4 * 1024; // 4 KB
 
@@ -264,7 +268,7 @@ process.on('SIGINT', () => { void shutdown(); });
 
 const boss = new PgBoss({
   connectionString: DB_URL,
-  schema: 'pgboss',
+  schema: BOSS_SCHEMA,
   pollingIntervalSeconds: 1,
 });
 

@@ -216,15 +216,18 @@ export interface DispatchPublicationRecoveryResult {
 export async function recoverPendingDispatchPublications(input: {
   limit?: number;
   stalePublishedAfterSeconds?: number;
+  workspaceId?: string;
 } = {}): Promise<DispatchPublicationRecoveryResult> {
   const limit = Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100)));
   const staleSeconds = Math.max(1, Math.min(86_400, Math.trunc(input.stalePublishedAfterSeconds ?? 300)));
+  const workspaceId = input.workspaceId?.trim() || null;
   const candidates = await queryOne<{ run_ids: number[] | null }>(
     `SELECT ARRAY(
        SELECT publication.run_id
          FROM pipeline_dispatch_publications publication
          JOIN pipeline_runs run ON run.id = publication.run_id
         WHERE run.status = 'queued'
+          AND ($3::text IS NULL OR run.workspace_id = $3)
           AND publication.payload IS NOT NULL
           AND (
             (publication.state = 'preparing' AND (publication.lease_expires_at IS NULL OR publication.lease_expires_at <= NOW()))
@@ -233,7 +236,7 @@ export async function recoverPendingDispatchPublications(input: {
         ORDER BY publication.updated_at, publication.run_id
         LIMIT $1
      ) AS run_ids`,
-    [limit, staleSeconds],
+    [limit, staleSeconds, workspaceId],
   );
   const runIds = candidates?.run_ids ?? [];
   const result: DispatchPublicationRecoveryResult = { scanned: runIds.length, published: 0, busy: 0, failed: 0 };

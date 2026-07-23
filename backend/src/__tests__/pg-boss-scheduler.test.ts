@@ -38,11 +38,8 @@ import * as os from 'os';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
-import {
-  PIPELINE_CRON_QUEUE,
-  checkAndFireDueSchedules,
-  registerSchedulesWithBoss,
-} from '../lib/scheduler';
+import { PIPELINE_CRON_QUEUE, registerSchedulesWithBoss } from '../lib/scheduler';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // -- DB URL --
 
@@ -50,7 +47,7 @@ const DB_URL = resolveTestDatabaseUrl();
 
 // Keep this real-runtime suite isolated from unit-test fixtures that historically
 // created a noncanonical partial `pgboss` schema. PgBoss alone owns this schema.
-const BOSS_SCHEMA = 'pgboss_scheduler_cert';
+const BOSS_SCHEMA = pgBossTestSchema('scheduler');
 
 // -- Timing --
 
@@ -452,75 +449,41 @@ describe('Test D — schedule update: unschedule + re-schedule with new expressi
   });
 });
 
-// ── Test E — canonical production meta queue + occurrence authority ─────────
+// ── Test E — Release-1 production scheduler denial ──────────────────────────
 
-describe('Test E — production scheduler: two workers and crash-safe occurrence claims', () => {
-  it('fires one exact occurrence for a schedule created after both workers start and recovers an expired dispatch lease once', async () => {
+describe('Test E — Release-1 production scheduler remains disabled across workers', () => {
+  it('registers no meta schedule, dispatches no occurrence, and performs no external trigger', async () => {
     const originalFetch = globalThis.fetch;
     let triggerCalls = 0;
     try {
       globalThis.fetch = (async () => {
         triggerCalls += 1;
-        return new Response(JSON.stringify({ conflict: true }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
+        return new Response('{}', { status: 200 });
       }) as typeof fetch;
 
-      // Both production workers register only the one canonical meta queue.
-      await registerSchedulesWithBoss(bossA, async () => { await checkAndFireDueSchedules(); });
-      await registerSchedulesWithBoss(bossB, async () => { await checkAndFireDueSchedules(); });
-      scheduledNames.push(PIPELINE_CRON_QUEUE);
+      await registerSchedulesWithBoss(bossA, async () => undefined);
+      await registerSchedulesWithBoss(bossB, async () => undefined);
 
-      // Create after worker registration: no dynamic queue/subscription exists.
-      const fixture = await createTestFixture('production-meta', '* * * * *');
+      const fixture = await createTestFixture('release-one-disabled', '* * * * *');
       await pool.query(
         `UPDATE pipeline_schedules SET last_triggered_at = NOW() - INTERVAL '5 minutes' WHERE id = $1`,
         [fixture.scheduleId],
       );
+      await sleep(500);
 
-      const tickId = await bossA.send(PIPELINE_CRON_QUEUE, { source: 'test-production-meta' });
-      expect(tickId).not.toBeNull();
-      expect(await waitFor(async () => triggerCalls === 1)).toBe(true);
-      await sleep(DOUBLE_FIRE_WINDOW_MS);
-      expect(triggerCalls).toBe(1);
-
-      const first = await pool.query<{
-        id: number; status: string; attempt_count: number; request_key: string;
-      }>(
-        `SELECT id, status, attempt_count, request_key
-           FROM pipeline_schedule_occurrences WHERE schedule_id = $1`,
+      expect(triggerCalls).toBe(0);
+      const occurrences = await pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM pipeline_schedule_occurrences WHERE schedule_id = $1`,
         [fixture.scheduleId],
       );
-      expect(first.rows).toHaveLength(1);
-      expect(first.rows[0]).toMatchObject({ status: 'dispatched', attempt_count: 1 });
-      expect(first.rows[0].request_key).toMatch(/^schedule:/);
-
-      // Simulate response loss/worker death after application lease claim. Two
-      // workers race the expired lease; exact request identity is reused once.
-      await pool.query(
-        `UPDATE pipeline_schedule_occurrences
-            SET status = 'dispatching', dispatched_at = NULL,
-                lease_owner = 'dead-worker', lease_expires_at = NOW() - INTERVAL '1 second'
-          WHERE id = $1`,
-        [first.rows[0].id],
-      );
-      await Promise.all([checkAndFireDueSchedules(), checkAndFireDueSchedules()]);
-      expect(triggerCalls).toBe(2);
-      const recovered = await pool.query<{ status: string; attempt_count: number; lease_owner: string | null }>(
-        `SELECT status, attempt_count, lease_owner
-           FROM pipeline_schedule_occurrences WHERE id = $1`,
-        [first.rows[0].id],
-      );
-      expect(recovered.rows[0]).toEqual({ status: 'dispatched', attempt_count: 2, lease_owner: null });
-
+      expect(occurrences.rows[0].count).toBe('0');
       const metaSchedules = await pool.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM ${BOSS_SCHEMA}.schedule WHERE name = $1`,
         [PIPELINE_CRON_QUEUE],
       );
-      expect(metaSchedules.rows[0].count).toBe('1');
+      expect(metaSchedules.rows[0].count).toBe('0');
     } finally {
       globalThis.fetch = originalFetch;
     }
-  }, 30_000);
+  });
 });

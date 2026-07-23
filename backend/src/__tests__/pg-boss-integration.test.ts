@@ -34,6 +34,7 @@ import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
 import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // ── Connection ─────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ const DB_URL = resolveTestDatabaseUrl();
 
 // PgBoss alone owns this suite's schema; this also isolates real integration
 // evidence from legacy unit fixtures that created a partial `pgboss` schema.
-const BOSS_SCHEMA = 'pgboss_integration_cert';
+const BOSS_SCHEMA = pgBossTestSchema('integration');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 

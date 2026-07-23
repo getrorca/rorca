@@ -53,6 +53,7 @@ import { Pool } from 'pg';
 import type PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
 import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // This integration suite must bypass the repository's default no-op manual mock.
 const RealPgBoss = jest.requireActual<typeof import('pg-boss')>('pg-boss');
@@ -63,7 +64,7 @@ const DB_URL = resolveTestDatabaseUrl();
 
 // PgBoss alone owns this suite's schema; this isolates cancellation evidence
 // from legacy unit fixtures that created a partial `pgboss` schema.
-const BOSS_SCHEMA = 'pgboss_cancel_cert';
+const BOSS_SCHEMA = pgBossTestSchema('cancel');
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
 

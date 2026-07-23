@@ -191,6 +191,7 @@
         "src/db/__tests__/context-event-contract-migration.test.ts",
         "src/db/__tests__/autonomous-delivery-governance-migration.test.ts",
         "src/db/__tests__/autonomous-reviewed-delivery-migration.test.ts",
+        "src/lib/__tests__/dispatch-publication-recovery.test.ts",
         "src/__tests__/workflow-configs-migration.test.ts",
         "--runInBand", "--no-cache", "--detectOpenHandles"
       ],
@@ -201,6 +202,7 @@
       "repo": "rorca-backend",
       "description": "Exercise real configured pg-boss startup, cancellation, concurrency, restart, scheduling, retention, load, and zero-downtime paths.",
       "requiresDb": true,
+      "env": { "RORCA_PGBOSS_SCHEMA": "pgboss_cert_{pairNonce}" },
       "command": "{node}",
       "args": [
         "--max-old-space-size=8192", "node_modules/jest/bin/jest.js", "--config", "jest.pg-boss.config.ts",

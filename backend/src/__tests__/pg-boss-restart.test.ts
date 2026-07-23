@@ -42,11 +42,12 @@ import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // ── Test DB URL ────────────────────────────────────────────────────────────────
 
 const DB_URL = resolveTestDatabaseUrl();
-const BOSS_SCHEMA = 'pgboss_restart_cert';
+const BOSS_SCHEMA = pgBossTestSchema('restart');
 
 // ── Binary / file paths ────────────────────────────────────────────────────────
 

@@ -93,6 +93,8 @@ test('production gate definition is dependency ordered, complete, and contains n
     .join('\n');
   assert.match(serializedCommands, /split:check -- --candidate --report-review-boundary/);
   assert.match(serializedCommands, /check-opencore-export\.test\.mjs/);
+  const realPgBossGate = definition.gates.find((gate) => gate.id === 'real-pgboss-runtime');
+  assert.equal(realPgBossGate.env.RORCA_PGBOSS_SCHEMA, 'pgboss_cert_{pairNonce}');
   assert.doesNotMatch(serializedCommands, /--allow-review/);
   for (const forbidden of [
     /\bgit\s+push\b/i,

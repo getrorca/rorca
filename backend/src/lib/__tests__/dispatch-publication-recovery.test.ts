@@ -65,12 +65,32 @@ afterAll(async () => {
   await execute('DELETE FROM workspaces WHERE id = $1', [WORKSPACE_ID]);
 });
 
+test('payload-less direct transport completion fails closed in application dispatch authority', async () => {
+  const run = await queryOne<{ id: number }>(
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type)
+     VALUES ('forge/specs/approved/direct-transport.json', $1, 'queued', 'manual')
+     RETURNING id`,
+    [WORKSPACE_ID],
+  );
+
+  await execute(`UPDATE pipeline_runs SET status = 'done', finished_at = NOW() WHERE id = $1`, [run!.id]);
+  const publication = await queryOne<{ state: string; last_error: string | null; payload: unknown }>(
+    `SELECT state, last_error, payload FROM pipeline_dispatch_publications WHERE run_id = $1`,
+    [run!.id],
+  );
+  expect(publication).toEqual({
+    state: 'failed',
+    last_error: 'terminal_without_prepared_dispatch_payload',
+    payload: null,
+  });
+});
+
 test('restart recovery republishes expired preparation and stale published rows after transport retention loss', async () => {
   const expired = await seedRecoverablePublication('preparing', 'a');
   const retainedOnlyByApplication = await seedRecoverablePublication('published', 'b');
   const live = await seedRecoverablePublication('preparing', 'c', true);
 
-  const result = await recoverPendingDispatchPublications({ limit: 10 });
+  const result = await recoverPendingDispatchPublications({ limit: 10, workspaceId: WORKSPACE_ID });
 
   expect(result).toMatchObject({ scanned: 2, published: 2, failed: 0 });
   const send = jest.mocked(getBoss().send);

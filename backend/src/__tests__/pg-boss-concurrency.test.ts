@@ -42,10 +42,12 @@ import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
 import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // ── Connection ──────────────────────────────────────────────────────────────
 
 const DB_URL = resolveTestDatabaseUrl();
+const BOSS_SCHEMA = pgBossTestSchema('concurrency');
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -124,7 +126,7 @@ beforeAll(async () => {
   // 4. Start pg-boss with fast polling for tests
   bossA = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
   });
   bossA.on('error', () => { /* suppress noise */ });
@@ -147,9 +149,13 @@ afterAll(async () => {
   // Close HTTP server
   await new Promise<void>((res) => server.close(() => res()));
 
-  // Delete test data in FK-safe order (child rows first, then workspaces)
-  if (allRunIds.length > 0) {
-    const ids = [...allRunIds];
+  // Derive cleanup authority from suite-owned workspace IDs as well as response
+  // bookkeeping so a failed assertion cannot strand an unrecorded run.
+  const ownedRuns = allWorkspaceIds.length > 0
+    ? await pool.query<{ id: number }>('SELECT id FROM pipeline_runs WHERE workspace_id = ANY($1)', [allWorkspaceIds])
+    : { rows: [] as { id: number }[] };
+  const ids = [...new Set([...allRunIds, ...ownedRuns.rows.map((row) => row.id)])];
+  if (ids.length > 0) {
     await pool.query('DELETE FROM run_output_chunks WHERE run_id = ANY($1)', [ids]);
     await pool.query('DELETE FROM story_results WHERE run_id = ANY($1)', [ids]);
     await pool.query(
@@ -734,7 +740,7 @@ describe('Test C — pg-boss SELECT FOR UPDATE SKIP LOCKED: each job handled exa
     // so Test A's registered handlers won't consume these jobs.
     bossC = new PgBoss({
       connectionString: DB_URL,
-      schema: 'pgboss',
+      schema: BOSS_SCHEMA,
       pollingIntervalSeconds: 1,
     });
     bossC.on('error', () => { /* suppress */ });
