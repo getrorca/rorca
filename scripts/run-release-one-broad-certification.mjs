@@ -46,6 +46,46 @@ const classificationPath = path.join(outputDir, 'classification.json');
 const baselinePath = path.resolve(repositoryRoot, args.baseline);
 fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
 
+function aggregateShardResults(shards, startedAt) {
+  const sum = (key) => shards.reduce((total, shard) => total + Number(shard[key] ?? 0), 0);
+  const snapshotNumber = (key) => shards.reduce((total, shard) => total + Number(shard.snapshot?.[key] ?? 0), 0);
+  const results = shards.flatMap((shard) => shard.testResults ?? [])
+    .sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  return {
+    numFailedTestSuites: sum('numFailedTestSuites'),
+    numFailedTests: sum('numFailedTests'),
+    numPassedTestSuites: sum('numPassedTestSuites'),
+    numPassedTests: sum('numPassedTests'),
+    numPendingTestSuites: sum('numPendingTestSuites'),
+    numPendingTests: sum('numPendingTests'),
+    numRuntimeErrorTestSuites: sum('numRuntimeErrorTestSuites'),
+    numTodoTests: sum('numTodoTests'),
+    numTotalTestSuites: sum('numTotalTestSuites'),
+    numTotalTests: sum('numTotalTests'),
+    openHandles: shards.flatMap((shard) => shard.openHandles ?? []),
+    snapshot: {
+      added: snapshotNumber('added'),
+      didUpdate: shards.some((shard) => shard.snapshot?.didUpdate === true),
+      failure: shards.some((shard) => shard.snapshot?.failure === true),
+      filesAdded: snapshotNumber('filesAdded'),
+      filesRemoved: snapshotNumber('filesRemoved'),
+      filesRemovedList: shards.flatMap((shard) => shard.snapshot?.filesRemovedList ?? []),
+      filesUnmatched: snapshotNumber('filesUnmatched'),
+      filesUpdated: snapshotNumber('filesUpdated'),
+      matched: snapshotNumber('matched'),
+      total: snapshotNumber('total'),
+      unchecked: snapshotNumber('unchecked'),
+      uncheckedKeysByFile: shards.flatMap((shard) => shard.snapshot?.uncheckedKeysByFile ?? []),
+      unmatched: snapshotNumber('unmatched'),
+      updated: snapshotNumber('updated'),
+    },
+    startTime: startedAt,
+    success: shards.every((shard) => shard.success === true),
+    testResults: results,
+    wasInterrupted: shards.some((shard) => shard.wasInterrupted === true),
+  };
+}
+
 let jest;
 if (args.results) {
   if (!fs.existsSync(resultPath)) throw new Error(`Provided Jest result does not exist: ${resultPath}`);
@@ -53,20 +93,64 @@ if (args.results) {
   jest = { status: supplied.success === true ? 0 : 1, signal: null };
   fs.copyFileSync(resultPath, generatedResultPath);
 } else {
-  jest = spawnSync(process.execPath, [
-    '--max-old-space-size=8192',
-    path.join(backendRoot, 'node_modules/jest/bin/jest.js'),
-    '--runInBand',
-    '--no-cache',
-    '--detectOpenHandles',
-    '--json',
-    `--outputFile=${generatedResultPath}`,
-  ], {
+  const jestBin = path.join(backendRoot, 'node_modules/jest/bin/jest.js');
+  const listed = spawnSync(process.execPath, [jestBin, '--listTests', '--json'], {
     cwd: backendRoot,
     env: process.env,
-    stdio: 'inherit',
-    timeout: 3_300_000,
+    encoding: 'utf8',
+    timeout: 120_000,
   });
+  if (listed.status !== 0 || !listed.stdout) {
+    throw new Error(`Unable to enumerate broad Jest suites; status=${listed.status ?? 'null'} signal=${listed.signal ?? 'none'} stderr=${listed.stderr ?? ''}`);
+  }
+  const testFiles = JSON.parse(listed.stdout).map((file) => path.resolve(file)).sort();
+  if (testFiles.length === 0) throw new Error('Broad Jest enumeration returned no suites');
+  // One suite per process is deliberate. Several legacy integration suites retain
+  // multi-gigabyte transformed module graphs; grouping even two can OOM and lose
+  // the machine-readable result instead of reporting the actual assertion state.
+  const batchSize = 1;
+  const batches = [];
+  for (let offset = 0; offset < testFiles.length; offset += batchSize) {
+    batches.push(testFiles.slice(offset, offset + batchSize));
+  }
+  const shardResults = [];
+  const startedAt = Date.now();
+  let status = 0;
+  let signal = null;
+  for (let shard = 1; shard <= batches.length; shard += 1) {
+    const prefix = `batch-${String(shard).padStart(3, '0')}-of-${batches.length}`;
+    const shardPath = path.join(outputDir, `jest-results.${prefix}.json`);
+    const shardLogPath = path.join(outputDir, `jest.${prefix}.log`);
+    console.log(`Release-1 broad Jest batch ${shard}/${batches.length} (${batches[shard - 1].length} suites)`);
+    const shardLogFd = fs.openSync(shardLogPath, 'wx', 0o600);
+    const outcome = spawnSync(process.execPath, [
+      '--max-old-space-size=8192',
+      jestBin,
+      ...batches[shard - 1],
+      '--runInBand',
+      '--no-cache',
+      '--detectOpenHandles',
+      '--json',
+      `--outputFile=${shardPath}`,
+    ], {
+      cwd: backendRoot,
+      env: process.env,
+      stdio: ['ignore', shardLogFd, shardLogFd],
+      timeout: 900_000,
+    });
+    fs.closeSync(shardLogFd);
+    if (outcome.status !== 0) status = outcome.status || 1;
+    if (outcome.signal && !signal) signal = outcome.signal;
+    if (!fs.existsSync(shardPath)) {
+      throw new Error(`Broad Jest batch ${shard}/${batches.length} produced no result; status=${outcome.status ?? 'null'} signal=${outcome.signal ?? 'none'}`);
+    }
+    const shardResult = JSON.parse(fs.readFileSync(shardPath, 'utf8'));
+    shardResults.push(shardResult);
+    console.log(`Release-1 broad Jest batch ${shard}/${batches.length} status=${shardResult.success ? 'passed' : 'failed'} suites=${shardResult.numTotalTestSuites} tests=${shardResult.numTotalTests}`);
+  }
+  const aggregate = aggregateShardResults(shardResults, startedAt);
+  fs.writeFileSync(generatedResultPath, `${JSON.stringify(aggregate)}\n`, { mode: 0o600 });
+  jest = { status: aggregate.success && status === 0 ? 0 : (status || 1), signal };
 }
 
 if (!fs.existsSync(generatedResultPath)) {

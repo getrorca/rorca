@@ -22,6 +22,14 @@ beforeEach(async () => {
   await truncateAll(pool);
 });
 
+afterEach(async () => {
+  // prepareLiteSkippedMigrationsForReplay intentionally removes all skip
+  // receipts. Restore canonical receipts through the migration runner so this
+  // suite cannot poison a later isolated certification batch.
+  const { runPgMigrations } = await import('../pg-index');
+  await runPgMigrations(pool);
+});
+
 test('SELECT 1 succeeds (pool is connected)', async () => {
   const { rows } = await pool.query('SELECT 1 AS result');
   expect(rows[0].result).toBe(1);

@@ -93,6 +93,41 @@ function stage(stageKey: 'context' | 'enrich' | 'matchSkills' | 'memorySynthesis
   };
 }
 
+function installDurableStageState(initial: ReturnType<typeof stage>[]) {
+  const durableStages = new Map(initial.map((current) => [current.stageKey, current] as const));
+  const stageOrder = ['context', 'enrich', 'matchSkills', 'memorySynthesis'] as const;
+  let reads = 0;
+
+  mockListStagesByRun.mockImplementation(async () => {
+    reads += 1;
+    if (reads > 16) {
+      throw new Error(`durable stage fixture did not converge: ${stageOrder.map((stageKey) => `${stageKey}:${durableStages.get(stageKey)?.status}`).join(',')}`);
+    }
+    return stageOrder
+      .map((stageKey) => durableStages.get(stageKey))
+      .filter((current) => current !== undefined);
+  });
+  mockUpdateStageStatus.mockImplementation(async (input) => {
+    const current = durableStages.get(input.stageKey);
+    if (!current) return null;
+    if (input.allowedCurrentStatuses && !input.allowedCurrentStatuses.includes(current.status)) return null;
+    const updated = {
+      ...current,
+      status: input.status,
+      reason: input.reason ?? current.reason,
+      jobId: input.jobId ?? current.jobId,
+      bossJobId: input.bossJobId ?? current.bossJobId,
+      errorMessage: input.errorMessage ?? current.errorMessage,
+      details: input.details ?? current.details,
+      updatedAt: new Date(),
+    };
+    durableStages.set(input.stageKey, updated);
+    return updated;
+  });
+
+  return durableStages;
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   events.length = 0;
@@ -407,7 +442,7 @@ describe('spec-post-save-workflow v1 orchestrator', () => {
     };
     mockGetJob.mockResolvedValue(failedEnrichJob);
     mockQueryOne.mockResolvedValue({ save_generation: 1 });
-    mockListStagesByRun.mockResolvedValue([
+    const durableStages = installDurableStageState([
       stage('context', 'completed'),
       stage('enrich', 'failed'),
       stage('matchSkills', 'pending'),
@@ -423,6 +458,90 @@ describe('spec-post-save-workflow v1 orchestrator', () => {
       reason: 'blocked_by_required_stage_failed',
       allowedCurrentStatuses: ['pending'],
     }));
+    expect(durableStages.get('matchSkills')).toMatchObject({ status: 'failed', reason: 'blocked_by_required_stage_failed' });
+    expect(durableStages.get('memorySynthesis')).toMatchObject({ status: 'failed', reason: 'blocked_by_required_stage_failed' });
+    expect(mockBossSend).not.toHaveBeenCalled();
+  });
+
+  it('refreshes after a claimed enqueue durably fails so downstream stages are blocked', async () => {
+    const durableStages = installDurableStageState([
+      stage('context', 'completed'),
+      stage('enrich', 'pending'),
+      stage('matchSkills', 'pending'),
+      stage('memorySynthesis', 'pending'),
+    ]);
+    mockBossSend.mockRejectedValueOnce(new Error('transport unavailable'));
+
+    const { startSpecPostSaveWorkflow } = await import('../spec-post-save-workflow');
+    await startSpecPostSaveWorkflow({ specId: 'spec-enqueue-failed', workspaceId: 'ws-1', effectivePolicy: bestEffortPolicy, saveGeneration: 1 });
+
+    expect(mockUpdateStageStatus).toHaveBeenCalledWith(expect.objectContaining({
+      stageKey: 'enrich',
+      status: 'failed',
+      reason: 'enqueue_failed',
+      allowedCurrentStatuses: ['queued'],
+    }));
+    expect(durableStages.get('enrich')).toMatchObject({ status: 'failed', reason: 'enqueue_failed' });
+    expect(durableStages.get('matchSkills')).toMatchObject({ status: 'failed', reason: 'blocked_by_required_stage_failed' });
+    expect(durableStages.get('memorySynthesis')).toMatchObject({ status: 'failed', reason: 'blocked_by_required_stage_failed' });
+  });
+
+  it('terminates when a failed-dependency block CAS makes no durable transition', async () => {
+    mockGetJob.mockResolvedValue({
+      id: 'job-enrich-cas-lost',
+      specId: 'spec-cas-lost',
+      workspaceId: 'ws-1',
+      jobType: 'enrich',
+      status: 'failed',
+      bossJobId: 'boss-cas-lost',
+      requestPayload: { origin: 'persist-post-save', workflow: 'spec-post-save-v1', workflowRunId: 7, stage: 'enrich', saveGeneration: 1, priority: 1, singletonKey: 'persist-post-save:ws-1:spec-cas-lost' },
+      resultPayload: null,
+      errorMessage: 'enrich failed',
+      createdAt: new Date(),
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      saveGeneration: 1,
+    });
+    mockQueryOne.mockResolvedValue({ save_generation: 1 });
+    mockListStagesByRun.mockResolvedValue([
+      stage('context', 'completed'),
+      stage('enrich', 'failed'),
+      stage('matchSkills', 'pending'),
+      stage('memorySynthesis', 'pending'),
+    ]);
+    mockUpdateStageStatus.mockResolvedValue(null);
+
+    const { advanceSpecPostSaveWorkflowDependencies } = await import('../spec-post-save-workflow');
+    await expect(advanceSpecPostSaveWorkflowDependencies('job-enrich-cas-lost')).resolves.toBeUndefined();
+
+    expect(mockUpdateStageStatus).toHaveBeenCalledWith(expect.objectContaining({
+      stageKey: 'matchSkills',
+      reason: 'blocked_by_required_stage_failed',
+      allowedCurrentStatuses: ['pending'],
+    }));
+    expect(mockListStagesByRun).toHaveBeenCalledTimes(2);
+    expect(mockBossSend).not.toHaveBeenCalled();
+  });
+
+  it('terminates when an enqueue claim CAS makes no durable transition', async () => {
+    mockListStagesByRun.mockResolvedValue([
+      stage('context', 'completed'),
+      stage('enrich', 'pending'),
+      stage('matchSkills', 'pending'),
+      stage('memorySynthesis', 'pending'),
+    ]);
+    mockUpdateStageStatus.mockResolvedValue(null);
+
+    const { startSpecPostSaveWorkflow } = await import('../spec-post-save-workflow');
+    await expect(startSpecPostSaveWorkflow({
+      specId: 'spec-enqueue-cas-lost',
+      workspaceId: 'ws-1',
+      effectivePolicy: bestEffortPolicy,
+      saveGeneration: 1,
+    })).resolves.toMatchObject({ id: 7 });
+
+    expect(mockListStagesByRun).toHaveBeenCalledTimes(1);
+    expect(mockCreateJob).not.toHaveBeenCalled();
     expect(mockBossSend).not.toHaveBeenCalled();
   });
 });
