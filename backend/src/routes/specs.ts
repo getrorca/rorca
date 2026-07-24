@@ -9160,7 +9160,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;
@@ -10503,7 +10503,7 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;

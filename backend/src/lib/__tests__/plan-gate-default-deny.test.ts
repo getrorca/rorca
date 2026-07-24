@@ -7,10 +7,15 @@
 
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
+import { queryOne } from '../../db/index';
 import { getEffectiveUser } from '../get-user';
-import { planGate } from '../plan-gate';
+import { HERMES_PUBLIC_MUTATION_OPERATION_IDS, planGate } from '../plan-gate';
 import { swaggerSpec } from '../swagger';
 import type { AuthUser } from '../auth-utils';
+
+jest.mock('../../db/index', () => ({
+  queryOne: jest.fn(),
+}));
 
 jest.mock('../get-user', () => ({
   getEffectiveUser: jest.fn(),
@@ -38,6 +43,7 @@ const hermesService: AuthUser = {
 };
 
 const mockGetEffectiveUser = jest.mocked(getEffectiveUser);
+const mockQueryOne = jest.mocked(queryOne);
 
 function gatedApp(user: AuthUser = localAdmin) {
   const app = express();
@@ -54,7 +60,12 @@ function concretePath(openApiPath: string): string {
   return openApiPath.replace(/\{[^/]+\}/g, 'fixture');
 }
 
-async function invokePlanGate(method: string, path: string, user: AuthUser): Promise<{ status: number; body: unknown }> {
+async function invokePlanGate(
+  method: string,
+  path: string,
+  user: AuthUser,
+  request: { body?: Record<string, unknown>; headers?: Record<string, string> } = {},
+): Promise<{ status: number; body: unknown }> {
   const middleware = planGate();
   let status = 204;
   let body: unknown;
@@ -71,7 +82,7 @@ async function invokePlanGate(method: string, path: string, user: AuthUser): Pro
   };
 
   await middleware(
-    { method: method.toUpperCase(), path, headers: {}, user } as any,
+    { method: method.toUpperCase(), path, headers: request.headers ?? {}, body: request.body ?? {}, query: {}, params: {}, user } as any,
     response as any,
     (error?: unknown) => { nextError = error; },
   );
@@ -86,8 +97,20 @@ const mutatingNativeOperations = Object.entries((swaggerSpec as any).paths ?? {}
     .map(([method]) => ({ method, path: concretePath(openApiPath) }))
 );
 
+const mutatingPublicOperations = Object.entries((swaggerSpec as any).paths ?? {}).flatMap(([openApiPath, operations]) =>
+  Object.entries(operations as Record<string, Record<string, unknown>>)
+    .filter(([method, operation]) => ['post', 'put', 'patch', 'delete'].includes(method)
+      && operation?.['x-rorca-tier'] === 'public')
+    .map(([method, operation]) => ({
+      method,
+      path: concretePath(openApiPath),
+      operationId: typeof operation.operationId === 'string' ? operation.operationId : '',
+    }))
+);
+
 beforeEach(() => {
   mockGetEffectiveUser.mockImplementation(async (req) => (req.user as AuthUser | undefined) ?? null);
+  mockQueryOne.mockResolvedValue(undefined);
 });
 
 describe('planGate exact OpenAPI default-deny', () => {
@@ -129,6 +152,52 @@ describe('planGate exact OpenAPI default-deny', () => {
       }
     }
     expect(escaped).toEqual([]);
+  });
+
+  test('denies an ordinary user over every public mutation when workspace membership is absent', async () => {
+    expect(mutatingPublicOperations.length).toBeGreaterThan(0);
+    const escaped: string[] = [];
+    for (const operation of mutatingPublicOperations) {
+      const response = await invokePlanGate(operation.method, operation.path, ordinaryUser, {
+        body: { workspaceId: 'foreign-workspace' },
+      });
+      if (response.status !== 403) {
+        escaped.push(`${operation.method.toUpperCase()} ${operation.path}: ${response.status} ${JSON.stringify(response.body)}`);
+      }
+    }
+    expect(escaped).toEqual([]);
+    expect(mockQueryOne).toHaveBeenCalled();
+  });
+
+  test('allows an ordinary user only after exact workspace membership is established', async () => {
+    mockQueryOne.mockResolvedValue({ role: 'member' } as any);
+    const response = await invokePlanGate('PUT', '/api/direction', ordinaryUser, {
+      body: { workspaceId: 'owned-workspace' },
+    });
+    expect(response.status).toBe(204);
+    expect(mockQueryOne).toHaveBeenCalledWith(
+      expect.stringContaining('workspace_members'),
+      ['owned-workspace', ordinaryUser.supabaseId],
+    );
+  });
+
+  test('denies Hermes over every public mutation outside its exact cross-service contract', async () => {
+    const escaped: string[] = [];
+    const allowed: string[] = [];
+    for (const operation of mutatingPublicOperations) {
+      const response = await invokePlanGate(operation.method, operation.path, hermesService, {
+        headers: { 'x-rorca-service': 'hermes' },
+        body: { workspaceId: 'fixture-workspace' },
+      });
+      if (HERMES_PUBLIC_MUTATION_OPERATION_IDS.has(operation.operationId)) {
+        if (response.status === 204) allowed.push(operation.operationId);
+        else escaped.push(`allowed ${operation.operationId}: ${response.status} ${JSON.stringify(response.body)}`);
+      } else if (response.status !== 403) {
+        escaped.push(`${operation.method.toUpperCase()} ${operation.path}: ${response.status} ${JSON.stringify(response.body)}`);
+      }
+    }
+    expect(escaped).toEqual([]);
+    expect(new Set(allowed)).toEqual(HERMES_PUBLIC_MUTATION_OPERATION_IDS);
   });
 
   test('denies an explicitly classified sensitive operation', async () => {

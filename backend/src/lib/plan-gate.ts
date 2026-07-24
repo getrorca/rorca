@@ -5,7 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import type { RequestHandler } from 'express';
+import type { Request, RequestHandler } from 'express';
+import { queryOne } from '../db/index';
 import { INTERNAL_SERVICE_USER_ID } from './auth-utils';
 import { getEffectiveUser } from './get-user';
 import { verifyLicense } from './license-verifier';
@@ -18,6 +19,78 @@ import {
   resolveRorcaPlan,
   type RorcaPlan,
 } from './tier-auth';
+
+export const HERMES_PUBLIC_MUTATION_OPERATION_IDS = new Set([
+  'triggerTaskManifestPipelineRun',
+  'retryPipelineRun',
+  'getSpecGenerationContext',
+  'preflightSpecAuthoring',
+  'confirmSpecAuthoringPlan',
+  'persistExplicitSpecDraft',
+  'persistExplicitSpecDraftBatch',
+  'approveSpec',
+]);
+
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function resolveMutationWorkspaceId(req: Request): string | null {
+  const params = req.params as Record<string, string | undefined>;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const query = req.query as Record<string, string | undefined>;
+  const candidate = params.workspaceId
+    ?? (typeof body.workspaceId === 'string' ? body.workspaceId : undefined)
+    ?? (typeof body.workspace_id === 'string' ? body.workspace_id : undefined)
+    ?? (typeof query.workspaceId === 'string' ? query.workspaceId : undefined);
+  return candidate ? String(candidate) : null;
+}
+
+function isHermesServicePrincipal(req: Request): boolean {
+  return req.user?.id === 'rorca-hermes-service'
+    || String(req.headers['x-rorca-service'] ?? '').trim().toLowerCase() === 'hermes';
+}
+
+async function authorizePublicMutation(req: Request, operation: Record<string, unknown>): Promise<{
+  status: number;
+  body: Record<string, unknown>;
+} | null> {
+  const user = req.user;
+  if (!user) {
+    return { status: 401, body: { error: 'Authentication required', code: 'AUTH_ERROR' } };
+  }
+
+  if (isHermesServicePrincipal(req)) {
+    const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';
+    if (!HERMES_PUBLIC_MUTATION_OPERATION_IDS.has(operationId)) {
+      return {
+        status: 403,
+        body: { error: 'Hermes service is not authorized for this operation', code: 'PUBLIC_MUTATION_SERVICE_DENIED' },
+      };
+    }
+    return null;
+  }
+
+  // Local/platform administrators and the localhost MCP service intentionally
+  // retain operator authority across workspaces. Ordinary hosted principals are
+  // always bound to an explicit workspace membership below.
+  if (user.role === 'admin' || user.id === INTERNAL_SERVICE_USER_ID) return null;
+
+  const workspaceId = resolveMutationWorkspaceId(req);
+  if (!workspaceId) {
+    return {
+      status: 403,
+      body: { error: 'Workspace authority is required', code: 'PUBLIC_MUTATION_WORKSPACE_REQUIRED' },
+    };
+  }
+
+  const membership = await queryOne<{ role: string }>(
+    'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_auth_id = $2',
+    [workspaceId, user.supabaseId],
+  );
+  if (!membership) {
+    return { status: 403, body: { error: 'Forbidden', code: 'PUBLIC_MUTATION_WORKSPACE_DENIED' } };
+  }
+  return null;
+}
 
 function resolveEffectivePlan(rawPlan: string | null | undefined): RorcaPlan {
   const envLicenseKey = process.env.RORCA_LICENSE_KEY;
@@ -88,6 +161,13 @@ export function planGate(): RequestHandler {
       const { tier, capability } = getRorcaTier(operation);
 
       if (tier === 'public') {
+        if (MUTATING_METHODS.has(req.method.toUpperCase())) {
+          const denial = await authorizePublicMutation(req, operation as Record<string, unknown>);
+          if (denial) {
+            res.status(denial.status).json(denial.body);
+            return;
+          }
+        }
         next();
         return;
       }
