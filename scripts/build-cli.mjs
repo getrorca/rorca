@@ -26,6 +26,10 @@ await build({
   // on extensionless backend/src JavaScript shadows. Keep only optional/native
   // Node-resolved modules external.
   external: ['readline/promises', 'pg-native'],
+  // Keep dependency identities rooted at this checkout. Resolving a linked
+  // node_modules directory to its physical sibling path makes generated source
+  // comments vary when the same repository is built from another worktree.
+  preserveSymlinks: true,
   banner: {
     js: `/*
  * Copyright (c) 2026 Rorca Inc.

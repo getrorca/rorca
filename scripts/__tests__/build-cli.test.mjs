@@ -52,5 +52,7 @@ test('CLI typecheck/build is deterministic, executable, and cannot regenerate ba
   const help = execFileSync(process.execPath, [cliOutput, '--help'], { cwd: root, encoding: 'utf8' });
   assert.match(help, /^Usage: rorca/m);
   assert.equal((help.match(/^  capture\s/mg) ?? []).length, 1, 'CLI must register the canonical capture alias exactly once');
-  assert.doesNotMatch(fs.readFileSync(cliOutput, 'utf8'), /\.\.\/backend\/src\//);
+  const output = fs.readFileSync(cliOutput, 'utf8');
+  assert.doesNotMatch(output, /\.\.\/backend\/src\//);
+  assert.doesNotMatch(output, /^\/\/ \.\.\/[^/\n]+\/node_modules\//m, 'CLI output must not encode a sibling worktree dependency path');
 });
