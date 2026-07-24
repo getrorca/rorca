@@ -701,7 +701,8 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
         workspacePath,
         worktreePath,
         expectedBranchName: payload.branchName ?? null,
-        expectedDirtyPaths: ['.gitignore', '.rorca/run-specs', '.rorca/runtime'],
+        expectedDirtyPaths: ['.gitignore'],
+        allowRorcaRuntimeMetadata: true,
       });
       if (!worktreeValidation.ok) {
         logger.error(
@@ -1585,9 +1586,9 @@ export async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknow
         worktreePath,
         expectedBranchName: branchName,
         expectedDirtyPaths: [
-          '.gitignore', '.rorca/run-specs', '.rorca/runtime',
-          '.rorca/progress', '.rorca/run-state.json', 'progress.txt',
+          '.gitignore', '.rorca/progress', '.rorca/run-state.json', 'progress.txt',
         ],
+        allowRorcaRuntimeMetadata: true,
       });
       if (!worktreeValidation.ok) {
         logger.error(

@@ -6246,6 +6246,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         worktreePath: originalRun.worktree_path,
         expectedBranchName: originalRun.branch_name ?? null,
         expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+        allowRorcaRuntimeMetadata: true,
       })
       : null;
 
@@ -6920,6 +6921,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         worktreePath: originalRun.worktree_path,
         expectedBranchName: originalRun.branch_name ?? null,
         expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+        allowRorcaRuntimeMetadata: true,
       });
       await execute(
         `UPDATE pipeline_retry_previews
@@ -6932,6 +6934,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         worktreePath: originalRun.worktree_path,
         expectedBranchName: originalRun.branch_name ?? null,
         expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+        allowRorcaRuntimeMetadata: true,
       });
       if (!worktreePreflight.ok) {
         preparationRefusalReason = `worktree_refresh_failed:${worktreePreflight.reason}`;

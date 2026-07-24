@@ -366,6 +366,8 @@ export async function queueAutonomousPrDeliveryForRun(input: {
     workspacePath: binding.workspace_path,
     worktreePath: binding.worktree_path,
     expectedBranchName: binding.branch_name,
+    expectedDirtyPaths: ['.gitignore', '.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+    allowRorcaRuntimeMetadata: true,
   });
   if (!worktree.ok) return { queued: false, deliveryId: null, reason: `worktree_guard:${worktree.reason}`, replayed: false };
   const headSha = (await simpleGit(binding.worktree_path).revparse(['HEAD'])).trim().toLowerCase();
