@@ -6,6 +6,7 @@
  */
 
 import express from 'express';
+import type { Server } from 'http';
 import request from 'supertest';
 
 const mockRecord = jest.fn();
@@ -34,18 +35,38 @@ jest.mock('../../lib/provider-human-authority', () => {
 import lifecycleDecisionsRouter from '../lifecycle-decisions';
 import { errorHandler } from '../../lib/error-handler';
 
-function appWithUser(user?: Express.UserShape) {
-  const app = express();
-  app.use(express.json());
+let app: Server;
+
+function buildApp() {
+  const expressApp = express();
+  expressApp.use(express.json());
+  expressApp.use((req, _res, next) => {
+    const id = req.header('x-fixture-user-id');
+    if (id) {
+      req.user = {
+        id,
+        email: req.header('x-fixture-user-email') ?? '',
+        supabaseId: req.header('x-fixture-user-auth-id') ?? '',
+        role: req.header('x-fixture-user-role') ?? 'user',
+      } as Express.UserShape;
+    }
+    next();
+  });
+  expressApp.use('/api/lifecycle', lifecycleDecisionsRouter);
+  expressApp.use(errorHandler);
+  return expressApp;
+}
+
+function requestAs(user?: Express.UserShape, endpoint = '/api/lifecycle/decisions') {
+  let pending = request(app).post(endpoint);
   if (user) {
-    app.use((req, _res, next) => {
-      req.user = user;
-      next();
-    });
+    pending = pending
+      .set('x-fixture-user-id', user.id)
+      .set('x-fixture-user-email', user.email)
+      .set('x-fixture-user-auth-id', user.supabaseId ?? '')
+      .set('x-fixture-user-role', user.role ?? 'user');
   }
-  app.use('/api/lifecycle', lifecycleDecisionsRouter);
-  app.use(errorHandler);
-  return app;
+  return pending;
 }
 
 function body(overrides: Record<string, unknown> = {}) {
@@ -59,6 +80,18 @@ function body(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+beforeAll(async () => {
+  app = await new Promise<Server>((resolve, reject) => {
+    const listener = buildApp().listen(0, '127.0.0.1', () => resolve(listener));
+    listener.once('error', reject);
+  });
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -74,18 +107,18 @@ beforeEach(() => {
 
 describe('lifecycle decision route authority boundary', () => {
   test('requires an authenticated server request identity', async () => {
-    const response = await request(appWithUser()).post('/api/lifecycle/decisions').send(body());
+    const response = await requestAs().send(body());
     expect(response.status).toBe(401);
     expect(mockRecord).not.toHaveBeenCalled();
   });
 
   test('requires a client idempotency key before calling the decision service', async () => {
-    const response = await request(appWithUser({
+    const response = await requestAs({
       id: 'local-admin',
       email: 'admin@rorca.local',
       supabaseId: 'local-auth',
       role: 'admin',
-    })).post('/api/lifecycle/decisions').send(body());
+    }).send(body());
 
     expect(response.status).toBe(400);
     expect(mockRecord).not.toHaveBeenCalled();
@@ -94,12 +127,12 @@ describe('lifecycle decision route authority boundary', () => {
   test.each(['actor', 'principalId', 'principalType', 'authority', 'role', 'delegatedOnBehalfOf'])(
     'rejects request-body authority field %s',
     async (field) => {
-      const response = await request(appWithUser({
+      const response = await requestAs({
         id: 'local-admin',
         email: 'admin@rorca.local',
         supabaseId: 'local-auth',
         role: 'admin',
-      })).post('/api/lifecycle/decisions').send(body({ [field]: 'attacker-claim' }));
+      }).send(body({ [field]: 'attacker-claim' }));
       expect(response.status).toBe(400);
       expect(response.body.error).toContain('derived server-side');
       expect(mockRecord).not.toHaveBeenCalled();
@@ -107,13 +140,12 @@ describe('lifecycle decision route authority boundary', () => {
   );
 
   test('rejects the internal policy_approval type at the public decision boundary', async () => {
-    const response = await request(appWithUser({
+    const response = await requestAs({
       id: 'local-admin',
       email: 'admin@rorca.local',
       supabaseId: 'local-auth',
       role: 'admin',
-    }))
-      .post('/api/lifecycle/decisions')
+    })
       .set('Idempotency-Key', 'decision-policy-forgery-1')
       .send(body({ decisionType: 'policy_approval' }));
 
@@ -122,13 +154,12 @@ describe('lifecycle decision route authority boundary', () => {
   });
 
   test('derives local-admin provenance and request id from server context/headers', async () => {
-    const response = await request(appWithUser({
+    const response = await requestAs({
       id: 'local-admin',
       email: 'admin@rorca.local',
       supabaseId: 'local-auth',
       role: 'admin',
-    }))
-      .post('/api/lifecycle/decisions')
+    })
       .set('Idempotency-Key', 'decision-request-77')
       .send(body());
 
@@ -145,12 +176,12 @@ describe('lifecycle decision route authority boundary', () => {
   });
 
   test('denies Hermes mediation without a separately verified provider-human event', async () => {
-    const response = await request(appWithUser({
+    const response = await requestAs({
       id: 'rorca-hermes-service',
       email: 'hermes@rorca.internal',
       supabaseId: 'auth-hermes',
       role: 'admin',
-    })).post('/api/lifecycle/decisions')
+    })
       .set('Idempotency-Key', 'decision-hermes-1')
       .send(body());
 
@@ -160,9 +191,9 @@ describe('lifecycle decision route authority boundary', () => {
   });
 
   test('resolves a canonical signed-command target without recording authority', async () => {
-    const response = await request(appWithUser({
+    const response = await requestAs({
       id: 'rorca-hermes-service', email: 'hermes@rorca.internal', supabaseId: 'auth-hermes', role: 'admin',
-    })).post('/api/lifecycle/decisions/target').send(body({
+    }, '/api/lifecycle/decisions/target').send(body({
       phaseId: 'merge', gateId: 'merge-gate', decisionType: 'merge_approval',
       subject: { type: 'commit_sha', value: 'a'.repeat(40) },
     }));
@@ -198,12 +229,12 @@ describe('lifecycle decision route authority boundary', () => {
       ingressIdempotencyKey: 'ingress-human-9',
       signature: 'signed-provider-event-material-with-sufficient-length',
     };
-    const response = await request(appWithUser({
+    const response = await requestAs({
       id: 'rorca-hermes-service',
       email: 'hermes@rorca.internal',
       supabaseId: 'auth-hermes',
       role: 'admin',
-    })).post('/api/lifecycle/decisions')
+    })
       .set('Idempotency-Key', 'decision-hermes-signed-1')
       .send(body({ humanApproval }));
 

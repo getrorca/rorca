@@ -8,8 +8,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import type { Server } from 'http';
-import { once } from 'events';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -39,9 +39,14 @@ beforeAll(async () => {
 
   const serverMod = require('../../server');
   const expressApp = serverMod.default as Express;
-  authToken = await getAuthToken(expressApp);
-  app = expressApp.listen(0, '127.0.0.1');
-  await once(app, 'listening');
+  authToken = await getAuthToken(expressApp, {
+    email: `activity-${process.pid}-${randomUUID()}@rorca.test`,
+    authId: randomUUID(),
+  });
+  app = await new Promise<Server>((resolve, reject) => {
+    const listener = expressApp.listen(0, '127.0.0.1', () => resolve(listener));
+    listener.once('error', reject);
+  });
 });
 
 beforeEach(async () => {
@@ -49,6 +54,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  app.closeAllConnections();
   await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
   await execute('DELETE FROM wal_events WHERE workspace_id IN ($1, $2)', [WORKSPACE_A, WORKSPACE_B]);
   fs.rmSync(tmpDir, { recursive: true, force: true });

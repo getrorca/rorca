@@ -8,6 +8,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -24,7 +26,8 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
-let app: Express;
+let expressApp: Express;
+let app: Server;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
@@ -33,19 +36,26 @@ let authId: string;
 let workspaceSequence = 0;
 let WS_ID = '';
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   process.env.AUTH_REQUIRED = 'true';
-  app = require('../../server').default;
+  expressApp = require('../../server').default as Express;
+  authId = randomUUID();
+  authToken = await getAuthToken(expressApp, {
+    email: `analytics-${process.pid}-${randomUUID()}@rorca.test`,
+    authId,
+  });
+  await execute(`UPDATE users SET plan = 'pro' WHERE auth_id = $1::uuid`, [authId]);
+  app = await new Promise<Server>((resolve, reject) => {
+    const listener = expressApp.listen(0, '127.0.0.1', () => resolve(listener));
+    listener.once('error', reject);
+  });
 });
 
 beforeEach(async () => {
   workspaceSequence += 1;
   WS_ID = `ws-analytics-${process.pid}-${workspaceSequence}`;
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-analytics-test-'));
-  authId = `00000000-0000-4000-8000-${Math.floor(Math.random() * 1_000_000_000_000).toString().padStart(12, '0')}`;
-  authToken = await getAuthToken(app, { authId });
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
   jest.spyOn(ageGuard, 'checkAge').mockResolvedValue(true);
 
   // Each test owns a fresh workspace identity; append-only run/evidence state
@@ -70,7 +80,9 @@ afterEach(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-afterAll(() => {
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
   delete process.env.NODE_ENV;
   delete process.env.AUTH_REQUIRED;
 });
