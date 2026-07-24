@@ -32,7 +32,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
+import type { Server } from 'node:http';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
@@ -71,7 +71,7 @@ jest.mock('../../lib/pg-boss', () => {
   };
 });
 
-let app: Express;
+let app: Server;
 let mockBossSend: jest.Mock;
 let authToken: string;
 
@@ -156,7 +156,13 @@ async function seedGenerationLog(specId: string, options: {
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
+  const expressApp = serverMod.default;
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    app.once('listening', resolve);
+    app.once('error', reject);
+  });
   const pgBoss = require('../../lib/pg-boss');
   mockBossSend = pgBoss.getBoss().send;
 });
@@ -187,8 +193,6 @@ beforeEach(async () => {
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
-
-  authToken = await getAuthToken(app);
 });
 
 afterEach(async () => {
@@ -196,6 +200,13 @@ afterEach(async () => {
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
+  delete process.env.NODE_ENV;
 });
 
 describe('PSE-006: GET /api/specs/repair-candidates', () => {

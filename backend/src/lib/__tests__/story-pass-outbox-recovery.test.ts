@@ -41,9 +41,11 @@ const state: {
 const client = {
   query: jest.fn(async (sqlValue: unknown, values: unknown[] = []) => {
     const sql = String(sqlValue);
-    if (sql.includes('SELECT pr.workspace_id, pr.spec_path')) {
+    if (sql.includes('SELECT pr.workspace_id, pr.status, pr.host_closeout_event_id')) {
       return { rows: [{
         workspace_id: 'ws-recovery',
+        status: 'running',
+        host_closeout_event_id: null,
         spec_path: 'forge/specs/approved/recovery-spec.json',
         branch_name: 'run/recovery',
         execution_workspace_path: process.cwd(),

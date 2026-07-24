@@ -8,33 +8,44 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { Server } from 'http';
+import { once } from 'events';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { queryOne, execute } from '../../db/index';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 
 const WORKSPACE_ID = 'ws-hooks-test';
 
-beforeEach(async () => {
-  jest.resetModules();
+beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hooks-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, tmpDir]);
-
-  authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, tmpDir],
+  );
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  await execute('DELETE FROM agent_hooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  await execute('DELETE FROM agent_hooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 describe('GET /api/workspaces/:id/agent-hooks', () => {
@@ -48,8 +59,8 @@ describe('GET /api/workspaces/:id/agent-hooks', () => {
   });
 
   it('returns hooks ordered by event_type and id', async () => {
-    await execute(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, $2, $3, 1, 30)`, [WORKSPACE_ID, 'on_run_start', 'echo start']);
-    await execute(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, $2, $3, 1, 30)`, [WORKSPACE_ID, 'on_generate', 'echo generate']);
+    await execute(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, $2, $3, true, 30)`, [WORKSPACE_ID, 'on_run_start', 'echo start']);
+    await execute(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, $2, $3, true, 30)`, [WORKSPACE_ID, 'on_generate', 'echo generate']);
 
     const res = await request(app)
       .get(`/api/workspaces/${WORKSPACE_ID}/agent-hooks`)
@@ -73,7 +84,7 @@ describe('POST /api/workspaces/:id/agent-hooks', () => {
     expect(res.status).toBe(201);
     expect(res.body.hook.event_type).toBe('on_story_pass');
     expect(res.body.hook.command).toBe('echo story passed');
-    expect(res.body.hook.enabled).toBe(1);
+    expect(res.body.hook.enabled).toBe(true);
     expect(res.body.hook.timeout_seconds).toBe(30);
   });
 
@@ -84,7 +95,7 @@ describe('POST /api/workspaces/:id/agent-hooks', () => {
       .send({ event_type: 'on_run_start', command: 'notify.sh', enabled: false, timeout_seconds: 60 });
 
     expect(res.status).toBe(201);
-    expect(res.body.hook.enabled).toBe(0);
+    expect(res.body.hook.enabled).toBe(false);
     expect(res.body.hook.timeout_seconds).toBe(60);
   });
 
@@ -121,7 +132,7 @@ describe('POST /api/workspaces/:id/agent-hooks', () => {
 
 describe('PUT /api/workspaces/:id/agent-hooks/:hookId', () => {
   it('updates an existing hook', async () => {
-    const result = await queryOne<{ id: number }>(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, 'on_generate', 'echo old', 1, 30) RETURNING id`, [WORKSPACE_ID]);
+    const result = await queryOne<{ id: number }>(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, 'on_generate', 'echo old', true, 30) RETURNING id`, [WORKSPACE_ID]);
     const hookId = result!.id;
 
     const res = await request(app)
@@ -131,7 +142,7 @@ describe('PUT /api/workspaces/:id/agent-hooks/:hookId', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.hook.command).toBe('echo updated');
-    expect(res.body.hook.enabled).toBe(0);
+    expect(res.body.hook.enabled).toBe(false);
     expect(res.body.hook.event_type).toBe('on_generate'); // unchanged
   });
 
@@ -158,7 +169,7 @@ describe('PUT /api/workspaces/:id/agent-hooks/:hookId', () => {
 
 describe('DELETE /api/workspaces/:id/agent-hooks/:hookId', () => {
   it('deletes an existing hook', async () => {
-    const result = await queryOne<{ id: number }>(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, 'on_approve', 'echo approved', 1, 30) RETURNING id`, [WORKSPACE_ID]);
+    const result = await queryOne<{ id: number }>(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, 'on_approve', 'echo approved', true, 30) RETURNING id`, [WORKSPACE_ID]);
     const hookId = result!.id;
 
     const res = await request(app)

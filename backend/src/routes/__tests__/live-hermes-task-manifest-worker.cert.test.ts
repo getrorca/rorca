@@ -52,7 +52,7 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 30_000): P
   return false;
 }
 
-describeLive('live Hermes -> Rorca HTTP -> PostgreSQL -> pg-boss -> worker -> child certification', () => {
+describeLive('live Hermes -> Rorca HTTP -> PostgreSQL -> pg-boss -> worker -> child certification [skip: requires RORCA_RUN_LIVE_CROSS_CERT=1 and exact built Hermes artifacts; separately certified by live-built-pair gate]', () => {
   const workspaceId = `live-hermes-${crypto.randomUUID()}`;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-live-hermes-'));
   const repository = path.join(root, 'repository');

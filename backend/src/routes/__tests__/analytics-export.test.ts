@@ -5,9 +5,9 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -23,58 +23,74 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
-let app: Express;
-let tmpDir: string;
+let app: Server;
 let authToken: string;
 
-const workspaceId = 'export-test-ws';
+const workspaceId = `export-test-${crypto.randomUUID()}`;
 let runId: number;
 
+async function cleanFixture(): Promise<void> {
+  await execute('DELETE FROM token_usage WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)', [workspaceId]);
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+}
+
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  const serverModule = require('../../server');
+  const expressApp = serverModule.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: `analytics-export-${crypto.randomUUID()}@test.rorca.local`,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
+
 beforeEach(async () => {
-  jest.resetModules();
+  await cleanFixture();
+  await execute(
+    'INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)',
+    [workspaceId, 'Export Test', process.cwd()],
+  );
+  const result = await queryOne<{ id: number }>(
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
+     VALUES ($1, $2, $3, NOW() - INTERVAL '1 day', NOW()) RETURNING id`,
+    ['ralph/specs/approved/test-export.json', workspaceId, 'done'],
+  );
+  runId = Number(result!.id);
 
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockReturnValue(true),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-  }));
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-export-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
-
-  // Seed test data
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [workspaceId, 'Export Test', '/tmp/export-test']);
-
-  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
-     VALUES ($1, $2, $3, NOW() - INTERVAL '1 day', NOW()) RETURNING id`, ['ralph/specs/approved/test-export.json', workspaceId, 'done']);
-  runId = result!.id;
-
-  // Insert 5 token_usage rows
   for (let i = 1; i <= 5; i++) {
-    await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() - ($8 || ' hours')::INTERVAL)`, [runId, `US-${String(i).padStart(3, '0')}`, workspaceId, 'claude-sonnet-4-5-20250929', 10000 * i, 2000 * i, 0.05 * i, i]);
+    await execute(
+      `INSERT INTO token_usage
+         (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() - ($8 || ' hours')::INTERVAL)`,
+      [runId, `US-${String(i).padStart(3, '0')}`, workspaceId,
+        'claude-sonnet-4-5-20250929', 10000 * i, 2000 * i, 0.05 * i, i],
+    );
   }
 
-  // Insert 5 story_results rows
   const statuses = ['pass', 'pass', 'fail', 'pass', 'skip'];
   for (let i = 1; i <= 5; i++) {
-    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, elapsed_seconds, input_tokens, output_tokens)
-       VALUES ($1, $2, $3, NOW() - ($4 || ' hours')::INTERVAL, $5, $6, $7)`, [runId, `US-${String(i).padStart(3, '0')}`, statuses[i - 1], i, 60 * i, 10000 * i, 2000 * i]);
+    await execute(
+      `INSERT INTO story_results
+         (run_id, story_id, status, finished_at, elapsed_seconds, input_tokens, output_tokens)
+       VALUES ($1, $2, $3, NOW() - ($4 || ' hours')::INTERVAL, $5, $6, $7)`,
+      [runId, `US-${String(i).padStart(3, '0')}`, statuses[i - 1], i,
+        60 * i, 10000 * i, 2000 * i],
+    );
   }
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+afterEach(cleanFixture);
+
+afterAll(async () => {
+  await cleanFixture();
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
 });
 
 function get(urlPath: string) {

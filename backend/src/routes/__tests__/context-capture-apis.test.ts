@@ -9,6 +9,7 @@ import '../../lib/async-handler';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Server } from 'node:http';
 import express from 'express';
 import request from 'supertest';
 import contextEventsRouter from '../context-events';
@@ -36,7 +37,9 @@ const mockQuery = query as jest.MockedFunction<typeof query>;
 const mockQueryOne = queryOne as jest.MockedFunction<typeof queryOne>;
 const mockPromoteMemory = promoteMemory as jest.MockedFunction<typeof promoteMemory>;
 
-function buildApp() {
+let testServer: Server;
+
+function createApp() {
   const app = express();
   app.use(express.json());
   app.use('/api/context-events', contextEventsRouter);
@@ -44,6 +47,10 @@ function buildApp() {
   app.use('/api/memory/candidates', memoryCandidatesRouter);
   app.use(errorHandler);
   return app;
+}
+
+function buildApp(): Server {
+  return testServer;
 }
 
 function eventRow(overrides: Record<string, unknown> = {}) {
@@ -122,6 +129,19 @@ function findQueryOneCallContaining(fragment: string): { sql: string; params: un
   if (!call) throw new Error(`Expected queryOne call containing ${fragment}`);
   return { sql: String(call[0]), params: (call[1] ?? []) as unknown[] };
 }
+
+beforeAll(async () => {
+  testServer = createApp().listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    testServer.once('listening', resolve);
+    testServer.once('error', reject);
+  });
+});
+
+afterAll(async () => {
+  testServer.closeAllConnections();
+  await new Promise<void>((resolve, reject) => testServer.close((error) => error ? reject(error) : resolve()));
+});
 
 beforeEach(() => {
   jest.clearAllMocks();

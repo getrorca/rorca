@@ -34,6 +34,10 @@ jest.mock('../logger', () => ({
   },
 }));
 
+jest.mock('../age-guard', () => ({
+  checkAge: jest.fn().mockResolvedValue(true),
+}));
+
 import {
   buildWorkspaceProjectionPrunePlan,
   collectWorkspaceProjectionState,

@@ -5,7 +5,10 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
+import { once } from 'events';
 import * as fs from 'fs';
+import type { Server } from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
@@ -23,60 +26,56 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
-let app: Express;
+const authEmail = `memory-routes-${crypto.randomUUID()}@test.rorca.local`;
+const fixtureWorkspaceIds = new Set<string>();
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 let workspaceId: string;
+
+async function cleanMemoryFixtures(): Promise<void> {
+  const ids = [...fixtureWorkspaceIds];
+  if (ids.length > 0) {
+    await execute('DELETE FROM memory_relations WHERE workspace_id = ANY($1::text[])', [ids]);
+    await execute('DELETE FROM wal_events WHERE workspace_id = ANY($1::text[])', [ids]);
+    await execute('DELETE FROM memories WHERE workspace_id = ANY($1::text[])', [ids]);
+    await execute('DELETE FROM workspaces WHERE id = ANY($1::text[])', [ids]);
+  }
+  fixtureWorkspaceIds.clear();
+  fs.rmSync(path.join(tmpDir, 'MEMORY.md'), { force: true });
+}
 
 beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-memory-test-'));
   process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
-  app = serverMod.default;
-
-  await execute('ALTER TABLE memories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ');
-  await execute('UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL');
-  await execute('ALTER TABLE memories ALTER COLUMN updated_at SET DEFAULT NOW()');
-  await execute(`CREATE TABLE IF NOT EXISTS memory_relations (
-    id BIGSERIAL PRIMARY KEY,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    source_memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    target_memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    relation_type TEXT NOT NULL CHECK (relation_type IN ('SUPERSEDES', 'CONFLICTS_WITH')),
-    canonical_key TEXT NOT NULL,
-    note TEXT,
-    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded', 'deleted')),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ,
-    restored_at TIMESTAMPTZ,
-    superseded_at TIMESTAMPTZ,
-    CHECK (source_memory_id <> target_memory_id),
-    CHECK (
-      (status = 'active' AND deleted_at IS NULL AND superseded_at IS NULL)
-      OR (status = 'deleted' AND deleted_at IS NOT NULL)
-      OR (status = 'superseded' AND superseded_at IS NOT NULL)
-    ),
-    UNIQUE (workspace_id, relation_type, source_memory_id, target_memory_id),
-    UNIQUE (workspace_id, canonical_key)
-  )`);
-  await execute('CREATE INDEX IF NOT EXISTS idx_memory_relations_workspace_status ON memory_relations (workspace_id, status, updated_at DESC)');
-  await execute('CREATE INDEX IF NOT EXISTS idx_memory_relations_source ON memory_relations (workspace_id, source_memory_id, updated_at DESC)');
-  await execute('CREATE INDEX IF NOT EXISTS idx_memory_relations_target ON memory_relations (workspace_id, target_memory_id, updated_at DESC)');
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: authEmail,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 }, 60_000);
 
 beforeEach(async () => {
-  authToken = await getAuthToken(app);
-
-  workspaceId = 'ws-memory-test-' + Date.now();
+  workspaceId = `ws-memory-test-${crypto.randomUUID()}`;
+  fixtureWorkspaceIds.add(workspaceId);
   await execute(
-    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`,
     [workspaceId, 'Memory Test Workspace', tmpDir],
   );
 });
 
+afterEach(cleanMemoryFixtures);
+
 afterAll(async () => {
+  await cleanMemoryFixtures();
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  await execute('DELETE FROM users WHERE email = $1', [authEmail]);
   fs.rmSync(tmpDir, { recursive: true, force: true });
   delete process.env.NODE_ENV;
 });
@@ -171,8 +170,8 @@ describe('POST /api/memory', () => {
     expect(res.body.entry).toBeDefined();
     expect(res.body.entry.title).toBe('Use SQLite WAL mode');
 
-    // MEMORY.md is written to .rorca/memory/MEMORY.md by default
-    const memoryPath = path.join(tmpDir, '.rorca', 'memory', 'MEMORY.md');
+    // The active workspace ledger is the repository-root MEMORY.md.
+    const memoryPath = path.join(tmpDir, 'MEMORY.md');
     expect(fs.existsSync(memoryPath)).toBe(true);
     const content = fs.readFileSync(memoryPath, 'utf-8');
     expect(content).toContain('Use SQLite WAL mode');
@@ -666,7 +665,8 @@ describe('memory ontology relation routes', () => {
 
   test('rejects cross-workspace memory relations', async () => {
     const localMemory = await insertMemory({ content: 'Local memory.' });
-    const foreignWorkspaceId = `ws-memory-foreign-${Date.now()}`;
+    const foreignWorkspaceId = `ws-memory-foreign-${crypto.randomUUID()}`;
+    fixtureWorkspaceIds.add(foreignWorkspaceId);
     await execute(
       `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
       [foreignWorkspaceId, 'Foreign Memory Workspace', tmpDir],

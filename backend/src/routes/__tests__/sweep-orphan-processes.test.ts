@@ -58,6 +58,29 @@ jest.mock('../../lib/logger', () => ({
   },
 }));
 
+jest.mock('../../lib/trusted-wal', () => ({
+  GITHUB_GOVERNING_WAL_EVENTS: new Set(),
+  persistTrustedWalEvent: jest.fn(),
+  relayTrustedWalEvent: jest.fn(),
+  relayUnacknowledgedTrustedRunEvents: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../../lib/story-result-persistence', () => ({
+  persistCanonicalStoryResult: jest.fn().mockResolvedValue({ duplicate: false }),
+  recoverIntegratedValidatedStoryFinalizations: jest.fn().mockResolvedValue({
+    scanned: 0, finalized: 0, duplicates: 0, blocked: 0, truncated: false, finalizedStoryIds: [],
+  }),
+  WORKER_RESULT_AUTHORITY: Symbol('worker-result-authority'),
+}));
+
+jest.mock('../../lib/run-lifecycle', () => ({
+  transitionRunLifecycle: jest.fn().mockResolvedValue({}),
+}));
+
+jest.mock('../../lib/run-queue', () => ({
+  advanceQueue: jest.fn().mockResolvedValue(undefined),
+}));
+
 // ── Mock DB helpers ───────────────────────────────────────────────────────────
 
 const mockQuery = jest.fn();
@@ -234,9 +257,9 @@ describe('sweepOrphanProcesses', () => {
 
     expect(results).toHaveLength(1);
 
-    // Collect all wal_events INSERT calls
+    // Collect only inserts; interrupted-story discovery also reads wal_events.
     const walInserts = mockQueryOne.mock.calls.filter(
-      ([sql]: [string]) => sql.includes('wal_events'),
+      ([sql]: [string]) => sql.includes('INSERT INTO wal_events'),
     );
 
     // Should have: run_finished + story_failed×2
@@ -258,7 +281,7 @@ describe('sweepOrphanProcesses', () => {
     await sweepOrphanProcesses();
 
     const walInserts = mockQueryOne.mock.calls.filter(
-      ([sql]: [string]) => sql.includes('wal_events'),
+      ([sql]: [string]) => sql.includes('INSERT INTO wal_events'),
     );
     expect(walInserts.length).toBeGreaterThan(0);
 
@@ -282,7 +305,7 @@ describe('sweepOrphanProcesses', () => {
     await sweepOrphanProcesses();
 
     const walInserts = mockQueryOne.mock.calls.filter(
-      ([sql]: [string]) => sql.includes('wal_events'),
+      ([sql]: [string]) => sql.includes('INSERT INTO wal_events'),
     );
     const storyFailedCall = walInserts.find(
       ([, params]: [string, string[]]) => params[0] === 'story_failed',

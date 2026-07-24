@@ -21,8 +21,13 @@ const mockClientQuery = jest.fn();
 const mockRelease = jest.fn();
 
 jest.mock('../knowledge-graph', () => ({
+  ...jest.requireActual('../knowledge-graph'),
   graphStats: (...args: unknown[]) => mockGraphContextGraphStats(...args),
   parseAgtype: (value: unknown) => mockParseAgtype(value),
+}));
+
+jest.mock('../age-guard', () => ({
+  checkAge: jest.fn().mockResolvedValue(true),
 }));
 
 jest.mock('../context-cache', () => ({
@@ -53,43 +58,41 @@ describe('graph-context', () => {
     mockCacheGet.mockReturnValue(undefined);
     mockDbQuery.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (!sql.includes('FROM wal_events')) return [];
-      const memoryId = Array.isArray(params) ? String(params[0]) : '';
-      if (memoryId === '11') return [{ payload: JSON.stringify({ text: 'Payee alias memories should stay workspace-scoped.' }) }];
-      if (memoryId === '22') return [{ payload: JSON.stringify({ text: 'Import remediation spec observations apply to touched import files.' }) }];
-      return [];
+      const memoryIds = Array.isArray(params?.[0]) ? params[0].map(String) : [];
+      return memoryIds.map((memoryId) => ({
+        memory_id: memoryId,
+        payload: JSON.stringify({
+          id: memoryId,
+          text: memoryId === '11'
+            ? 'Payee alias memories should stay workspace-scoped.'
+            : 'Import remediation spec observations apply to touched import files.',
+        }),
+      }));
     });
     mockClientQuery.mockImplementation(async (sql: string) => {
       if (sql.includes("LOAD 'age'")) return { rows: [] };
       if (sql.includes('SET search_path')) return { rows: [] };
-      if (sql.includes("MATCH (f:File {path: 'backend/src/lib/import-history.ts'})<-[:TOUCHES]-(s:Story)-[:LEARNED_FROM]->(m:Memory)")) {
-        return { rows: [] };
+      if (sql.includes('MATCH (f:File)<-[:TOUCHES]-(s:Story)-[:LEARNED_FROM]->(m:Memory)')) {
+        return { rows: [{ mid: '"11"', sid: '"IMP-003"', fpath: '"backend/src/lib/import-history.ts"' }] };
       }
-      if (sql.includes("MATCH (m:Memory)-[:ABOUT]->(f:File {path: 'backend/src/lib/import-history.ts'})")) {
-        return { rows: [{ mid: '"11"' }] };
+      if (sql.includes('MATCH (f:File)<-[:TOUCHES]-(s:Story)-[:TOUCHES]->(f2:File)<-[:ABOUT]-(m:Memory)')) {
+        return { rows: [{ mid: '"22"', fpath: '"backend/src/lib/import-normalization.ts"' }] };
       }
-      if (sql.includes("MATCH (f:File {path: 'backend/src/lib/import-history.ts'})<-[:TOUCHES]-(s:Story)-[:BELONGS_TO]->(sp:Spec)<-[:FROM_SPEC]-(m:Memory)")) {
-        return { rows: [{ mid: '"22"', specid: '"import-categorization-precision-hardening"' }] };
-      }
-      if (sql.includes("MATCH (c:Convention)-[:APPLIES_TO]->(f:File {path: 'backend/src/lib/import-history.ts'})")) {
-        return { rows: [] };
-      }
-      if (sql.includes("MATCH (s:Story)-[:TOUCHES]->(f:File {path: 'backend/src/lib/import-history.ts'})")) {
-        return { rows: [] };
-      }
-      if (sql.includes("MATCH (s:Story)-[:TOUCHES]->(f:File {path: 'backend/src/lib/import-history.ts'})<-[:TOUCHES]-(s2:Story)")) {
-        return { rows: [] };
-      }
+      if (sql.includes('MATCH (c:Convention)-[:APPLIES_TO]->(f:File)')) return { rows: [] };
+      if (sql.includes('MATCH (s:Story)-[:TOUCHES]->(f:File)')) return { rows: [] };
+      if (sql.includes('MATCH (f:File)<-[:TOUCHES]-(s2:Story)')) return { rows: [] };
       return { rows: [] };
     });
   });
 
-  test('includes memories linked by ABOUT and FROM_SPEC edges for touched files', async () => {
+  test('includes memories linked by current scoped direct and co-modified traversals', async () => {
     const { getGraphContext } = require('../graph-context');
 
     const result = await getGraphContext(
       'IMP-004',
       ['backend/src/lib/import-history.ts'],
       'cashflow',
+      3,
     );
 
     expect(result.relatedMemories).toEqual(
@@ -97,13 +100,13 @@ describe('graph-context', () => {
         expect.objectContaining({
           memoryId: '11',
           text: 'Payee alias memories should stay workspace-scoped.',
-          relationship: 'about backend/src/lib/import-history.ts',
-          hops: 1,
+          relationship: 'learned by IMP-003 which touched backend/src/lib/import-history.ts',
+          hops: 2,
         }),
         expect.objectContaining({
           memoryId: '22',
           text: 'Import remediation spec observations apply to touched import files.',
-          relationship: 'captured in spec import-categorization-precision-hardening which touched backend/src/lib/import-history.ts',
+          relationship: 'about co-modified file backend/src/lib/import-normalization.ts',
           hops: 3,
         }),
       ]),

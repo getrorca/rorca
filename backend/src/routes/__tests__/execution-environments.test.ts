@@ -5,10 +5,28 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import type { Server } from 'node:http';
 import request from 'supertest';
-import app from '../../server';
+import expressApp from '../../server';
+import { closePool } from '../../db/index';
+
+let app: Server;
 
 describe('execution environments routes', () => {
+  beforeAll(async () => {
+    app = expressApp.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve, reject) => {
+      app.once('listening', resolve);
+      app.once('error', reject);
+    });
+  });
+
+  afterAll(async () => {
+    app.closeAllConnections();
+    await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+    await closePool();
+  });
+
   it('lists default environments with readiness', async () => {
     const res = await request(app).get('/api/execution-environments');
     expect(res.status).toBe(200);

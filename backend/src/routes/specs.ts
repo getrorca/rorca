@@ -506,6 +506,7 @@ interface SpecSummary {
 
 interface SpecVersionRow {
   id: number;
+  workspace_id: string;
   spec_slug: string;
   version: number;
   content_json: unknown; // jsonb — pg driver returns parsed object, not string
@@ -739,10 +740,20 @@ async function nextVersion(specSlug: string): Promise<number> {
   return (row?.max_ver ?? 0) + 1;
 }
 
-/** Snapshot a spec's current content into spec_versions */
-async function snapshotVersion(specSlug: string, contentJson: string, status: string, rejectionReason?: string): Promise<number> {
+/** Snapshot a spec's current content into its exact workspace version history. */
+async function snapshotVersion(
+  workspaceId: string,
+  specSlug: string,
+  contentJson: string,
+  status: string,
+  rejectionReason?: string,
+): Promise<number> {
   const version = await nextVersion(specSlug);
-  await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES ($1, $2, $3, $4, $5)`, [specSlug, version, contentJson, status, rejectionReason ?? null]);
+  await execute(
+    `INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status, rejection_reason)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [workspaceId, specSlug, version, contentJson, status, rejectionReason ?? null],
+  );
   return version;
 }
 
@@ -1708,16 +1719,18 @@ function authoringDiagramMaterial(document: string): string {
 }
 
 async function ensureAuthoringVersionSnapshot(input: {
+  workspaceId: string;
   slug: string;
   contentJson: string;
   receiptId: string;
 }): Promise<number> {
   const existing = await queryOne<{ version: number; content_json: string | Record<string, unknown> }>(
     `SELECT version, content_json FROM spec_versions
-      WHERE spec_slug = $1
-        AND content_json::jsonb #>> '{authoring,mutationReceipt,receiptId}' = $2
+      WHERE workspace_id = $1
+        AND spec_slug = $2
+        AND content_json::jsonb #>> '{authoring,mutationReceipt,receiptId}' = $3
       ORDER BY version ASC LIMIT 1`,
-    [input.slug, input.receiptId],
+    [input.workspaceId, input.slug, input.receiptId],
   );
   if (existing) {
     const stored = typeof existing.content_json === 'string'
@@ -1729,7 +1742,7 @@ async function ensureAuthoringVersionSnapshot(input: {
     }
     return Number(existing.version);
   }
-  return snapshotVersion(input.slug, input.contentJson, 'pending');
+  return snapshotVersion(input.workspaceId, input.slug, input.contentJson, 'pending');
 }
 
 interface ForgePersistResult {
@@ -1914,10 +1927,10 @@ async function persistExplicitDraftInternal(
 
   if (!recoveringExactMutation) {
     if (fs.existsSync(existingPending)) {
-      await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
+      await snapshotVersion(workspaceId, slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
       fs.unlinkSync(existingPending);
     } else if (fs.existsSync(existingApproved)) {
-      await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
+      await snapshotVersion(workspaceId, slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
       fs.unlinkSync(existingApproved);
     }
   }
@@ -1938,12 +1951,13 @@ async function persistExplicitDraftInternal(
     // Exact receipt-bound snapshot identity makes replay safe whether the crash
     // occurred before or after snapshot insertion.
     await ensureAuthoringVersionSnapshot({
+      workspaceId,
       slug,
       contentJson: fs.readFileSync(writeResult.specPath, 'utf8'),
       receiptId: options.mutationReceipt.receiptId,
     });
   } else if (!recoveringExactMutation) {
-    await snapshotVersion(slug, fs.readFileSync(writeResult.specPath, 'utf8'), 'pending');
+    await snapshotVersion(workspaceId, slug, fs.readFileSync(writeResult.specPath, 'utf8'), 'pending');
   }
   authoringMutationFailpoint('persist_after_snapshot');
   if (options?.mutationReceipt && options.mutationReceipt.state !== 'artifact_written'
@@ -4142,7 +4156,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         multiPassStage: 'pass1-pm',
         userStories: pass1Result.stories,
       };
-      await snapshotVersion(slug, JSON.stringify(pass1Spec), 'pending');
+      await snapshotVersion(workspaceId, slug, JSON.stringify(pass1Spec), 'pending');
       await emitPassEvent(slug, 1, 'completed', workspaceId);
 
       logger.info(`[Specs] Pass 1 complete: ${pass1Result.stories.length} coarse stories`);
@@ -4252,7 +4266,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         multiPassStage: 'pass2-spec-writer',
         userStories: parsed.stories,
       };
-      await snapshotVersion(slug, JSON.stringify(pass2Spec), 'pending');
+      await snapshotVersion(workspaceId, slug, JSON.stringify(pass2Spec), 'pending');
       await emitPassEvent(slug, 2, 'completed', workspaceId);
 
       logger.info(`[Specs] Pass 2 complete: ${parsed.stories.length} micro-stories (decomposed from ${pass1Result.stories.length} coarse stories)`);
@@ -4352,7 +4366,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass3-ux-designer',
           userStories: parsed.stories,
         };
-        await snapshotVersion(slug, JSON.stringify(pass3Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass3Spec), 'pending');
         await emitPassEvent(slug, 3, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 3 complete: ${parsed.stories.length} stories enriched with visual descriptions`);
@@ -4482,7 +4496,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass4-best-practices',
           userStories: parsed.stories,
         };
-        await snapshotVersion(slug, JSON.stringify(pass4Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass4Spec), 'pending');
         await emitPassEvent(slug, 4, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 4 complete: ${parsed.stories.length} stories annotated with convention guidance`);
@@ -4647,7 +4661,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass5-adversarial-review',
           userStories: parsed.stories,
         };
-        await snapshotVersion(slug, JSON.stringify(pass5Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass5Spec), 'pending');
         await emitPassEvent(slug, 5, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 5 complete: ${parsed.stories.length} stories after adversarial review`);
@@ -4763,7 +4777,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           userStories: parsed.stories,
           ...(verificationReport ? { verificationReport } : {}),
         };
-        await snapshotVersion(slug, JSON.stringify(pass6Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass6Spec), 'pending');
         await emitPassEvent(slug, 6, 'completed', workspaceId);
 
         // Attach verification report to parsed output for the response
@@ -5853,8 +5867,8 @@ async function processBatch(batch: BatchState): Promise<void> {
   })]);
   broadcastAll(finishWalEvent!);
 
-  // Auto-clean batch from memory after 1 hour
-  setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000);
+  // Auto-clean batch from memory after 1 hour without retaining the server process.
+  setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000).unref();
 }
 
 /**
@@ -7492,9 +7506,13 @@ async function rebuildSearchIndex(workspaceId: string, workspacePath: string): P
   }
 
   // Index rejected specs from WAL (most recent rejection per slug only)
-  const rejectedEvents = await query(`SELECT spec_id, ts, payload FROM wal_events
-     WHERE event_type = 'spec_rejected' AND payload::text LIKE '%' || $1 || '%'
-     ORDER BY ts DESC`, [workspaceId]) as { spec_id: string; ts: string; payload: string }[];
+  const rejectedEvents = await query(
+    `SELECT spec_id, ts, payload FROM wal_events
+     WHERE event_type = 'spec_rejected'
+       AND (workspace_id = $1 OR (workspace_id IS NULL AND payload ->> 'workspaceId' = $1))
+     ORDER BY ts DESC`,
+    [workspaceId],
+  ) as { spec_id: string; ts: string; payload: string }[];
 
   const seenRejected = new Set<string>();
   for (const evt of rejectedEvents) {
@@ -7506,7 +7524,12 @@ async function rebuildSearchIndex(workspaceId: string, workspacePath: string): P
     if (existing) continue;
 
     // Try to get content from spec_versions for richer indexing
-    const versionRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [evt.spec_id]) as { content_json: unknown } | undefined;
+    const versionRow = await queryOne(
+      `SELECT content_json FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2
+       ORDER BY version DESC LIMIT 1`,
+      [workspaceId, evt.spec_id],
+    ) as { content_json: unknown } | undefined;
 
     if (versionRow) {
       const content = typeof versionRow.content_json === 'string' ? JSON.parse(versionRow.content_json) : versionRow.content_json as any;
@@ -7752,10 +7775,13 @@ router.get('/archive', async (req: Request, res: Response) => {
 
     // Collect rejected specs from WAL events
     if (statusFilter === 'all' || statusFilter === 'rejected') {
-      const rejectedEvents = await query(`SELECT spec_id, ts, payload FROM wal_events
+      const rejectedEvents = await query(
+        `SELECT spec_id, ts, payload FROM wal_events
          WHERE event_type = 'spec_rejected'
-         AND payload::text LIKE '%' || $1 || '%'
-         ORDER BY ts DESC`, [workspaceId]) as { spec_id: string; ts: string; payload: string }[];
+           AND (workspace_id = $1 OR (workspace_id IS NULL AND payload ->> 'workspaceId' = $1))
+         ORDER BY ts DESC`,
+        [workspaceId],
+      ) as { spec_id: string; ts: string; payload: string }[];
 
       const seenRejected = new Set<string>();
       for (const evt of rejectedEvents) {
@@ -7819,7 +7845,12 @@ router.get('/archive', async (req: Request, res: Response) => {
           else if (fs.existsSync(approvedFile)) content = parseSpecFile(approvedFile);
           else {
             // Rejected spec — try spec_versions
-            const vRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [spec.id]) as { content_json: unknown } | undefined;
+            const vRow = await queryOne(
+              `SELECT content_json FROM spec_versions
+               WHERE workspace_id = $1 AND spec_slug = $2
+               ORDER BY version DESC LIMIT 1`,
+              [workspaceId, spec.id],
+            ) as { content_json: unknown } | undefined;
             if (vRow) content = typeof vRow.content_json === 'string' ? JSON.parse(vRow.content_json) : vRow.content_json as any;
           }
         } catch {
@@ -8721,6 +8752,11 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
  *         required: true
  *         schema: { type: string }
  *         description: Spec slug
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Exact workspace authority for the version history
  *     responses:
  *       200:
  *         description: Paginated list of spec versions
@@ -8744,40 +8780,58 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
  */
 router.get('/:specId/versions', async (req: Request, res: Response) => {
   try {
-    const { specId } = req.params;
+    const specIdParam = req.params.specId;
+    const specId = Array.isArray(specIdParam) ? specIdParam[0] : specIdParam;
+    const workspaceId = req.query.workspaceId as string | undefined;
+    if (!specId) {
+      throw new ValidationError('Missing required path param: specId');
+    }
+    if (!workspaceId) {
+      throw new ValidationError('Missing required query param: workspaceId');
+    }
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
 
-    let rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
-       FROM spec_versions WHERE spec_slug = $1 ORDER BY version ASC`, [specId]) as SpecVersionRow[];
+    let rows = await query(
+      `SELECT id, workspace_id, spec_slug, version, content_json, status, rejection_reason, created_at
+       FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2
+       ORDER BY version ASC`,
+      [workspaceId, specId],
+    ) as SpecVersionRow[];
 
-    // Auto-backfill: if no versions recorded yet, read the spec from disk and create version 1
+    // Auto-backfill only from the exact requested workspace. Version numbers
+    // remain globally monotonic per slug for the historical uniqueness contract.
     if (rows.length === 0) {
-      const workspaces = await query('SELECT path FROM workspaces') as { path: string }[];
-      for (const ws of workspaces) {
-        const candidates = [
-          path.join(ws.path, 'forge', 'specs', 'approved', `${specId}.json`),
-          path.join(ws.path, 'forge', 'specs', 'pending', `${specId}.json`),
-        ];
-        for (const candidate of candidates) {
-          if (fs.existsSync(candidate)) {
-            try {
-              const raw = fs.readFileSync(candidate, 'utf-8');
-              const parsed = JSON.parse(raw);
-              const status = candidate.includes('/approved/') ? 'approved' : 'pending';
-              // Use spec generatedAt as created_at if available
-              const createdAt = parsed.generatedAt ? new Date(parsed.generatedAt) : new Date();
-              await execute(
-                `INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason, created_at)
-                 VALUES ($1, 1, $2, $3, NULL, $4)
-                 ON CONFLICT (spec_slug, version) DO NOTHING`,
-                [specId, raw, status, createdAt.toISOString()],
-              );
-              rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
-                 FROM spec_versions WHERE spec_slug = $1 ORDER BY version ASC`, [specId]) as SpecVersionRow[];
-            } catch { /* unreadable — skip */ }
-            break;
-          }
-        }
-        if (rows.length > 0) break;
+      const candidates = [
+        path.join(workspace.path, 'forge', 'specs', 'approved', `${specId}.json`),
+        path.join(workspace.path, 'forge', 'specs', 'pending', `${specId}.json`),
+      ];
+      for (const candidate of candidates) {
+        if (!fs.existsSync(candidate)) continue;
+        try {
+          const raw = fs.readFileSync(candidate, 'utf-8');
+          const parsed = JSON.parse(raw);
+          const status = candidate.includes(`${path.sep}approved${path.sep}`) ? 'approved' : 'pending';
+          const createdAt = parsed.generatedAt ? new Date(parsed.generatedAt) : new Date();
+          const version = await nextVersion(specId);
+          await execute(
+            `INSERT INTO spec_versions
+               (workspace_id, spec_slug, version, content_json, status, rejection_reason, created_at)
+             VALUES ($1, $2, $3, $4, $5, NULL, $6)`,
+            [workspaceId, specId, version, raw, status, createdAt.toISOString()],
+          );
+          rows = await query(
+            `SELECT id, workspace_id, spec_slug, version, content_json, status, rejection_reason, created_at
+             FROM spec_versions
+             WHERE workspace_id = $1 AND spec_slug = $2
+             ORDER BY version ASC`,
+            [workspaceId, specId],
+          ) as SpecVersionRow[];
+        } catch { /* unreadable or concurrently versioned — skip */ }
+        break;
       }
     }
 
@@ -8820,6 +8874,11 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
  *         required: true
  *         schema: { type: string }
  *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Exact workspace authority for both versions
+ *       - in: query
  *         name: v1
  *         required: true
  *         schema: { type: integer }
@@ -8858,8 +8917,17 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
 router.get('/:specId/diff', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string | undefined;
     const v1 = parseInt(req.query.v1 as string);
     const v2 = parseInt(req.query.v2 as string);
+
+    if (!workspaceId) {
+      throw new ValidationError('Missing required query param: workspaceId');
+    }
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
 
     if (isNaN(v1) || isNaN(v2)) {
       throw new ValidationError('Missing or invalid query params: v1 and v2 must be integers');
@@ -8871,9 +8939,19 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
       return;
     }
 
-    const row1 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v1]) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row1 = await queryOne(
+      `SELECT content_json, status, rejection_reason, created_at
+       FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2 AND version = $3`,
+      [workspaceId, specId, v1],
+    ) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
-    const row2 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v2]) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row2 = await queryOne(
+      `SELECT content_json, status, rejection_reason, created_at
+       FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2 AND version = $3`,
+      [workspaceId, specId, v2],
+    ) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
     if (!row1 || !row2) {
       const missing = !row1 && !row2 ? `v${v1} and v${v2}` : !row1 ? `v${v1}` : `v${v2}`;
@@ -8959,14 +9037,18 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;
     }
 
-    // Fetch the version to restore
-    const row = await queryOne('SELECT content_json, status FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, versionNum]) as { content_json: unknown; status: string } | undefined;
+    // Fetch only the exact workspace-owned version to restore.
+    const row = await queryOne(
+      `SELECT content_json, status FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2 AND version = $3`,
+      [workspaceId, specId, versionNum],
+    ) as { content_json: unknown; status: string } | undefined;
 
     if (!row) {
       throw new NotFoundError(`Version ${versionNum} not found for spec ${specId}`);
@@ -8985,7 +9067,7 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     if (currentPath) {
       // Snapshot current state before overwriting
       const currentContent = fs.readFileSync(currentPath, 'utf8');
-      await snapshotVersion(specId, currentContent, currentStatus);
+      await snapshotVersion(workspaceId, specId, currentContent, currentStatus);
     }
 
     // Write restored content to the current location (or pending if no file exists)
@@ -9003,7 +9085,7 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     await markCurrentPlanStaleIfMaterialChanged({ workspaceId: String(workspaceId), workspacePath: workspace.path, specSlug: specId });
 
     // Snapshot the restored version
-    const newVersion = await snapshotVersion(specId, JSON.stringify(restoredContent), currentStatus);
+    const newVersion = await snapshotVersion(workspaceId, specId, JSON.stringify(restoredContent), currentStatus);
 
     // Emit WAL event
     await execute(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`, ['version_restored', specId, workspaceId, JSON.stringify({
@@ -9113,7 +9195,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
       }
 
       // Snapshot pre-edit state as a new version
-      const version = await snapshotVersion(specId, raw, 'pending');
+      const version = await snapshotVersion(workspaceId, specId, raw, 'pending');
 
       // Apply only provided fields
       if (title !== undefined) stories[storyIndex].title = title;
@@ -9297,7 +9379,7 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
 
     // Snapshot pre-edit state as a new version
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = await snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(workspaceId, specId, raw, status);
 
     // Apply edits — only update provided fields
     if (title !== undefined) stories[storyIndex].title = title;
@@ -9422,7 +9504,7 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
 
     // Snapshot pre-delete state
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = await snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(workspaceId, specId, raw, status);
 
     // Remove and reindex
     stories.splice(storyIndex, 1);
@@ -9889,7 +9971,7 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
     }
 
     // Snapshot version
-    await snapshotVersion(forkSlug, JSON.stringify(forkedSpec), 'pending');
+    await snapshotVersion(workspaceId, forkSlug, JSON.stringify(forkedSpec), 'pending');
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_forked', $1, $2, 'user', $3)` + ' RETURNING *', [forkSlug, workspaceId, JSON.stringify({ forkedFrom: specId, title: forkedSpec.title })]);
@@ -10435,7 +10517,11 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
       // Approved spec dragged back to Draft — move it back to pending/ (unapprove)
       fs.mkdirSync(pendingDir, { recursive: true });
       fs.renameSync(approvedFile, pendingFile);
-      await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId, reason: reason ?? null, from: 'approved' })]);
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+         VALUES ('spec_rejected', $1, $2, 'user', $3)`,
+        [workspaceId, specId, JSON.stringify({ workspaceId, reason: reason ?? null, from: 'approved' })],
+      );
       res.json({ ok: true });
       return;
     }
@@ -10447,11 +10533,15 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
 
     // Pending spec rejected — snapshot and delete
     const content = fs.readFileSync(pendingFile, 'utf8');
-    await snapshotVersion(specId as string, content, 'rejected', (reason as string) ?? undefined);
+    await snapshotVersion(workspaceId, specId as string, content, 'rejected', (reason as string) ?? undefined);
     fs.unlinkSync(pendingFile);
 
     // Emit WAL event
-    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId, reason: reason ?? null })]);
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+       VALUES ('spec_rejected', $1, $2, 'user', $3)`,
+      [workspaceId, specId, JSON.stringify({ workspaceId, reason: reason ?? null })],
+    );
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -11686,7 +11776,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
 
     // Snapshot pre-mutation state
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = await snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(workspaceId, specId, raw, status);
 
     let eventType: string;
 
@@ -13686,7 +13776,7 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
       for (const name of mentionedNames) {
         const mentionedUserId = userByName.get(name.toLowerCase());
         if (mentionedUserId && mentionedUserId !== user.id) {
-          createNotification(
+          await createNotification(
             mentionedUserId,
             'mention',
             `${comment.display_name} mentioned you in a comment`,
@@ -14781,7 +14871,7 @@ ${storyList}`;
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     // Create spec version for audit trail
-    await snapshotVersion(specId, JSON.stringify(specContent), specStatus === 'approved' ? 'approved' : 'pending');
+    await snapshotVersion(workspaceId, specId, JSON.stringify(specContent), specStatus === 'approved' ? 'approved' : 'pending');
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)` + ' RETURNING *', ['skill_matched', specId, workspaceId, JSON.stringify({
@@ -15361,7 +15451,7 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
     }
 
     // Create spec version for audit trail
-    await snapshotVersion(specId, JSON.stringify(result.spec), specStatus === 'approved' ? 'approved' : 'pending');
+    await snapshotVersion(workspaceId, specId, JSON.stringify(result.spec), specStatus === 'approved' ? 'approved' : 'pending');
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(
@@ -15583,7 +15673,7 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
       const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
       fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
       const normalizedSpecId = Array.isArray(specId) ? specId[0] : specId;
-      await snapshotVersion(normalizedSpecId, JSON.stringify(content), specStatus);
+      await snapshotVersion(workspaceId, normalizedSpecId, JSON.stringify(content), specStatus);
       await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: normalizedSpecId });
     }
 
@@ -16088,7 +16178,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
 
     const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
     fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
-    await snapshotVersion(specId, JSON.stringify(content), specStatus);
+    await snapshotVersion(String(workspaceId), specId, JSON.stringify(content), specStatus);
 
     const userStories: any[] = content.userStories ?? [];
     res.json({

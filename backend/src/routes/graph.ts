@@ -348,8 +348,9 @@ router.post('/populate', async (req: Request, res: Response, next: NextFunction)
     for (const slug of specSlugs) {
       const sv = await queryOne<{ spec_slug: string; content_json: unknown }>(
         `SELECT spec_slug, content_json FROM spec_versions
-         WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`,
-        [slug],
+         WHERE workspace_id = $1 AND spec_slug = $2
+         ORDER BY version DESC LIMIT 1`,
+        [workspaceId, slug],
       );
       if (sv) approvedSpecs.push(sv);
     }

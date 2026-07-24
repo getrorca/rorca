@@ -16,8 +16,16 @@ import {
 
 const WORKSPACE_ID = 'ws-canonical-cancellation';
 
-beforeEach(async () => {
+async function cleanupFixtureRuns(): Promise<void> {
+  await execute(
+    'DELETE FROM pipeline_run_cancellation_requests WHERE workspace_id = $1',
+    [WORKSPACE_ID],
+  );
   await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [WORKSPACE_ID]);
+}
+
+beforeEach(async () => {
+  await cleanupFixtureRuns();
   await execute(
     `INSERT INTO workspaces (id, label, path)
      VALUES ($1, 'Cancellation test', '/tmp/rorca-cancellation-test')
@@ -27,7 +35,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await cleanupFixtureRuns();
   await execute('DELETE FROM workspaces WHERE id = $1', [WORKSPACE_ID]);
 });
 

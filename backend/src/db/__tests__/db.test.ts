@@ -5,10 +5,12 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
-import { getTestPool, closeTestPool, truncateAll } from '../../__tests__/helpers/pg-test-utils';
+import { getTestPool, closeTestPool } from '../../__tests__/helpers/pg-test-utils';
 
 let pool: Pool;
+let workspaceId = '';
 
 beforeAll(() => {
   pool = getTestPool();
@@ -18,11 +20,17 @@ afterAll(async () => {
   await closeTestPool();
 });
 
-beforeEach(async () => {
-  await truncateAll(pool);
+beforeEach(() => {
+  workspaceId = randomUUID();
 });
 
 afterEach(async () => {
+  await pool.query('DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)', [workspaceId]);
+  await pool.query('DELETE FROM pipeline_runs WHERE workspace_id = $1', [workspaceId]);
+  await pool.query('DELETE FROM direction_layers WHERE workspace_id = $1', [workspaceId]);
+  await pool.query('DELETE FROM wal_events WHERE workspace_id = $1', [workspaceId]);
+  await pool.query('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+
   // prepareLiteSkippedMigrationsForReplay intentionally removes all skip
   // receipts. Restore canonical receipts through the migration runner so this
   // suite cannot poison a later isolated certification batch.
@@ -72,54 +80,64 @@ test('all core tables exist in pg_tables', async () => {
   }
 });
 
-test('can INSERT and SELECT from core tables', async () => {
-  // workspaces
+test('can INSERT and SELECT fixture-owned rows from core tables', async () => {
+  const storyId = `US-${randomUUID()}`;
+  const eventType = `test-${randomUUID()}`;
+
   await pool.query(
-    "INSERT INTO workspaces (id, label, path) VALUES ('w1', 'Test', '/tmp')"
+    'INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)',
+    [workspaceId, 'Test', `/tmp/${workspaceId}`],
   );
   const { rows: wsRows } = await pool.query(
-    "SELECT * FROM workspaces WHERE id = 'w1'"
+    'SELECT * FROM workspaces WHERE id = $1',
+    [workspaceId],
   );
+  expect(wsRows).toHaveLength(1);
   expect(wsRows[0].label).toBe('Test');
 
-  // direction_layers
   await pool.query(
-    "INSERT INTO direction_layers (workspace_id, layer, content_yaml) VALUES ('w1', 1, 'key: val')"
+    'INSERT INTO direction_layers (workspace_id, layer, content_yaml) VALUES ($1, 1, $2)',
+    [workspaceId, 'key: val'],
   );
   const { rows: dlRows } = await pool.query(
-    "SELECT * FROM direction_layers WHERE workspace_id = 'w1'"
+    'SELECT * FROM direction_layers WHERE workspace_id = $1',
+    [workspaceId],
   );
+  expect(dlRows).toHaveLength(1);
   expect(dlRows[0].content_yaml).toBe('key: val');
 
-  // pipeline_runs
-  await pool.query(
-    "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('spec.yaml', 'w1', 'running')"
-  );
   const { rows: prRows } = await pool.query(
-    "SELECT * FROM pipeline_runs WHERE workspace_id = 'w1'"
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+     VALUES ($1, $2, 'running')
+     RETURNING *`,
+    ['spec.yaml', workspaceId],
   );
+  expect(prRows).toHaveLength(1);
   expect(prRows[0].status).toBe('running');
 
-  // story_results
   const runId = prRows[0].id;
   await pool.query(
-    "INSERT INTO story_results (run_id, story_id, status) VALUES ($1, 'US-001', 'pass')",
-    [runId]
+    "INSERT INTO story_results (run_id, story_id, status) VALUES ($1, $2, 'pass')",
+    [runId, storyId],
   );
   const { rows: srRows } = await pool.query(
-    "SELECT * FROM story_results WHERE story_id = 'US-001'"
+    'SELECT * FROM story_results WHERE run_id = $1 AND story_id = $2',
+    [runId, storyId],
   );
+  expect(srRows).toHaveLength(1);
   expect(srRows[0].status).toBe('pass');
 
-  // wal_events
   await pool.query(
     `INSERT INTO wal_events (event_type, workspace_id, payload)
-     VALUES ('test', 'w1', '{"a":1}')`
+     VALUES ($1, $2, $3::jsonb)`,
+    [eventType, workspaceId, JSON.stringify({ a: 1 })],
   );
   const { rows: weRows } = await pool.query(
-    "SELECT * FROM wal_events WHERE event_type = 'test'"
+    'SELECT * FROM wal_events WHERE workspace_id = $1 AND event_type = $2',
+    [workspaceId, eventType],
   );
-  expect(weRows[0].workspace_id).toBe('w1');
+  expect(weRows).toHaveLength(1);
+  expect(weRows[0].workspace_id).toBe(workspaceId);
 });
 
 test('schema_migrations has applied versions', async () => {

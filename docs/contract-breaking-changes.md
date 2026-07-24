@@ -261,3 +261,21 @@ The legacy public trigger remains usable for dry-run preview and typed redirect 
 ## 2026-07-22 Exact governed spec approval identity
 
 Governed approval no longer permits readiness override and service-mediated approval requires an accepted authoring identity plus signed provider-human attestation. Callers must consume `approvedPath`, readiness, mutation receipt, optional provider approval, and `rorca.spec-approval-response-identity.v1` instead of relying on the legacy `specPath`-only response.
+
+<!-- contract-break-v2: 2026-07-24 GET /api/specs/{specId}/versions sha256:be92d4e232439f57f0d91499847c494c06ff60ce03c5e009b82a9cccd161d93c sha256:abac4ad4caf9448a0840cb5645ef507c33c53849e9f6bbb2e68871b163c23aa6 -->
+## 2026-07-24 Workspace-bound spec version history
+
+Spec version history now requires `workspaceId` and returns only snapshots whose canonical `spec_versions.workspace_id` matches it. This closes cross-workspace disclosure when two repositories use the same spec slug; legacy NULL-workspace snapshots are intentionally not exposed.
+
+Migration path:
+- Pass the active workspace ID as the required `workspaceId` query parameter.
+- Treat an empty history as authoritative for that workspace; do not fall back to slug-global or legacy NULL-workspace rows.
+
+<!-- contract-break-v2: 2026-07-24 GET /api/specs/{specId}/diff sha256:92319d3be10d5119838d2668e22c6deb569c4bd0b855d9e4d74caf717b772ff7 sha256:f392b8b7e14b568ae60a4162d81e6f76c7de77b5fdb22d8ef0c2cefb58692ee6 -->
+## 2026-07-24 Workspace-bound spec version diff
+
+Version comparison now requires `workspaceId` and resolves both versions inside that exact workspace. This prevents a same-slug version from another repository from becoming diff input or restore authority.
+
+Migration path:
+- Pass the active workspace ID as the required `workspaceId` query parameter with `v1` and `v2`.
+- Handle HTTP 404 when either requested version is absent from that workspace, even if the same slug/version exists elsewhere.

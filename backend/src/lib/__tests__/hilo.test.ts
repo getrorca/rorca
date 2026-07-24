@@ -9,6 +9,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+const mockProbeAutonomousCli = jest.fn();
+
+jest.mock('../autonomous-cli-probe', () => ({
+  probeAutonomousCli: (binaryPath: string, args: string[], options: unknown) =>
+    mockProbeAutonomousCli(binaryPath, args, options),
+}));
+
 import { UnprocessableError } from '../errors';
 import {
   DEFAULT_HILO_OUTPUT_DIR,
@@ -24,6 +31,7 @@ import {
   HILO_DISABLE_GUIDANCE,
   HILO_ENABLE_GUIDANCE,
   HILO_SETUP_GUIDANCE,
+  HILO_VERSION_PROBE_TIMEOUT_MS,
   detectHilo,
   parseHiloVersion,
   requireHilo,
@@ -185,6 +193,17 @@ describe('hilo-detector', () => {
   const root = path.resolve('/tmp/ws');
   const emptyEnv: NodeJS.ProcessEnv = {};
 
+  beforeEach(() => {
+    mockProbeAutonomousCli.mockReset();
+    mockProbeAutonomousCli.mockResolvedValue({
+      status: 0,
+      stdout: 'v22.19.0\n',
+      stderr: '',
+      signal: null,
+      error: null,
+    });
+  });
+
   describe('parseHiloVersion', () => {
     it('extracts version-like tokens from arbitrary output', () => {
       expect(parseHiloVersion('hilo v0.4.2')).toBe('0.4.2');
@@ -221,8 +240,9 @@ describe('hilo-detector', () => {
       expect(det.message).toContain(HILO_DISABLE_GUIDANCE);
     });
 
-    it('reports `available` and parses a version from a real binary probe', async () => {
-      // Use the running Node binary as a stand-in: it responds to --version.
+    it('reports `available` and parses a version from an isolated binary probe result', async () => {
+      // Use the running Node binary as a resolvable stand-in while mocking only
+      // the separately-certified autonomous sandbox probe boundary.
       const cfg = resolveHiloConfig({
         workspaceRoot: root,
         env: emptyEnv,
@@ -232,8 +252,12 @@ describe('hilo-detector', () => {
       expect(det.status).toBe('available');
       expect(det.available).toBe(true);
       expect(det.binaryPath).toBe(path.resolve(process.execPath));
-      // Node prints e.g. "v22.3.0" → a version-like token is parsed.
-      expect(det.version).toMatch(/^\d+\.\d+/);
+      expect(det.version).toBe('22.19.0');
+      expect(mockProbeAutonomousCli).toHaveBeenCalledWith(
+        path.resolve(process.execPath),
+        ['--version'],
+        { timeoutMs: HILO_VERSION_PROBE_TIMEOUT_MS, env: emptyEnv },
+      );
     });
   });
 

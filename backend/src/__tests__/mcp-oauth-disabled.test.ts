@@ -8,15 +8,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Server } from 'node:http';
 import type { Express } from 'express';
 import request from 'supertest';
 
 describe('MCP OAuth removal', () => {
   let app: Express;
+  let testServer: Server;
   let tmpHome: string;
   let originalHome: string | undefined;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     jest.resetModules();
     jest.doMock('../lib/llm-client', () => ({
       chatComplete: jest.fn(),
@@ -42,9 +44,16 @@ describe('MCP OAuth removal', () => {
 
     const serverMod = require('../server');
     app = serverMod.default as Express;
+    testServer = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve, reject) => {
+      testServer.once('listening', resolve);
+      testServer.once('error', reject);
+    });
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    testServer.closeAllConnections();
+    await new Promise<void>((resolve, reject) => testServer.close((error) => error ? reject(error) : resolve()));
     if (originalHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -61,7 +70,7 @@ describe('MCP OAuth removal', () => {
     ['get', '/oauth/authorize'],
     ['post', '/oauth/token'],
   ] as const)('returns honest 501 JSON for %s %s', async (method, routePath) => {
-    const res = await request(app)[method](routePath);
+    const res = await request(testServer)[method](routePath);
 
     expect(res.status).toBe(501);
     expect(res.body).toEqual({
@@ -71,13 +80,15 @@ describe('MCP OAuth removal', () => {
     });
   });
 
-  it('still accepts a valid Bearer token on /mcp initialize', async () => {
-    const { ensureMcpToken } = require('../lib/mcp-auth.ts') as typeof import('../lib/mcp-auth');
-    const tokens = ensureMcpToken();
+  it('still accepts the exact initialized Bearer token on /mcp initialize', async () => {
+    // Use the same extensionless module identity as server.ts. Loading the same
+    // source through a second ts-jest key would create a distinct token cache.
+    const { ensureMcpToken } = require('../lib/mcp-auth') as typeof import('../lib/mcp-auth');
+    const { publicToken } = ensureMcpToken();
 
-    const res = await request(app)
+    const res = await request(testServer)
       .post('/mcp')
-      .set('Authorization', `Bearer ${tokens.publicToken}`)
+      .set('Authorization', `Bearer ${publicToken}`)
       .set('Accept', 'application/json, text/event-stream')
       .set('Content-Type', 'application/json')
       .send({

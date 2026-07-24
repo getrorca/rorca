@@ -8,6 +8,9 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -25,7 +28,7 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 
@@ -44,43 +47,47 @@ const specContent = {
   generatedAt: '2026-02-23T00:00:00Z',
 };
 
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  const serverModule = require('../../server');
+  const expressApp = serverModule.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: `tags-${crypto.randomUUID()}@test.rorca.local`,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
+
 beforeEach(async () => {
-  jest.resetModules();
-
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockImplementation((m: string) =>
-      ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
-    ),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
-  }));
-
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-tags-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+  await execute(
+    `INSERT INTO workspaces (id, label, path)
+     VALUES ('ws-test', 'Test WS', $1)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [tmpDir],
+  );
+  await execute("DELETE FROM spec_tags WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-test' AND event_type = 'tags_updated'");
 
-  const serverMod = require('../../server');
-  app = serverMod.default;
-// Seed workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
-
-  // Create spec file on disk
-  const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');
+  const pendingDir = path.join(tmpDir, 'forge', 'specs', 'pending');
   fs.mkdirSync(pendingDir, { recursive: true });
   fs.writeFileSync(path.join(pendingDir, `${specSlug}.json`), JSON.stringify(specContent));
-
-  authToken = await getAuthToken(app);
 });
 
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  await execute("DELETE FROM spec_tags WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-test' AND event_type = 'tags_updated'");
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  await execute("DELETE FROM spec_tags WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-test' AND event_type = 'tags_updated'");
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/specs/:specId/tags ────────────────────────────────────────────
@@ -148,7 +155,7 @@ describe('POST /api/specs/:specId/tags', () => {
     const evt = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'tags_updated' ORDER BY id DESC LIMIT 1`) as any;
     expect(evt).toBeDefined();
     expect(evt.spec_id).toBe(specSlug);
-    const payload = JSON.parse(evt.payload);
+    const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload;
     expect(payload.action).toBe('add');
     expect(payload.added).toContain('infra');
   });
@@ -201,7 +208,7 @@ describe('GET /api/specs/tags/autocomplete', () => {
       .send({ workspaceId: 'ws-test', tags: ['frontend', 'auth', 'api'] });
 
     // Create a second spec
-    const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(tmpDir, 'forge', 'specs', 'pending');
     fs.writeFileSync(
       path.join(pendingDir, 'second-spec.json'),
       JSON.stringify({ ...specContent, title: 'Second Spec' })
@@ -248,7 +255,7 @@ describe('GET /api/specs/tags/autocomplete', () => {
 describe('GET /api/specs with tags filter', () => {
   beforeEach(async () => {
     // Create a second spec
-    const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(tmpDir, 'forge', 'specs', 'pending');
     fs.writeFileSync(
       path.join(pendingDir, 'second-spec.json'),
       JSON.stringify({ ...specContent, title: 'Second Spec' })

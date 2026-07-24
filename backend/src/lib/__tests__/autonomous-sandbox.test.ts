@@ -140,7 +140,7 @@ const hasLinuxBoundary = process.platform === 'linux'
   && fs.existsSync('/usr/local/bin/npx');
 
 (hasLinuxBoundary ? test : test.skip)(
-  'shipped Linux boundary sensitivity sees the exec-time marked supervisor without PID isolation while canonical isolation hides it',
+  'shipped Linux boundary sensitivity sees the exec-time marked supervisor without PID isolation while canonical isolation hides it [skip: requires Linux bwrap platform fixture]',
   () => {
     const cwd = fixture();
     const originalIsolation = process.env.RORCA_AUTONOMOUS_ISOLATION;

@@ -9,12 +9,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createHmac } from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
+import { encryptToken } from '../../lib/auth-utils';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let _authToken: string;
 
@@ -35,37 +38,45 @@ function makePayload(overrides: Record<string, any> = {}) {
   };
 }
 
-beforeEach(async () => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-_authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  _authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
 
-  // Clear WAL events from user registration
-  await execute(`DELETE FROM wal_events`);
-
-  // Create a workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'Webhook Test', tmpDir]);
-
-  // Store encrypted webhook secret — use encryptToken from auth module
-  const authMod = require('../auth');
-  const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
-  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
+beforeEach(async () => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-test-'));
+  await execute('DELETE FROM webhook_dlq WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM webhook_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, 'Webhook Test', tmpDir],
+  );
+  await execute(
+    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptToken(WEBHOOK_SECRET)],
+  );
 });
 
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-  // Allow any pending setImmediate callbacks to flush before closing the DB
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 50));
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  await execute('DELETE FROM webhook_dlq WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM webhook_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
 });
 
 // ─── Signature verification ─────────────────────────────────────────────────
@@ -84,7 +95,7 @@ test('valid signature returns 200', async () => {
     .send(body);
 
   expect(res.status).toBe(200);
-  expect(res.body).toEqual({ ok: true });
+  expect(res.body).toEqual({ ok: true, status: 'completed' });
 });
 
 test('invalid signature returns 401 with no WAL event logged', async () => {
@@ -130,7 +141,7 @@ test('tampered body fails signature check', async () => {
 
 // ─── Missing headers ────────────────────────────────────────────────────────
 
-test('missing X-Hub-Signature-256 header returns 400', async () => {
+test('missing X-Hub-Signature-256 header fails with non-oracular authentication denial', async () => {
   const body = JSON.stringify(makePayload());
 
   const res = await request(app)
@@ -139,11 +150,11 @@ test('missing X-Hub-Signature-256 header returns 400', async () => {
     .set('X-GitHub-Event', 'push')
     .send(body);
 
-  expect(res.status).toBe(400);
-  expect(res.body.error).toMatch(/missing.*header/i);
+  expect(res.status).toBe(401);
+  expect(res.body.code).toBe('AUTH_ERROR');
 });
 
-test('missing X-GitHub-Event header returns 400', async () => {
+test('missing X-GitHub-Event header fails before payload processing', async () => {
   const body = JSON.stringify(makePayload());
   const sig = sign(body, WEBHOOK_SECRET);
 
@@ -153,8 +164,8 @@ test('missing X-GitHub-Event header returns 400', async () => {
     .set('X-Hub-Signature-256', sig)
     .send(body);
 
-  expect(res.status).toBe(400);
-  expect(res.body.error).toMatch(/missing.*header/i);
+  expect(res.status).toBe(401);
+  expect(res.body.code).toBe('AUTH_ERROR');
 });
 
 test('missing repository in payload returns 400', async () => {
@@ -167,6 +178,7 @@ test('missing repository in payload returns 400', async () => {
     .set('Content-Type', 'application/json')
     .set('X-Hub-Signature-256', sig)
     .set('X-GitHub-Event', 'push')
+    .set('X-GitHub-Delivery', 'delivery-missing-repository')
     .send(body);
 
   expect(res.status).toBe(400);
@@ -185,6 +197,7 @@ test('webhook for unconnected repo returns 404', async () => {
     .set('Content-Type', 'application/json')
     .set('X-Hub-Signature-256', sig)
     .set('X-GitHub-Event', 'push')
+    .set('X-GitHub-Delivery', 'delivery-unknown-repository')
     .send(body);
 
   expect(res.status).toBe(404);
@@ -213,7 +226,9 @@ test('valid webhook logs a wal_event with github_webhook type', async () => {
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe(WORKSPACE_ID);
 
-  const walPayload = JSON.parse(events[0].payload);
+  const walPayload = typeof events[0].payload === 'string'
+    ? JSON.parse(events[0].payload)
+    : events[0].payload;
   expect(walPayload.event).toBe('pull_request');
   expect(walPayload.deliveryId).toBe('delivery-wal');
   expect(walPayload.repo).toBe('acme/my-repo');
@@ -271,6 +286,7 @@ test('valid webhook updates last_webhook_at timestamp', async () => {
     .set('Content-Type', 'application/json')
     .set('X-Hub-Signature-256', sig)
     .set('X-GitHub-Event', 'push')
+    .set('X-GitHub-Delivery', 'delivery-last-webhook-at')
     .send(body);
 
   await new Promise((r) => setTimeout(r, 100));

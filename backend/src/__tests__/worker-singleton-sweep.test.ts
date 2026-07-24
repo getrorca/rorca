@@ -25,6 +25,10 @@
 const mockQuery = jest.fn().mockResolvedValue([]);
 const mockExecute = jest.fn().mockResolvedValue({ rowCount: 1 });
 const mockQueryOne = jest.fn().mockResolvedValue(undefined);
+const mockBossFail = jest.fn().mockResolvedValue(undefined);
+const mockPersistHostRunCloseout = jest.fn().mockResolvedValue({});
+const mockTransitionRunLifecycle = jest.fn().mockResolvedValue({});
+const mockAdvanceQueue = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../db/index', () => ({
   query: (...args: unknown[]) => mockQuery(...args),
@@ -34,7 +38,42 @@ jest.mock('../db/index', () => ({
 }));
 
 // ── Mock heavy deps that worker.ts pulls in at module level ──────────────────
-// pg-boss is globally mocked via moduleNameMapper in jest.config.ts → src/__mocks__/pg-boss.ts
+
+jest.mock('../lib/pg-boss', () => ({
+  initBoss: jest.fn().mockResolvedValue(undefined),
+  getBoss: jest.fn(() => ({ fail: (...args: unknown[]) => mockBossFail(...args) })),
+}));
+
+jest.mock('../lib/pg-boss-schema', () => ({
+  getPgBossSchemaSql: jest.fn(() => '"pgboss_cert_test"'),
+}));
+
+jest.mock('../lib/story-result-persistence', () => ({
+  persistCanonicalStoryResult: jest.fn().mockResolvedValue({ duplicate: false }),
+  recoverIntegratedValidatedStoryFinalizations: jest.fn().mockResolvedValue({
+    scanned: 0, finalized: 0, duplicates: 0, blocked: 0, truncated: false, finalizedStoryIds: [],
+  }),
+  WORKER_RESULT_AUTHORITY: Symbol('worker-result-authority'),
+}));
+
+jest.mock('../lib/trusted-wal', () => ({
+  GITHUB_GOVERNING_WAL_EVENTS: new Set(),
+  persistTrustedWalEvent: jest.fn(),
+  relayTrustedWalEvent: jest.fn(),
+  relayUnacknowledgedTrustedRunEvents: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../lib/run-closeout-authority', () => ({
+  persistHostRunCloseout: (...args: unknown[]) => mockPersistHostRunCloseout(...args),
+}));
+
+jest.mock('../lib/run-lifecycle', () => ({
+  transitionRunLifecycle: (...args: unknown[]) => mockTransitionRunLifecycle(...args),
+}));
+
+jest.mock('../lib/run-queue', () => ({
+  advanceQueue: (...args: unknown[]) => mockAdvanceQueue(...args),
+}));
 
 jest.mock('../lib/logger', () => ({
   logger: {
@@ -56,6 +95,10 @@ beforeEach(() => {
   mockQuery.mockReset().mockResolvedValue([]);
   mockExecute.mockReset().mockResolvedValue({ rowCount: 1 });
   mockQueryOne.mockReset().mockResolvedValue(undefined);
+  mockBossFail.mockReset().mockResolvedValue(undefined);
+  mockPersistHostRunCloseout.mockReset().mockResolvedValue({});
+  mockTransitionRunLifecycle.mockReset().mockResolvedValue({});
+  mockAdvanceQueue.mockReset().mockResolvedValue(undefined);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -164,11 +207,15 @@ describe('recoverStaleJobs', () => {
     mockQuery.mockReset().mockResolvedValue([]);
     mockExecute.mockReset().mockResolvedValue({ rowCount: 1 });
     mockQueryOne.mockReset().mockResolvedValue(undefined);
+    mockBossFail.mockReset().mockResolvedValue(undefined);
+    mockPersistHostRunCloseout.mockReset().mockResolvedValue({});
+    mockTransitionRunLifecycle.mockReset().mockResolvedValue({});
+    mockAdvanceQueue.mockReset().mockResolvedValue(undefined);
   });
 
-  // ── (4) Active jobs with dead worker heartbeat are marked failed ───────────
+  // ── (4) Active jobs with dead worker heartbeat are reconciled ──────────────
 
-  it('marks stale active jobs as failed when owning worker has no live heartbeat', async () => {
+  it('terminalizes application state before notifying pg-boss about a stale dispatch', async () => {
     const staleJob = {
       id: 'job-uuid-1',
       name: 'pipeline:run',
@@ -178,35 +225,39 @@ describe('recoverStaleJobs', () => {
     // recoverStaleJobs query returns one stale job
     mockQuery.mockResolvedValueOnce([staleJob]);
 
-    // queryOne for workspace_id lookup
-    mockQueryOne.mockResolvedValueOnce({ workspace_id: 7 });
+    // queryOne for workspace_id lookup, then frozen-story inventory
+    mockQueryOne
+      .mockResolvedValueOnce({ workspace_id: '7' })
+      .mockResolvedValueOnce({ expected_story_ids: [] });
 
     await recoverStaleJobs();
 
-    // Should fail the pgboss job using completed_on (correct column name)
-    const pgbossUpdateCall = mockExecute.mock.calls.find(
-      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('pgboss.job'),
+    expect(mockPersistHostRunCloseout).toHaveBeenCalledWith({
+      runId: 42,
+      status: 'failed',
+      terminalizeRun: true,
+    });
+    expect(mockTransitionRunLifecycle).toHaveBeenCalledWith(42, 'failed', {
+      owner: 'worker_crash_recovery',
+      process: 'stale_pgboss_job',
+      pgbossJobId: 'job-uuid-1',
+    });
+    expect(mockBossFail).toHaveBeenCalledWith(
+      'pipeline:run',
+      'job-uuid-1',
+      { reason: 'application_state_reconciled' },
     );
-    expect(pgbossUpdateCall).toBeDefined();
-    expect(pgbossUpdateCall![0]).toContain('completed_on');
-    expect(pgbossUpdateCall![0]).toContain("state = 'failed'");
-    expect(pgbossUpdateCall![1]).toEqual(['job-uuid-1']);
 
-    // Should mark pipeline_runs as failed
-    expect(mockExecute).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE pipeline_runs SET status'),
-      [42],
-    );
+    // Application-owned terminalization must precede the transport notification.
+    expect(mockPersistHostRunCloseout.mock.invocationCallOrder[0])
+      .toBeLessThan(mockBossFail.mock.invocationCallOrder[0]);
+    expect(mockTransitionRunLifecycle.mock.invocationCallOrder[0])
+      .toBeLessThan(mockBossFail.mock.invocationCallOrder[0]);
 
-    // Should emit WAL event with reason:'worker_crash_recovery'
-    expect(mockQueryOne).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO wal_events'),
-      expect.arrayContaining([
-        'run_finished',
-        7,
-        expect.stringContaining('"reason":"worker_crash_recovery"'),
-      ]),
-    );
+    // pg-boss transport tables are never hand-mutated by recovery.
+    expect(mockExecute.mock.calls.some(
+      ([sql]) => typeof sql === 'string' && sql.includes('pgboss_cert_test'),
+    )).toBe(false);
   });
 
   // ── (5) Active jobs with live worker heartbeat are left alone ──────────────
@@ -246,29 +297,18 @@ describe('recoverStaleJobs', () => {
     // This ensures the column names are consistently correct
   });
 
-  it('uses completed_on (not completedon) when failing stale jobs', async () => {
-    const staleJob = {
-      id: 'job-uuid-2',
-      name: 'pipeline:retry',
-      data: { runId: 100 },
-    };
-
-    mockQuery.mockResolvedValueOnce([staleJob]);
-    mockQueryOne.mockResolvedValueOnce({ workspace_id: 1 });
+  it('reads stale jobs from the validated configured schema and never updates transport rows directly', async () => {
+    mockQuery.mockResolvedValueOnce([]);
 
     await recoverStaleJobs();
 
-    // Find the pgboss.job UPDATE call
-    const pgbossUpdateCall = mockExecute.mock.calls.find(
-      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('pgboss.job'),
-    );
-    expect(pgbossUpdateCall).toBeDefined();
-
-    const sql = pgbossUpdateCall![0] as string;
-    // Must use completed_on (correct)
-    expect(sql).toContain('completed_on');
-    // Must NOT use completedon (incorrect)
-    expect(sql).not.toMatch(/\bcompletedon\b/);
+    const sql = mockQuery.mock.calls[0]?.[0] as string;
+    expect(sql).toContain('FROM "pgboss_cert_test".job');
+    expect(sql).toContain('started_on');
+    expect(mockExecute.mock.calls.some(
+      ([statement]) => typeof statement === 'string' && statement.includes('pgboss_cert_test'),
+    )).toBe(false);
+    expect(mockBossFail).not.toHaveBeenCalled();
   });
 });
 
@@ -283,6 +323,9 @@ describe('sweepOrphanProcesses (heartbeat-aware)', () => {
     jest.useFakeTimers();
     mockQuery.mockReset().mockResolvedValue([]);
     mockExecute.mockReset().mockResolvedValue({ rowCount: 1 });
+    mockQueryOne.mockReset().mockResolvedValue(undefined);
+    mockTransitionRunLifecycle.mockReset().mockResolvedValue({});
+    mockAdvanceQueue.mockReset().mockResolvedValue(undefined);
     killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true as any);
   });
 

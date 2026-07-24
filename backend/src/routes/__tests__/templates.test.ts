@@ -8,10 +8,13 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
-import { getAuthToken } from './helpers/auth-helper';
-import { queryOne, execute } from '../../db/index';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
+import { execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -26,10 +29,17 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let authToken: string;
+let userId: string;
+const otherUserIds = new Set<string>();
+const TEMPLATE_WORKSPACE_IDS = {
+  withTemplate: `ws-template-${crypto.randomUUID()}`,
+  withoutTemplate: `ws-template-${crypto.randomUUID()}`,
+  missingTemplate: `ws-template-${crypto.randomUUID()}`,
+};
 
 const sampleStoryStructure = [
   { id: 'US-001', title: 'User login', description: 'Allow users to log in' },
@@ -48,55 +58,67 @@ const validLlmResponse = JSON.stringify({
   ],
 });
 
-beforeEach(async () => {
-  jest.resetModules();
+async function cleanFixture(): Promise<void> {
+  const ownerIds = [userId, ...otherUserIds];
+  await execute('DELETE FROM templates WHERE author_id = ANY($1::text[])', [ownerIds]);
+  await execute('DELETE FROM team_members WHERE user_id = ANY($1::text[])', [ownerIds]);
+  await execute('DELETE FROM teams WHERE owner_id = ANY($1::text[])', [ownerIds]);
+  for (const otherUserId of otherUserIds) {
+    await execute('DELETE FROM users WHERE id = $1', [otherUserId]);
+  }
+  otherUserIds.clear();
+}
 
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockImplementation((m: string) =>
-      ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
-    ),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
-  }));
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-templates-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-const llmClient = require('../../lib/llm-client');
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  const authId = crypto.randomUUID();
+  const email = `templates-${crypto.randomUUID()}@test.rorca.local`;
+  const user = await ensureTestUser({ email, authId, role: 'admin', plan: 'pro' });
+  userId = user.id;
+  const serverModule = require('../../server');
+  const expressApp = serverModule.default as Express;
+  const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
+  authToken = await getAuthToken(expressApp, {
+    email,
+    authId,
+    role: 'admin',
+    displayName: 'Auth Test User',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
 
-  authToken = await getAuthToken(app);
+beforeEach(async () => {
+  jest.clearAllMocks();
+  await cleanFixture();
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-templates-test-'));
 });
 
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-  const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
-  if (fs.existsSync(specsRoot)) {
-    fs.rmSync(specsRoot, { recursive: true, force: true });
-  }
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  await cleanFixture();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-// ─── Helper: get user ID from token ──────────────────────────────────────────
+afterAll(async () => {
+  await cleanFixture();
+  await execute('DELETE FROM users WHERE id = $1', [userId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
+});
 
 async function getUserId(): Promise<string> {
-  const row = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
-  return row.id;
+  return userId;
 }
 
 async function createTeam(name: string, slug: string): Promise<string> {
   const userId = await getUserId();
-  const teamId = require('crypto').randomUUID();
-  await execute(`INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`, [teamId, name, slug, userId]);
+  const teamId = crypto.randomUUID();
+  await execute(
+    `INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`,
+    [teamId, name, `${slug}-${teamId}`, userId],
+  );
   await execute(`INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'admin')`, [teamId, userId]);
   return teamId;
 }
@@ -171,9 +193,17 @@ describe('POST /api/templates', () => {
 
   test('rejects teamId when user is not a member', async () => {
     // Create a team the user is NOT a member of
-    const teamId = require('crypto').randomUUID();
-    await execute(`INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`, ['other-user', 'other@test.com', 'Other', '$2a$12$fakeHash']);
-    await execute(`INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`, [teamId, 'Other Team', 'other', 'other-user']);
+    const teamId = crypto.randomUUID();
+    const otherUserId = crypto.randomUUID();
+    otherUserIds.add(otherUserId);
+    await execute(
+      `INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`,
+      [otherUserId, `templates-other-${otherUserId}@test.rorca.local`, 'Other', '$2a$12$fakeHash'],
+    );
+    await execute(
+      `INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`,
+      [teamId, 'Other Team', `other-${teamId}`, otherUserId],
+    );
 
     const res = await request(app)
       .post('/api/templates')
@@ -381,13 +411,19 @@ describe('POST /api/templates/:id/rate', () => {
 
   test('non-team-member cannot rate team template', async () => {
     // Create a team the test user is NOT a member of
-    const otherUserId = require('crypto').randomUUID();
-    await execute(`INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`, [otherUserId, 'owner@test.com', 'Owner', '$2a$12$fakeHash']);
-    const teamId = require('crypto').randomUUID();
-    await execute(`INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`, [teamId, 'Other Team', 'other-rate', otherUserId]);
+    const otherUserId = crypto.randomUUID();
+    otherUserIds.add(otherUserId);
+    await execute(
+      `INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`,
+      [otherUserId, `templates-owner-${otherUserId}@test.rorca.local`, 'Owner', '$2a$12$fakeHash'],
+    );
+    const teamId = crypto.randomUUID();
+    await execute(
+      `INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`,
+      [teamId, 'Other Team', `other-rate-${teamId}`, otherUserId],
+    );
 
-    // Insert team template directly
-    const tplId = require('crypto').randomUUID();
+    const tplId = crypto.randomUUID();
     await execute(`INSERT INTO templates (id, name, source_spec_id, brief, story_structure, story_count, team_id, author_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [tplId, 'Team TPL', 'spec', 'b', '[]', 0, teamId, otherUserId]);
 
@@ -480,7 +516,10 @@ describe('POST /api/specs/generate with templateId', () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
     // Seed workspace
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-tpl', 'TPL WS', $1) ON CONFLICT (id) DO NOTHING`, [os.tmpdir()]);
+    await execute(
+      `INSERT INTO workspaces (id, label, path) VALUES ($1, 'TPL WS', $2)`,
+      [TEMPLATE_WORKSPACE_IDS.withTemplate, tmpDir],
+    );
 
     // Create a template
     const tplRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
@@ -493,10 +532,11 @@ describe('POST /api/specs/generate with templateId', () => {
       .post('/api/specs/generate')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        workspaceId: 'ws-tpl',
+        workspaceId: TEMPLATE_WORKSPACE_IDS.withTemplate,
         title: 'New Auth',
         brief: 'Build new auth feature',
         templateId: tplRes.body.id,
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
       });
 
     expect(res.status).toBe(200);
@@ -511,15 +551,20 @@ describe('POST /api/specs/generate with templateId', () => {
   test('generates normally when templateId is not provided', async () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-tpl2', 'TPL WS2', os.tmpdir()]);
+    await execute(
+      `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+       ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+      [TEMPLATE_WORKSPACE_IDS.withoutTemplate, 'TPL WS2', tmpDir],
+    );
 
     const res = await request(app)
       .post('/api/specs/generate')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        workspaceId: 'ws-tpl2',
+        workspaceId: TEMPLATE_WORKSPACE_IDS.withoutTemplate,
         title: 'No Template',
         brief: 'Build something',
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
       });
 
     expect(res.status).toBe(200);
@@ -531,16 +576,21 @@ describe('POST /api/specs/generate with templateId', () => {
   test('generates normally when templateId does not exist in DB', async () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-tpl3', 'TPL WS3', os.tmpdir()]);
+    await execute(
+      `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+       ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+      [TEMPLATE_WORKSPACE_IDS.missingTemplate, 'TPL WS3', tmpDir],
+    );
 
     const res = await request(app)
       .post('/api/specs/generate')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        workspaceId: 'ws-tpl3',
+        workspaceId: TEMPLATE_WORKSPACE_IDS.missingTemplate,
         title: 'Bad Template Ref',
         brief: 'Build something',
         templateId: 'nonexistent-template-id',
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
       });
 
     expect(res.status).toBe(200);

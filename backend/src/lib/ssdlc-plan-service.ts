@@ -265,7 +265,7 @@ async function persistedTags(workspaceId: string, specSlug: string): Promise<str
   return rows.map((row) => row.tag_name);
 }
 
-async function latestSpecVersion(specSlug: string, fallbackGeneration: number | null, content: JsonRecord): Promise<{
+async function latestSpecVersion(workspaceId: string, specSlug: string, fallbackGeneration: number | null, content: JsonRecord): Promise<{
   version: string;
   versionHash: `sha256:${string}`;
   source: 'spec_versions' | 'save_generation' | 'legacy';
@@ -273,9 +273,10 @@ async function latestSpecVersion(specSlug: string, fallbackGeneration: number | 
   const row = await queryOne<LatestVersionRow>(
     `SELECT version, content_json
      FROM spec_versions
-     WHERE spec_slug = $1
-       AND version = (SELECT MAX(version) FROM spec_versions WHERE spec_slug = $1)`,
-    [specSlug],
+     WHERE workspace_id = $1 AND spec_slug = $2
+     ORDER BY version DESC, id DESC
+     LIMIT 1`,
+    [workspaceId, specSlug],
   );
   if (row) {
     return {
@@ -683,7 +684,7 @@ export async function compileSpecPlan(input: CompileSpecPlanInput): Promise<Comp
       return resultFromRow(existing, 'skipped');
     }
 
-    const version = await latestSpecVersion(input.specSlug, saveGeneration, initialContent);
+    const version = await latestSpecVersion(input.workspaceId, input.specSlug, saveGeneration, initialContent);
     const annotations = sourceAnnotations(initialContent, tags);
     const generatedAt = new Date().toISOString();
     const compilation = compileLifecyclePlan(compilerInput({

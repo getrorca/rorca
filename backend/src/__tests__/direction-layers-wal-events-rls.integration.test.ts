@@ -23,7 +23,10 @@ async function setJwtClaims(client: PoolClient, sub: string | null, role: 'anon'
     ? JSON.stringify({ sub, role, aud: 'authenticated' })
     : JSON.stringify({ role: 'anon', aud: 'authenticated' });
 
-  await client.query('SELECT set_config($1, $2, true)', ['request.jwt.claims', claims]);
+  await client.query(
+    'SELECT set_config($1, $2, true), set_config($3, $4, true)',
+    ['request.jwt.claims', claims, 'request.jwt.claim.sub', sub ?? '']
+  );
   await client.query(`SET LOCAL ROLE ${role}`);
 }
 
@@ -117,13 +120,16 @@ describe('MU-012 direction_layers and wal_events RLS', () => {
         { workspace_id: 'ws-rls-mu12-1', spec_id: 'spec-1' },
       ]);
 
+      await client.query('SAVEPOINT denied_global_insert');
       await expect(
         client.query(
           `INSERT INTO direction_layers (workspace_id, domain, layer, content_yaml)
            VALUES (NULL, 'global-domain', 1, 'blocked-global-insert')`
         )
       ).rejects.toThrow(/row-level security/i);
+      await client.query('ROLLBACK TO SAVEPOINT denied_global_insert');
 
+      await client.query('SAVEPOINT denied_foreign_wal_insert');
       await expect(
         client.query(
           `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload)
@@ -131,6 +137,7 @@ describe('MU-012 direction_layers and wal_events RLS', () => {
           ['ws-rls-mu12-2']
         )
       ).rejects.toThrow(/row-level security/i);
+      await client.query('ROLLBACK TO SAVEPOINT denied_foreign_wal_insert');
 
       await setJwtClaims(client, ADMIN_USER, 'authenticated');
       await client.query(

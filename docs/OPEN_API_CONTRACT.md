@@ -2,7 +2,7 @@
 
 Stable public API surface for the open-source CLI.
 
-Contract version: `17.0.0`
+Contract version: `18.0.0`
 
 | Method | Path | Parameters | Hash |
 | --- | --- | --- | --- |
@@ -86,7 +86,7 @@ Contract version: `17.0.0`
 | PUT | `/api/specs/{specId}` | body:_notes (optional), body:agentOverride (optional), body:effortLevel (optional), body:model (optional), body:thinkingBudget (optional), body:thinkingEnabled (optional), body:title (optional), body:workspaceId (required), path:specId (required) | `sha256:72471165a9b1df476f4ef0ff3715f518f4b3b31367092af338d761a2d714c8f3` |
 | POST | `/api/specs/{specId}/add-stories` | body:brief (optional), body:count (optional), body:workspaceId (required), path:specId (required) | `sha256:712300315eb40ee66762777c67de5da3be6b475a86ea3e84ff380ed459414ee8` |
 | POST | `/api/specs/{specId}/approve` | body:humanApproval (optional), body:readinessOverride (optional), body:workspaceId (required), path:specId (required) | `sha256:52925baf6176170c234b70c940d045c94f947315e2f4298696a688745756086c` |
-| GET | `/api/specs/{specId}/diff` | path:specId (required), query:v1 (required), query:v2 (required) | `sha256:92319d3be10d5119838d2668e22c6deb569c4bd0b855d9e4d74caf717b772ff7` |
+| GET | `/api/specs/{specId}/diff` | path:specId (required), query:v1 (required), query:v2 (required), query:workspaceId (required) | `sha256:f392b8b7e14b568ae60a4162d81e6f76c7de77b5fdb22d8ef0c2cefb58692ee6` |
 | POST | `/api/specs/{specId}/enrich` | body:model (optional), body:workspaceId (required), path:specId (required) | `sha256:c6f6238e10ecc77d1f77a2042eb4ece190637aa10b0ff92b71fbb0fe15e0db56` |
 | POST | `/api/specs/{specId}/enrich/async` | body:workspaceId (required), path:specId (required) | `sha256:52000008af35bff0be2de98778a20f70b04689e1951b4e7d99f5a78a09702523` |
 | GET | `/api/specs/{specId}/generation-log` | path:specId (required), query:all (optional) | `sha256:f9ea1489e1297a0004b0de2270790a8dfddfa209b9261ef84939edf6b2829be5` |
@@ -98,7 +98,7 @@ Contract version: `17.0.0`
 | DELETE | `/api/specs/{specId}/stories/{storyId}` | path:specId (required), path:storyId (required), query:workspaceId (required) | `sha256:cd974736eded5c4e718a7bffccdea1cffa832f086d2ece9cfab4fba42f5feba4` |
 | PATCH | `/api/specs/{specId}/stories/{storyId}` | body:acceptanceCriteria (optional), body:description (optional), body:excluded (optional), body:title (optional), body:workspaceId (required), path:specId (required), path:storyId (required) | `sha256:e97391854a0aa7df5f794f8a352a468ee7be194b008b1dcaccf628d289a73aa8` |
 | POST | `/api/specs/{specId}/suggest-skills/async` | body:workspaceId (required), path:specId (required) | `sha256:0239d8b581a63b4e22fe8c02498f878caaec4c725072a03c235341a507af6332` |
-| GET | `/api/specs/{specId}/versions` | path:specId (required) | `sha256:be92d4e232439f57f0d91499847c494c06ff60ce03c5e009b82a9cccd161d93c` |
+| GET | `/api/specs/{specId}/versions` | path:specId (required), query:workspaceId (required) | `sha256:abac4ad4caf9448a0840cb5645ef507c33c53849e9f6bbb2e68871b163c23aa6` |
 | GET | `/api/specs/{specId}/workflow` | path:specId (required), query:workspaceId (required) | `sha256:9f278562e4c9e6b45519a0078de1e517418a82aa30d0c2148db4231dfbce960b` |
 | GET | `/api/specs/archive` | query:createdAfter (optional), query:createdBefore (optional), query:limit (optional), query:offset (optional), query:q (optional), query:status (optional), query:tags (optional), query:workspaceId (required) | `sha256:3367f1ddf810c83f7064c3370ae131f5b5623a57a6d04dd99f60210a1ad01150` |
 | POST | `/api/specs/authoring/preflight` | body:attempt (required), body:callerSurface (required), body:materialRevisions (optional), body:model (optional), body:plannerInput (required), body:priorAttempts (optional), body:schemaVersion (required), body:specs (required), body:workspaceId (required) | `sha256:76351386f243770ed66ee4e711ba2393c7fc6d0ab5514b1fca535a623b31807e` |

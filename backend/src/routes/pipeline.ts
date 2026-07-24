@@ -1556,12 +1556,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
           : undefined;
       const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
+      const executionReadiness = buildExecutionReadinessSummary(workspace.path, specJson);
       res.json({
         dryRun: true,
         executionEnvironment: resolvedExecutionEnvironment.effective,
         terminalMode: resolvedTerminalMode,
         terminal_mode: resolvedTerminalMode,
         estimate,
+        executionReadiness,
       });
       return;
     }

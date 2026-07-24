@@ -17,28 +17,62 @@
  */
 
 import * as crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import request from 'supertest';
 import type { Express } from 'express';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
 
-let app: Express;
+let app: Server;
 let authToken: string;
+let fixtureUserId: string;
 let workspaceSequence = 0;
 let testWorkspaceId = '';
 
-beforeAll(() => {
+async function cleanFixtureState(): Promise<void> {
+  const { execute } = require('../../db/index') as typeof import('../../db/index');
+  const workspacePattern = `ws-ci-us032-${process.pid}-%`;
+  const workspacePredicate = `(workspace_id LIKE $1 OR workspace_id = 'ws-ci-us033-other')`;
+  await execute(`DELETE FROM memory_candidates WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM memory_relations WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM memories WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM context_events WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM wal_events WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(
+    `DELETE FROM workspaces WHERE id LIKE $1 OR id = 'ws-ci-us033-other'`,
+    [workspacePattern],
+  );
+}
+
+beforeAll(async () => {
   process.env.NODE_ENV = 'test';
-  app = require('../../server').default;
+  const authId = crypto.randomUUID();
+  const fixtureUser = await ensureTestUser({
+    email: `events-candidates-${authId}@test.rorca.local`,
+    authId,
+    role: 'admin',
+    plan: 'pro',
+  });
+  fixtureUserId = fixtureUser.id;
+
+  const expressApp = require('../../server').default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: fixtureUser.email,
+    authId,
+    role: 'admin',
+    displayName: 'Events Candidates Test Admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
 beforeEach(async () => {
   jest.clearAllMocks();
+  await cleanFixtureState();
   workspaceSequence += 1;
   testWorkspaceId = `ws-ci-us032-${process.pid}-${workspaceSequence}`;
-  authToken = await getAuthToken(app);
 
-  const { execute } = require('../../db/index');
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
+  const { execute } = require('../../db/index') as typeof import('../../db/index');
   await execute(
     `INSERT INTO workspaces (id, label, path)
      VALUES ($1, 'CI US-032', $2)`,
@@ -46,7 +80,14 @@ beforeEach(async () => {
   );
 });
 
-afterAll(() => {
+afterEach(cleanFixtureState);
+
+afterAll(async () => {
+  await cleanFixtureState();
+  const { execute } = require('../../db/index') as typeof import('../../db/index');
+  await execute('DELETE FROM users WHERE id = $1', [fixtureUserId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
   delete process.env.NODE_ENV;
 });
 
@@ -118,7 +159,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         idempotency_key: `ce-fmt-${crypto.randomUUID()}`,
         occurred_at: 'not-a-date',
       });
@@ -131,7 +172,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         workspace_id: 'non-existent-ws',
         idempotency_key: `ce-nows-${crypto.randomUUID()}`,
       });
@@ -143,7 +184,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         source_system: '   ',
         idempotency_key: `ce-blank-${crypto.randomUUID()}`,
       });
@@ -156,7 +197,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         idempotency_key: key,
         payload: {
           note: 'API key: sk-ant-api03-abcdefghijklmnop',
@@ -260,7 +301,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: `mc-conf-${crypto.randomUUID()}`,
         confidence: 'ultra',
       });
@@ -272,7 +313,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: `mc-trust-${crypto.randomUUID()}`,
         trust_tier: 'godlike',
       });
@@ -284,7 +325,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         workspace_id: 'non-existent-ws',
         idempotency_key: `mc-nows-${crypto.randomUUID()}`,
       });
@@ -296,7 +337,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: `mc-bad-ev-${crypto.randomUUID()}`,
         context_event_id: 99999999,
       });
@@ -323,7 +364,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: candidateKey,
         context_event_id: parseInt(ev.body.id, 10),
       });
@@ -338,7 +379,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: key,
         rule: 'Set DATABASE_URL=postgres://user:secret123@host/db and use it',
         context: 'Password is hunter2 and key is sk-ant-api03-abcdefgh',

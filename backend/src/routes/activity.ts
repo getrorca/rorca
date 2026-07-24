@@ -19,7 +19,7 @@ interface WalEventRow {
   spec_id: string | null;
   story_id: string | null;
   actor: string;
-  payload: string | null;
+  payload: unknown | null;
 }
 
 interface UserRow {
@@ -60,13 +60,25 @@ function formatDuration(durationMs: number): string {
   return `Duration: ${minutes}m ${seconds}s`;
 }
 
+function parseWalPayload(payload: unknown): Record<string, unknown> {
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  if (typeof payload !== 'string') return {};
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 /** Generate human-readable description from a WAL event */
 function describeEvent(event: WalEventRow, displayName: string): string {
   const actor = displayName || event.actor;
-  let payload: Record<string, unknown> = {};
-  if (event.payload) {
-    try { payload = JSON.parse(event.payload); } catch { /* ignore */ }
-  }
+  const payload = parseWalPayload(event.payload);
 
   const specLabel = (payload.title as string) || event.spec_id || 'a spec';
   const storyLabel = (payload.storyTitle as string) || event.story_id || 'a story';
@@ -134,10 +146,7 @@ function describeEvent(event: WalEventRow, displayName: string): string {
 
 /** Determine what the activity links to: spec, run, or story */
 function getTarget(event: WalEventRow): { type: string; id: string } | null {
-  let payload: Record<string, unknown> = {};
-  if (event.payload) {
-    try { payload = JSON.parse(event.payload); } catch { /* ignore */ }
-  }
+  const payload = parseWalPayload(event.payload);
 
   if (event.story_id && event.spec_id) {
     return { type: 'story', id: `${event.spec_id}/${event.story_id}` };

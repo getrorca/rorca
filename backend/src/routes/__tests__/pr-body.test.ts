@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import crypto from 'crypto';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -16,8 +17,9 @@ import { queryOne, execute } from '../../db/index';
 let app: Express;
 let tmpDir: string;
 let authToken: string;
-
-const WORKSPACE_ID = 'ws-pr-body-test';
+const authId = crypto.randomUUID();
+const email = `pr-body+${authId}@example.com`;
+const WORKSPACE_ID = `ws-pr-body-${crypto.randomUUID()}`;
 
 function createSpecFile(specId: string, stories: Array<{
   id: string;
@@ -26,7 +28,7 @@ function createSpecFile(specId: string, stories: Array<{
   acceptanceCriteria: string[];
   dependsOn: string[];
 }>) {
-  const approvedDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'approved');
+  const approvedDir = path.join(tmpDir, 'forge', 'specs', 'approved');
   fs.mkdirSync(approvedDir, { recursive: true });
 
   const spec = {
@@ -41,26 +43,35 @@ function createSpecFile(specId: string, stories: Array<{
   fs.writeFileSync(path.join(approvedDir, `${specId}.json`), JSON.stringify(spec, null, 2));
 }
 
-beforeEach(async () => {
-  jest.resetModules();
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pr-body-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
   const serverMod = require('../../server');
   app = serverMod.default;
-authToken = await getAuthToken(app);
+  authToken = await getAuthToken(app, { authId, email });
 
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'PR Body Test', tmpDir]);
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`,
+    [WORKSPACE_ID, 'PR Body Test', tmpDir],
+  );
+  await execute(
+    `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
+     VALUES ($1, $2::uuid, 'admin')`,
+    [WORKSPACE_ID, authId],
+  );
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 100));
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  fs.rmSync(path.join(tmpDir, 'forge'), { recursive: true, force: true });
+  await execute(`UPDATE workspaces SET pr_template = NULL WHERE id = $1`, [WORKSPACE_ID]);
+});
+
+afterAll(async () => {
+  await execute(`DELETE FROM workspace_members WHERE workspace_id = $1`, [WORKSPACE_ID]);
+  await execute(`DELETE FROM workspaces WHERE id = $1`, [WORKSPACE_ID]);
+  await execute(`DELETE FROM users WHERE auth_id = $1::uuid`, [authId]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/specs/:specId/stories/:storyId/pr-body ──────────────────────

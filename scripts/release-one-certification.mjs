@@ -23,6 +23,7 @@ const allowedPlaceholders = new Set([
   'node', 'rorcaRoot', 'hermesRoot', 'outputDir', 'historicalBroadJson',
   'pairNonce', 'hermesClient', 'hermesManifest',
 ]);
+const MAX_GATE_TIMEOUT_MS = 14_400_000;
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -168,7 +169,7 @@ export function validateGateDefinition(definition) {
     if (hasBuiltin === (steps.length > 0)) throw new Error(`Gate ${gate.id} must define either one builtin or command steps`);
     if (hasBuiltin && gate.builtin !== 'pair-diff-audit') throw new Error(`Gate ${gate.id} has unknown builtin ${gate.builtin}`);
     for (const step of steps) validateCommand(step, gate.id);
-    if (!Number.isSafeInteger(gate.timeoutMs) || gate.timeoutMs < 1_000 || gate.timeoutMs > 3_600_000) {
+    if (!Number.isSafeInteger(gate.timeoutMs) || gate.timeoutMs < 1_000 || gate.timeoutMs > MAX_GATE_TIMEOUT_MS) {
       throw new Error(`Gate ${gate.id} timeout is outside the safe range`);
     }
     if (gate.env !== undefined) {

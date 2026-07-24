@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
+import type { Server } from 'http';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
@@ -75,13 +75,15 @@ jest.mock('../../lib/pg-boss', () => {
   };
 });
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let mockDraftSpecWithPi: jest.Mock;
 let mockDraftSpecWithCodex: jest.Mock;
 let mockBossSend: jest.Mock;
 let authToken: string;
+let suiteTempRoot: string;
+let originalTmpDirEnv: string | undefined;
 
 const validLlmResponse = JSON.stringify({
   stories: [
@@ -112,8 +114,15 @@ const validLlmResponse = JSON.stringify({
 // plus TRUNCATE deadlocks between module-0 cleanup queries and module-N migrations.
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
+  originalTmpDirEnv = process.env.TMPDIR;
+  suiteTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-suite-'));
+  process.env.TMPDIR = suiteTempRoot;
   const serverMod = require('../../server');
-  app = serverMod.default;
+  app = serverMod.default.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    app.once('listening', resolve);
+    app.once('error', reject);
+  });
   const llmClient = require('../../lib/llm-client');
   const piDrafter = require('../../lib/pi-spec-drafter');
   const codexDrafter = require('../../lib/codex-spec-drafter');
@@ -122,6 +131,15 @@ beforeAll(async () => {
   mockDraftSpecWithPi = piDrafter.draftSpecWithPi;
   mockDraftSpecWithCodex = codexDrafter.draftSpecWithCodex;
   mockBossSend = pgBoss.getBoss().send;
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  if (originalTmpDirEnv === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTmpDirEnv;
+  fs.rmSync(suiteTempRoot, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 beforeEach(async () => {
@@ -134,32 +152,66 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-test-'));
 
-  // Clean up any stale spec files from prior test suites that share os.tmpdir()
+  // Clean only this suite-owned TMPDIR; never touch the process-global temp root.
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
 
-  // Clean up DB tables that accumulate between tests within the same run.
-  const tablesToClean = [
-    'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
-    'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
-    'workspace_context', 'direction_layers', 'batch_spec_generation',
-    'spec_post_save_stage_dependencies', 'spec_post_save_workflow_stages', 'spec_post_save_workflow_runs',
-    'spec_jobs',
-  ];
-  for (const t of tablesToClean) {
-    await execute(`TRUNCATE ${t} CASCADE`).catch(() => {});
+  // Delete only rows owned by this suite's reserved workspace. The certification
+  // database is shared across isolated Jest processes, so global TRUNCATE would
+  // erase unrelated append-only evidence and make suite ordering authoritative.
+  const ownedWalSpecs = await query<{ spec_id: string }>(
+    `SELECT DISTINCT spec_id
+       FROM wal_events
+      WHERE spec_id IS NOT NULL
+        AND (workspace_id = 'ws-test' OR payload ->> 'workspaceId' = 'ws-test')`,
+  );
+  const ownedSpecSlugs = [...new Set([
+    ...ownedWalSpecs.map((row) => row.spec_id),
+    'multi-ver',
+    'diff-test',
+  ])];
+  const workflowRows = await query<{ id: number; generation_log_id: number | null }>(
+    `SELECT id, generation_log_id
+       FROM spec_post_save_workflow_runs
+      WHERE workspace_id = 'ws-test'`,
+  );
+  const workflowIds = workflowRows.map((row) => row.id);
+  const generationLogIds = workflowRows
+    .map((row) => row.generation_log_id)
+    .filter((id): id is number => id !== null);
+  if (workflowIds.length > 0) {
+    await execute('DELETE FROM spec_post_save_stage_dependencies WHERE run_id = ANY($1::bigint[])', [workflowIds]);
+    await execute('DELETE FROM spec_post_save_workflow_stages WHERE run_id = ANY($1::bigint[])', [workflowIds]);
   }
+  await execute("DELETE FROM spec_jobs WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM spec_post_save_workflow_runs WHERE workspace_id = 'ws-test'");
+  if (generationLogIds.length > 0) {
+    await execute('DELETE FROM spec_generation_logs WHERE id = ANY($1::bigint[])', [generationLogIds]);
+  }
+  await execute("DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-test')");
+  await execute("DELETE FROM story_commits WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM pipeline_dispatch_publications WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM pipeline_run_cancellation_requests WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM pipeline_runs WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-test' OR payload ->> 'workspaceId' = 'ws-test'");
+  await execute(
+    "DELETE FROM spec_versions WHERE workspace_id = 'ws-test' OR (workspace_id IS NULL AND spec_slug = ANY($1::text[]))",
+    [ownedSpecSlugs],
+  );
+  await execute("DELETE FROM spec_search_index WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM workspace_context WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM direction_layers WHERE workspace_id = 'ws-test'");
 
   // Seed a workspace for tests
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [os.tmpdir()]);
 
-  authToken = await getAuthToken(app);
+  authToken = await getAuthToken();
 });
 
 afterEach(async () => {
-  // Clean up any spec files written to os.tmpdir()
+  // Clean up only files under this suite-owned TMPDIR.
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
@@ -2466,7 +2518,9 @@ describe('POST /api/specs/:id/reject', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', reason: 'Too many stories' });
 
-    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'spec_rejected'`) as { event_type: string; spec_id: string; actor: string; payload: string };
+    const event = await queryOne(
+      `SELECT * FROM wal_events WHERE event_type = 'spec_rejected' AND spec_id = 'wal-reject'`,
+    ) as { event_type: string; spec_id: string; actor: string; payload: string };
 
     expect(event).toBeDefined();
     expect(event.spec_id).toBe('wal-reject');
@@ -2524,7 +2578,7 @@ describe('GET /api/specs/:specId (detail)', () => {
 
 describe('GET /api/specs/:specId/versions', () => {
   test('returns empty array when no versions exist', async () => {
-    const res = await request(app).get('/api/specs/nonexistent-slug/versions').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/nonexistent-slug/versions?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     
     expect(res.body.items).toEqual([]);
@@ -2546,7 +2600,7 @@ describe('GET /api/specs/:specId/versions', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', reason: 'Needs more stories' });
 
-    const res = await request(app).get('/api/specs/versioned-spec/versions').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/versioned-spec/versions?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(1);
     expect(res.body.items[0].version).toBe(1);
@@ -2559,10 +2613,10 @@ describe('GET /api/specs/:specId/versions', () => {
 
   test('returns multiple versions in ascending order', async () => {
     // Manually insert two versions
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['multi-ver', 1, JSON.stringify({ title: 'V1', userStories: [] }), 'rejected']);
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending']);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status) VALUES ('ws-test', $1, $2, $3, $4)`, ['multi-ver', 1, JSON.stringify({ title: 'V1', userStories: [] }), 'rejected']);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status) VALUES ('ws-test', $1, $2, $3, $4)`, ['multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending']);
 
-    const res = await request(app).get('/api/specs/multi-ver/versions').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/multi-ver/versions?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(2);
     expect(res.body.items[0].version).toBe(1);
@@ -2591,12 +2645,12 @@ describe('GET /api/specs/:specId/diff', () => {
         { id: 'US-003', title: 'Password Reset', description: 'Reset flow', acceptanceCriteria: ['AC5'], dependsOn: ['US-001'] },
       ],
     };
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['diff-test', 1, JSON.stringify(v1), 'rejected']);
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES ($1, $2, $3, $4, $5)`, ['diff-test', 2, JSON.stringify(v2), 'pending', null]);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status) VALUES ('ws-test', $1, $2, $3, $4)`, ['diff-test', 1, JSON.stringify(v1), 'rejected']);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status, rejection_reason) VALUES ('ws-test', $1, $2, $3, $4, $5)`, ['diff-test', 2, JSON.stringify(v2), 'pending', null]);
   });
 
   test('returns structured diff with added, removed, modified, unchanged stories', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=2').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1&v2=2').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
 
     expect(res.body.specSlug).toBe('diff-test');
@@ -2634,25 +2688,25 @@ describe('GET /api/specs/:specId/diff', () => {
   });
 
   test('missing v1/v2 → 400', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('v1 and v2');
   });
 
   test('same v1 and v2 → 400', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=1').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1&v2=1').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('different');
   });
 
   test('nonexistent version → 404', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=99').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1&v2=99').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('v99');
   });
 
   test('both versions missing → 404 mentioning both', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=98&v2=99').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=98&v2=99').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('v98');
     expect(res.body.error).toContain('v99');
@@ -3000,7 +3054,12 @@ describe('POST /api/specs/generate/batch', () => {
 
     expect(res.status).toBe(201);
 
-    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'batch_started'`) as { event_type: string; payload: string };
+    const event = await queryOne(
+      `SELECT * FROM wal_events
+        WHERE event_type = 'batch_started'
+          AND payload ->> 'batchId' = $1`,
+      [res.body.batchId],
+    ) as { event_type: string; payload: string };
 
     expect(event).toBeDefined();
     const payload = parsePayload(event.payload);
@@ -3058,8 +3117,10 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
   test('nonexistent batchId → 404', async () => {
     const res = await request(app).get('/api/specs/generate/batch/nonexistent-id').set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(404);
-    expect(res.body.error).toContain('not found');
+    expect({ status: res.status, body: res.body }).toEqual({
+      status: 404,
+      body: expect.objectContaining({ error: expect.stringContaining('not found') }),
+    });
   });
 
   test('completed batch has finishedAt and all items completed', async () => {

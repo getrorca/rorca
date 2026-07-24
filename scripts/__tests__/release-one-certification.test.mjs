@@ -95,6 +95,9 @@ test('production gate definition is dependency ordered, complete, and contains n
   assert.match(serializedCommands, /check-opencore-export\.test\.mjs/);
   const realPgBossGate = definition.gates.find((gate) => gate.id === 'real-pgboss-runtime');
   assert.equal(realPgBossGate.env.RORCA_PGBOSS_SCHEMA, 'pgboss_cert_{pairNonce}');
+  const broadGate = definition.gates.find((gate) => gate.id === 'classified-broad-harness');
+  assert.ok(broadGate.timeoutMs >= 7_200_000, 'isolated complete-corpus broad gate must have at least two hours');
+  assert.ok(broadGate.timeoutMs <= 14_400_000, 'broad gate timeout must remain bounded to four hours');
   assert.doesNotMatch(serializedCommands, /--allow-review/);
   for (const forbidden of [
     /\bgit\s+push\b/i,
@@ -212,6 +215,48 @@ test('broad classifier preserves unknown failures and rejects silent skips', () 
     assert.equal(classification.failures[0].classification.primaryClass, 'unclassified');
     assert.equal(classification.skips[0].explicitReason, false);
     assert.equal(fs.existsSync(path.join(output, 'jest-results.json')), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('broad classifier rejects detected open handles even when all assertions pass', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'release-one-broad-open-handles-'));
+  try {
+    const baseline = path.join(root, 'baseline.json');
+    const results = path.join(root, 'results.json');
+    const output = path.join(root, 'output');
+    fs.writeFileSync(baseline, JSON.stringify({ entries: [] }));
+    fs.writeFileSync(results, JSON.stringify({
+      success: true,
+      numTotalTestSuites: 1,
+      numPassedTestSuites: 1,
+      numFailedTestSuites: 0,
+      numPendingTestSuites: 0,
+      numRuntimeErrorTestSuites: 0,
+      numTotalTests: 1,
+      numPassedTests: 1,
+      numFailedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
+      openHandles: [{}],
+      testResults: [{
+        name: path.join(repositoryRoot, 'backend/src/__tests__/clean-assertions-open-handle.test.ts'),
+        status: 'passed',
+        assertionResults: [{ status: 'passed', title: 'assertion passes', ancestorTitles: ['open handle'] }],
+      }],
+    }));
+    const execution = spawnSync(process.execPath, [
+      path.join(repositoryRoot, 'scripts/run-release-one-broad-certification.mjs'),
+      '--output', output,
+      '--baseline', baseline,
+      '--results', results,
+    ], { cwd: repositoryRoot, encoding: 'utf8' });
+    assert.equal(execution.status, 1);
+    const classification = JSON.parse(fs.readFileSync(path.join(output, 'classification.json'), 'utf8'));
+    assert.equal(classification.status, 'failed');
+    assert.equal(classification.policy.noDetectedOpenHandles, false);
+    assert.equal(classification.result.openHandles, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -155,11 +155,18 @@ async function nextVersion(specSlug: string): Promise<number> {
   return (row?.max_ver ?? 0) + 1;
 }
 
-async function snapshotVersion(specSlug: string, contentJson: string, status: string, rejectionReason?: string): Promise<number> {
+async function snapshotVersion(
+  workspaceId: string,
+  specSlug: string,
+  contentJson: string,
+  status: string,
+  rejectionReason?: string,
+): Promise<number> {
   const version = await nextVersion(specSlug);
   await execute(
-    'INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES ($1, $2, $3, $4, $5)',
-    [specSlug, version, contentJson, status, rejectionReason ?? null],
+    `INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status, rejection_reason)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [workspaceId, specSlug, version, contentJson, status, rejectionReason ?? null],
   );
   return version;
 }
@@ -514,7 +521,7 @@ ${storyList}`;
       })),
   );
   writeSpecAtomically(specFilePath, mergedContent);
-  await snapshotVersion(specId, JSON.stringify(mergedContent), specStatus);
+  await snapshotVersion(workspaceId, specId, JSON.stringify(mergedContent), specStatus);
   await emitWalEvent('skill_matched', specId, workspaceId, {
     matched_count: totalSkillsMatched,
     stories_affected: storiesAffected,
@@ -646,7 +653,7 @@ export async function runSuggestSkillsJob(
     throw matchErr;
   }
 
-  await snapshotVersion(specId, JSON.stringify(result.spec), specStatus);
+  await snapshotVersion(workspaceId, specId, JSON.stringify(result.spec), specStatus);
   await emitWalEvent('skill_matched', specId, workspaceId, {
     matched_count: result.matched,
     stories_affected: result.storiesAffected,
@@ -872,7 +879,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
   const latestContent = parseJsonFile<Record<string, unknown>>(specFile);
   const mergedContent = mergeEnrichmentIntoLatest(latestContent, initialMaterialHash, enrichmentPatches);
   writeSpecAtomically(specFile, mergedContent);
-  await snapshotVersion(specId, JSON.stringify(mergedContent), fs.existsSync(approvedFile) ? 'approved' : 'pending');
+  await snapshotVersion(workspaceId, specId, JSON.stringify(mergedContent), fs.existsSync(approvedFile) ? 'approved' : 'pending');
 
   const durationMs = Date.now() - start;
   const enrichmentSummaryJson = {

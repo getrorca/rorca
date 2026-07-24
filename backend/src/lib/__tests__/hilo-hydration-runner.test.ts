@@ -10,6 +10,27 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+const mockPrepareAutonomousSandboxLaunch = jest.fn((options: {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}) => ({
+  command: options.command,
+  args: options.args,
+  cwd: options.cwd,
+  env: options.env,
+}));
+
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousSandboxLaunch: (options: {
+    command: string;
+    args: string[];
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+  }) => mockPrepareAutonomousSandboxLaunch(options),
+}));
+
 import {
   createHydration,
   getHydrationById,
@@ -162,6 +183,11 @@ describe('hilo-hydration-runner (US-007)', () => {
     });
 
     expect(result.status).toBe('succeeded');
+    expect(mockPrepareAutonomousSandboxLaunch).toHaveBeenCalledWith(expect.objectContaining({
+      command: '/usr/bin/hilo',
+      args: ['scan', checkoutDir, '--output', outputDir],
+      cwd: checkoutDir,
+    }));
     if (result.status === 'succeeded') {
       expect(result.gitSha).toBe('abc1234');
       expect(result.graphPath).toBe(outputDir);
@@ -477,7 +503,6 @@ describe('hilo-hydration-runner (US-007)', () => {
 
     // Simulate a synchronous throw in the mock (should never happen but we guard).
     mockExecFile.mockImplementation(() => {
-      // eslint-disable-next-line no-throw-literal
       throw 'something broke';
     });
 

@@ -22,19 +22,18 @@ jest.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
 
 // Must require after mock setup
 let server: McpServer;
-let RORCA_API: string;
+let serverModule: Record<string, unknown>;
 
 beforeAll(() => {
-  const mod = require('../server');
-  server = mod.server;
-  RORCA_API = mod.RORCA_API;
+  serverModule = require('../server');
+  server = serverModule.server as McpServer;
 });
 
 test('server is an instance of McpServer', () => {
   expect(server).toBeInstanceOf(McpServer);
 });
 
-test('server has underlying Server with name "rorca" and version "1.0.0"', () => {
+test('server has the canonical OpenAPI-derived identity', () => {
   // McpServer wraps a Server instance at server.server
   // The Server stores serverInfo privately but exposes it via the
   // initialize handshake. We verify the inner server exists.
@@ -43,10 +42,10 @@ test('server has underlying Server with name "rorca" and version "1.0.0"', () =>
   // Access the serverInfo via the internal property (set in constructor)
   const innerServer = server.server as unknown as Record<string, unknown>;
   const serverInfo = innerServer['_serverInfo'] as { name: string; version: string };
-  expect(serverInfo.name).toBe('rorca');
-  expect(serverInfo.version).toBe('1.0.0');
+  expect(serverInfo.name).toBe('rorca-http');
+  expect(serverInfo.version).toBe('2.0.0');
 });
 
-test('RORCA_API falls back to http://localhost:3030 when env not set', () => {
-  expect(RORCA_API).toBe('http://localhost:3030');
+test('backend URL remains private to the shared OpenAPI executor', () => {
+  expect(serverModule).not.toHaveProperty('RORCA_API');
 });

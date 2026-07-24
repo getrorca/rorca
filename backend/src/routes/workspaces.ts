@@ -19,6 +19,7 @@ import {
   getLatestHash,
 } from '../lib/git-hydrator';
 import { autoHydrateWorkspaceContext, buildContextHealthSummary } from '../lib/auto-memory';
+import { parseGitReduceYaml } from '../lib/git-yaml-parser';
 import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
@@ -582,8 +583,17 @@ router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
           return;
         }
 
-        // git_memory column was dropped (migration 075) — knowledge now lives in memories table.
-        // _gitMemory is intentionally retained only for local flow symmetry and future response hooks.
+        // git_memory column was dropped (migration 075). Persist each bounded
+        // reduced rule in the canonical memories table before advancing the
+        // hydration cursor so a successful response cannot discard knowledge.
+        for (const entry of parseGitReduceYaml(_gitMemory)) {
+          await execute(
+            `INSERT INTO memories
+               (workspace_id, category, content, confidence, related_files, source_type, source)
+             VALUES ($1, $2, $3, 'medium', '[]'::jsonb, 'import', 'git_hydration')`,
+            [id, entry.category, `${entry.title}: ${entry.rule}`],
+          );
+        }
       } else {
         _gitMemory = '';
       }

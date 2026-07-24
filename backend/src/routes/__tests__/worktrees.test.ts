@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
+import type { Server } from 'node:http';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, execute } from '../../db/index';
@@ -29,15 +29,20 @@ jest.mock('simple-git', () => ({
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
+  const expressApp = serverMod.default;
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    app.once('listening', resolve);
+    app.once('error', reject);
+  });
 });
 
 beforeEach(async () => {
@@ -65,6 +70,8 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
   try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
   delete process.env.NODE_ENV;
 });

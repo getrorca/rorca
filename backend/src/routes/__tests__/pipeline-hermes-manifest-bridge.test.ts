@@ -352,6 +352,7 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
       lineage_depth: params[4], schema_version: params[5], manifest_id: params[6],
       source_idempotency_key: params[7], manifest_hash: params[8], synthetic_spec_hash: params[9],
       manifest_path: params[10], synthetic_spec_path: params[11], lineage_identity_hash: params[12],
+      provider_human_receipt_id: params[13] ?? null,
     };
     taskManifestLineages.push(row);
     return Promise.resolve({ rows: [row] });
@@ -855,7 +856,7 @@ describe('POST /api/pipeline/trigger legacy Hermes compatibility guard', () => {
     expect(mockBoss.send).not.toHaveBeenCalled();
   });
 
-  test('normal full-spec run preserves request agent/model precedence and worktree PR behavior', async () => {
+  test('normal full-spec route rejects manifestless execution before worktree or dispatch', async () => {
     const app = makeApp();
     const specPath = seedNormalSpec('hermes-normal-spec');
 
@@ -872,41 +873,19 @@ describe('POST /api/pipeline/trigger legacy Hermes compatibility guard', () => {
         terminal_mode: 'ansi-html',
       });
 
-    expect(response.status).toBe(201);
-    expect(response.body).toEqual(expect.objectContaining({
-      ok: true,
-      queued: true,
-      runId: expect.any(Number),
-      branchName: 'feat/hermes-normal-spec',
-      agentType: 'opencode',
-      agentModel: 'openrouter/z-ai/glm-5',
-      terminalMode: 'ansi-html',
-    }));
-    expect(response.body.worktreePath).toContain('workspace-feat-hermes-normal-spec');
-    expect(mockSimpleGitRaw).toHaveBeenCalledWith(expect.arrayContaining(['worktree', 'add']));
-    expect(pipelineRunInserts[0]).toEqual(expect.objectContaining({
-      specPath,
-      workspaceId: 'ws-hermes',
-      agentType: 'opencode',
-      agentModel: 'openrouter/z-ai/glm-5',
-      autoWorktree: true,
-      autoMerge: false,
-      mergeStrategy: 'pr',
-    }));
-    expect(mockBoss.createQueue).toHaveBeenCalledWith('pipeline:run');
-    expect(mockBoss.send).toHaveBeenCalledWith(
-      'pipeline:run',
-      expect.objectContaining({
-        runId: response.body.runId,
-        specPath,
-        agent: 'opencode',
-        model: 'openrouter/z-ai/glm-5',
-        autoWorktree: true,
-        autoMerge: false,
-        mergeStrategy: 'pr',
-        agentOverride: 'opencode',
-      }),
-      expect.objectContaining({ id: expect.stringMatching(/^[0-9a-f-]{36}$/), retryLimit: 0 }),
-    );
+    expect(response.status).toBe(422);
+    expect(response.body).toMatchObject({
+      code: 'RELEASE_ONE_TASK_MANIFEST_REQUIRED',
+      details: {
+        profileId: 'release-1-supervised-core',
+        capabilityId: 'bounded_task_manifest',
+        endpoint: '/api/pipeline/task-manifests/trigger',
+      },
+    });
+    expect(pipelineRunInserts).toHaveLength(0);
+    expect(taskManifestReservations).toHaveLength(0);
+    expect(mockSimpleGitRaw).not.toHaveBeenCalled();
+    expect(mockBoss.createQueue).not.toHaveBeenCalled();
+    expect(mockBoss.send).not.toHaveBeenCalled();
   });
 });

@@ -47,9 +47,11 @@ test('task-manifest trigger rejects local-user before workspace reads, artifact 
   }
 });
 
-test('stable public schema retains compatibility input while runtime discovery and parser mark it unavailable', () => {
-  expect(pipeline).toContain('enum: [remote-rorca, local-user]');
-  expect(pipeline).toContain('422: { description: "Spec is not executable or wave-parallel execution was denied by policy" }');
+test('stable public schema advertises only the available host while its parser retains fail-closed compatibility input', () => {
+  expect(pipeline).toContain('enum: [remote-rorca]');
+  expect(pipeline).not.toContain('enum: [remote-rorca, local-user]');
+  expect(pipeline).toContain('422: { description: "Spec is not executable or the request asks for a disabled Release-1 capability" }');
+  expect(executionEnvironment).toContain("z.enum(['remote-rorca', 'local-user'])");
   expect(executionEnvironment).toContain("'LOCAL_USER_EXECUTION_UNAVAILABLE'");
   expect(executionEnvironmentRoutes).toContain("unavailable: [{ id: 'local-user', deprecated: true, reason: 'LOCAL_USER_EXECUTION_UNAVAILABLE' }]");
 });

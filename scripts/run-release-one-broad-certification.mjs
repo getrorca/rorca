@@ -202,8 +202,14 @@ skips.sort((left, right) => left.suite.localeCompare(right.suite) || left.title.
 
 const unclassifiedFailures = failures.filter((failure) => failure.classification.primaryClass === 'unclassified').length;
 const silentSkips = skips.filter((skip) => !skip.explicitReason).length;
+const openHandleCount = Array.isArray(results.openHandles) ? results.openHandles.length : 0;
+const runtimeErrorSuites = Number(results.numRuntimeErrorTestSuites ?? 0);
+const wasInterrupted = results.wasInterrupted === true;
 const passed = Number(results.numFailedTestSuites ?? failures.length) === 0
   && Number(results.numFailedTests ?? 0) === 0
+  && runtimeErrorSuites === 0
+  && !wasInterrupted
+  && openHandleCount === 0
   && unclassifiedFailures === 0
   && silentSkips === 0
   && jest.status === 0;
@@ -227,12 +233,18 @@ const classification = {
       pending: results.numPendingTests,
       todo: results.numTodoTests,
     },
+    runtimeErrorSuites,
+    openHandles: openHandleCount,
+    wasInterrupted,
     jestExitCode: jest.status,
     jestSignal: jest.signal,
   },
   policy: {
     everyFailureClassified: unclassifiedFailures === 0,
     everySkipHasDetectorReason: silentSkips === 0,
+    noDetectedOpenHandles: openHandleCount === 0,
+    noRuntimeErrors: runtimeErrorSuites === 0,
+    runCompleted: !wasInterrupted,
     failuresAreReleaseBlocking: true,
     futureCapabilitiesAreNeverImplementedToSatisfyThisGate: true,
   },

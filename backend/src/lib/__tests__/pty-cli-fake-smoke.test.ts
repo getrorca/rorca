@@ -13,6 +13,23 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+const mockPrepareAutonomousSandboxLaunch = jest.fn((options: {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}) => ({ ...options, isolated: true }));
+
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousSandboxLaunch: (options: {
+    command: string;
+    args: string[];
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+  }) => mockPrepareAutonomousSandboxLaunch(options),
+}));
+
 import { buildPtyCompletionMarker, buildPtyMarkerFilePath, createBaseInteractivePtyAdapter, createPtyCompletionState } from '../interactive-pty-agent-adapter';
 import { buildPtyCommand } from '../execution-engine';
 import { probePtyCliCompatibility } from '../pty-cli-compat';
@@ -102,6 +119,12 @@ describe('deterministic fake-CLI PTY adapter smoke harness', () => {
     );
     expect(command.args).toEqual(['attach', 'http://127.0.0.1:4096']);
     expect(command.args).not.toContain('--attach');
+    const versionProbe = mockPrepareAutonomousSandboxLaunch.mock.calls
+      .map(([launch]) => launch)
+      .find((launch) => launch.args.length === 1 && launch.args[0] === '--version');
+    expect(versionProbe).toBeDefined();
+    expect(versionProbe?.command).toBe(fs.realpathSync(fakeCli));
+    expect(versionProbe?.args).toEqual(['--version']);
   });
 
   for (const agentType of ['claude', 'opencode', 'codex', 'pi'] as AgentType[]) {

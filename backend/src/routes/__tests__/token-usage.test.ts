@@ -77,9 +77,10 @@ describe('story token usage (V2-025)', () => {
     const agg = await queryOne(`SELECT SUM(input_tokens) as total_input, SUM(output_tokens) as total_output, COUNT(*) as count
        FROM story_results WHERE run_id = $1 AND input_tokens IS NOT NULL`, [runId]) as any;
 
-    expect(agg.total_input).toBe(365000);
-    expect(agg.total_output).toBe(25000);
-    expect(agg.count).toBe(3);
+    // PostgreSQL returns BIGINT aggregates as strings through node-postgres.
+    expect(Number(agg.total_input)).toBe(365000);
+    expect(Number(agg.total_output)).toBe(25000);
+    expect(Number(agg.count)).toBe(3);
 
     // Context window check: US-012 uses 198k/200k = 99% — should be flagged
     const contextWindow = 200000;

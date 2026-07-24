@@ -5,8 +5,11 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
 import { execFileSync } from 'child_process';
+import { once } from 'events';
 import * as fs from 'fs';
+import type { Server } from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
@@ -39,52 +42,64 @@ jest.mock('../../lib/execution-environment-registry', () => ({
   assertExecutionEnvironmentReadyForRun: jest.fn().mockResolvedValue({ ready: true }),
 }));
 
-let app: Express;
+const fixtureId = crypto.randomUUID();
+const workspaceId = `ws-readiness-${fixtureId}`;
+const authEmail = `pipeline-readiness-${fixtureId}@test.rorca.local`;
+const preflightSlug = `readiness-preflight-${fixtureId}`;
+const triggerSlug = `readiness-trigger-${fixtureId}`;
+let app: Server;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
 
+function api() {
+  return request(app);
+}
+
+async function cleanFixture(): Promise<void> {
+  await execute('DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)', [workspaceId]);
+  await execute('DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)', [workspaceId]);
+  await execute('DELETE FROM pipeline_dispatch_publications WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)', [workspaceId]);
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM spec_generation_logs WHERE spec_slug = ANY($1::text[])', [[preflightSlug, triggerSlug]]);
+  await execute('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+}
+
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
-
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
-  await execute(
-    `INSERT INTO users (id, email, display_name, password_hash, plan)
-     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
-     ON CONFLICT (id) DO UPDATE SET plan = 'pro'`
-  );
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: authEmail,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
 beforeEach(async () => {
   jest.clearAllMocks();
+  await cleanFixture();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pipeline-readiness-'));
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
   execFileSync('git', ['init', '-q', wsDir]);
   execFileSync('git', ['-C', wsDir, '-c', 'user.name=Rorca Tests', '-c', 'user.email=tests@rorca.local', 'commit', '--allow-empty', '-qm', 'test baseline']);
-
-  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-ready')`);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-ready')`);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-ready'`);
-  await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-ready'`);
-  await execute(`DELETE FROM spec_post_save_stage_dependencies`).catch(() => {});
-  await execute(`DELETE FROM spec_post_save_workflow_stages`).catch(() => {});
-  await execute(`DELETE FROM spec_post_save_workflow_runs`).catch(() => {});
-  await execute(`DELETE FROM spec_jobs`).catch(() => {});
-  await execute(`DELETE FROM spec_generation_logs`).catch(() => {});
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-ready', 'Pipeline Ready', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [wsDir]);
+  await execute('INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)', [workspaceId, 'Pipeline Ready', wsDir]);
 });
 
 afterEach(async () => {
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 100));
+  await cleanFixture();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await cleanFixture();
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  await execute('DELETE FROM users WHERE email = $1', [authEmail]);
   delete process.env.NODE_ENV;
 });
 
@@ -103,7 +118,7 @@ async function seedSpecReadinessLog(specSlug: string): Promise<void> {
     [
       specSlug,
       JSON.stringify({
-        workspaceId: 'ws-ready',
+        workspaceId,
         contextCaptureStatus: { status: 'provided', reason: 'caller_supplied_context' },
         postSaveStages: {
           enrich: { requested: true, status: 'completed', reason: 'job_completed' },
@@ -116,7 +131,7 @@ async function seedSpecReadinessLog(specSlug: string): Promise<void> {
 
 describe('pipeline execution readiness', () => {
   test('POST /api/pipeline/preflight includes executionReadiness story scores', async () => {
-    writeSpec('readiness-preflight', {
+    writeSpec(preflightSlug, {
       title: 'readiness preflight',
       userStories: [
         {
@@ -138,20 +153,19 @@ describe('pipeline execution readiness', () => {
       ],
     });
 
-    const res = await request(app)
+    const res = await api()
       .post('/api/pipeline/preflight')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ specPath: 'forge/specs/approved/readiness-preflight.json', workspaceId: 'ws-ready' });
+      .send({ specPath: `forge/specs/approved/${preflightSlug}.json`, workspaceId });
 
     expect(res.status).toBe(200);
-    expect(res.body.executionReadiness).toBeDefined();
     expect(res.body.executionReadiness.stories).toHaveLength(2);
     expect(res.body.executionReadiness.stories[0].grade).toBe('weak');
     expect(res.body.executionReadiness.stories[1].recommendedFallbackEngine).toBe('codex');
   });
 
-  test('POST /api/pipeline/trigger includes executionReadiness in the response', async () => {
-    writeSpec('readiness-trigger', {
+  test('non-mutating trigger planning includes executionReadiness without bypassing TaskManifest execution authority', async () => {
+    writeSpec(triggerSlug, {
       title: 'readiness trigger',
       userStories: [
         {
@@ -164,15 +178,20 @@ describe('pipeline execution readiness', () => {
         },
       ],
     });
-    await seedSpecReadinessLog('readiness-trigger');
+    await seedSpecReadinessLog(triggerSlug);
 
-    const res = await request(app)
+    const res = await api()
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ specPath: 'forge/specs/approved/readiness-trigger.json', workspaceId: 'ws-ready', agentOverride: 'pi' });
+      .send({
+        specPath: `forge/specs/approved/${triggerSlug}.json`,
+        workspaceId,
+        agentOverride: 'pi',
+        dryRun: true,
+      });
 
-    expect(res.status).toBe(201);
-    expect(res.body.executionReadiness).toBeDefined();
+    expect(res.status).toBe(200);
+    expect(res.body.dryRun).toBe(true);
     expect(res.body.executionReadiness.mode).toBe('impl');
     expect(res.body.executionReadiness.stories[0].recommendedFallbackEngine).toBe('codex');
   });

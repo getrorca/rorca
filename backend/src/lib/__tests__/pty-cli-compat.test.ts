@@ -160,8 +160,11 @@ esac
     const previousPiBin = process.env.PI_BIN;
     process.env.PI_BIN = fake;
     try {
-      const first = probePtyCliCompatibility('pi', { timeoutMs: 250 });
-      const second = probePtyCliCompatibility('pi', { timeoutMs: 250 });
+      // This case validates cache semantics, not the timeout boundary. Give the
+      // two shell startups enough headroom under the complete isolated corpus;
+      // dedicated hung-wrapper cases below retain strict timeout assertions.
+      const first = probePtyCliCompatibility('pi', { timeoutMs: 2_000 });
+      const second = probePtyCliCompatibility('pi', { timeoutMs: 2_000 });
 
       expect(first.ready).toBe(false);
       expect(second.ready).toBe(true);

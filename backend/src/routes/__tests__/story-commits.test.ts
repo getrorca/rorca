@@ -9,12 +9,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createHmac } from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, execute } from '../../db/index';
+import { encryptToken } from '../../lib/auth-utils';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 
@@ -71,35 +74,43 @@ function createSpecFile(stories: Array<{ id: string; title: string }>) {
   fs.writeFileSync(path.join(approvedDir, 'test-spec.json'), JSON.stringify(spec, null, 2));
 }
 
-beforeEach(async () => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-commit-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
 
-  await execute(`DELETE FROM story_commits`);
-  await execute(`DELETE FROM wal_events`);
-  await execute(`DELETE FROM workspace_github_webhooks WHERE workspace_id = $1`, [WORKSPACE_ID]);
-
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = $3`, [WORKSPACE_ID, 'Commit Test', tmpDir]);
-
-  const authMod = require('../auth');
-  const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
-  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
+beforeEach(async () => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-commit-test-'));
+  await execute('DELETE FROM story_commits WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, 'Commit Test', tmpDir],
+  );
+  await execute(
+    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptToken(WEBHOOK_SECRET)],
+  );
 });
 
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 100));
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  await execute('DELETE FROM story_commits WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
 });
 
 // ─── extractStoryIdsFromCommit unit tests ────────────────────────────────────
@@ -144,7 +155,7 @@ test('extractStoryIdsFromCommit: case insensitive', () => {
 
 // ─── Push webhook integration tests ─────────────────────────────────────────
 
-test('push with feat(US-XXX) commits creates story_commits rows', async () => {
+test('push observation does not synthesize host-authoritative story commit rows', async () => {
   createSpecFile([
     { id: 'US-001', title: 'Story 1' },
     { id: 'US-002', title: 'Story 2' },
@@ -158,16 +169,11 @@ test('push with feat(US-XXX) commits creates story_commits rows', async () => {
   expect(res.status).toBe(200);
   await new Promise((r) => setTimeout(r, 200));
 
-  const rows = await query(`SELECT * FROM story_commits`) as any[];
-  expect(rows).toHaveLength(1);
-  expect(rows[0].story_id).toBe('US-001');
-  expect(rows[0].spec_id).toBe('test-spec');
-  expect(rows[0].commit_sha).toBe('sha111');
-  expect(rows[0].commit_message).toBe('feat(US-001): Add login form');
-  expect(rows[0].author).toBe('testuser');
+  const rows = await query(`SELECT * FROM story_commits WHERE workspace_id = $1`, [WORKSPACE_ID]) as any[];
+  expect(rows).toHaveLength(0);
 });
 
-test('single commit with multiple story IDs creates multiple rows', async () => {
+test('multiple story IDs still cannot create commit authority from webhook observation', async () => {
   createSpecFile([
     { id: 'US-001', title: 'Story 1' },
     { id: 'US-002', title: 'Story 2' },
@@ -181,15 +187,11 @@ test('single commit with multiple story IDs creates multiple rows', async () => 
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const rows = await query(`SELECT * FROM story_commits ORDER BY story_id`) as any[];
-  expect(rows).toHaveLength(2);
-  expect(rows[0].story_id).toBe('US-001');
-  expect(rows[1].story_id).toBe('US-003');
-  expect(rows[0].commit_sha).toBe('sha222');
-  expect(rows[1].commit_sha).toBe('sha222');
+  const rows = await query(`SELECT * FROM story_commits WHERE workspace_id = $1 ORDER BY story_id`, [WORKSPACE_ID]) as any[];
+  expect(rows).toHaveLength(0);
 });
 
-test('push emits github_push_commits WAL event', async () => {
+test('push observation does not emit a host-authoritative story commit WAL event', async () => {
   createSpecFile([
     { id: 'US-001', title: 'Story 1' },
   ]);
@@ -203,10 +205,7 @@ test('push emits github_push_commits WAL event', async () => {
 
   const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_push_commits'`) as any[];
 
-  expect(events).toHaveLength(1);
-  const walPayload = JSON.parse(events[0].payload);
-  expect(walPayload.linked_count).toBe(1);
-  expect(walPayload.commits_count).toBe(1);
+  expect(events).toHaveLength(0);
 });
 
 test('commit without story IDs does not create rows', async () => {
@@ -225,7 +224,7 @@ test('commit without story IDs does not create rows', async () => {
   expect(rows).toHaveLength(0);
 });
 
-test('duplicate commit SHA is ignored (INSERT OR IGNORE)', async () => {
+test('replayed push observations remain non-authoritative', async () => {
   createSpecFile([
     { id: 'US-001', title: 'Story 1' },
   ]);
@@ -239,8 +238,8 @@ test('duplicate commit SHA is ignored (INSERT OR IGNORE)', async () => {
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const rows = await query(`SELECT * FROM story_commits`);
-  expect(rows).toHaveLength(1);
+  const rows = await query(`SELECT * FROM story_commits WHERE workspace_id = $1`, [WORKSPACE_ID]);
+  expect(rows).toHaveLength(0);
 });
 
 // ─── GET /api/specs/:specId/stories/:storyId/commits ─────────────────────────

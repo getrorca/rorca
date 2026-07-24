@@ -40,8 +40,8 @@ interface PreferenceRow {
   id: string;
   user_id: string;
   event_type: string;
-  in_app: number;
-  email: number;
+  in_app: boolean;
+  email: boolean;
 }
 
 /**
@@ -377,8 +377,8 @@ router.put('/preferences', async (req, res) => {
           crypto.randomUUID(),
           user.id,
           eventType,
-          pref.inApp ? 1 : 0,
-          pref.email ? 1 : 0,
+          pref.inApp,
+          pref.email,
         ],
       );
     }
@@ -397,7 +397,7 @@ export async function createNotification(
   link?: string,
 ): Promise<string> {
   // Check user preferences — skip if in_app disabled
-  const pref = await queryOne<{ in_app: number }>(
+  const pref = await queryOne<{ in_app: boolean }>(
     'SELECT in_app FROM notification_preferences WHERE user_id = $1 AND event_type = $2',
     [userId, type],
   );

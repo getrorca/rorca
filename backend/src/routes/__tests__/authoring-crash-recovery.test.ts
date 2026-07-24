@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Server } from 'node:http';
 import express from 'express';
 import request from 'supertest';
 import { closePool, execute, queryOne } from '../../db/index';
@@ -20,7 +21,9 @@ import {
 import { planAuthoring } from '../../lib/ssdlc-authoring-planner';
 import { stableWalJson } from '../../lib/trusted-wal';
 
-function app() {
+let testServer: Server;
+
+function buildApp() {
   const value = express();
   value.use(express.json({ limit: '2mb' }));
   value.use((req, _res, next) => {
@@ -30,6 +33,10 @@ function app() {
   value.use('/api/specs', specsRouter);
   value.use(errorHandler);
   return value;
+}
+
+function app(): Server {
+  return testServer;
 }
 
 const canonicalStories = [
@@ -195,7 +202,19 @@ const persistFailpoints = [
 ] as const;
 
 describe('governed authoring crash roll-forward', () => {
-  afterAll(async () => { await closePool(); });
+  beforeAll(async () => {
+    testServer = buildApp().listen(0, '127.0.0.1');
+    await new Promise<void>((resolve, reject) => {
+      testServer.once('listening', resolve);
+      testServer.once('error', reject);
+    });
+  });
+
+  afterAll(async () => {
+    testServer.closeAllConnections();
+    await new Promise<void>((resolve, reject) => testServer.close((error) => error ? reject(error) : resolve()));
+    await closePool();
+  });
   test.each(persistFailpoints)('persist replay rolls forward exactly after %s', async (failpoint) => {
     const fixture = await createFixture(failpoint.replaceAll('_', '-'));
     const key = `persist:${crypto.randomUUID()}`;

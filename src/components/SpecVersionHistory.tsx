@@ -109,7 +109,7 @@ export function SpecVersionHistory({
     setError('');
     try {
       const res = await apiFetch<{ items: VersionInfo[]; total: number; hasMore: boolean; cursor?: string }>(
-        `/api/specs/${specId}/versions`
+        `/api/specs/${specId}/versions?workspaceId=${encodeURIComponent(workspaceId)}`
       );
       setVersions(res.items);
       // Auto-select latest two versions for diff
@@ -123,7 +123,7 @@ export function SpecVersionHistory({
     } finally {
       setLoading(false);
     }
-  }, [specId]);
+  }, [specId, workspaceId]);
 
   useEffect(() => {
     fetchVersions();
@@ -137,12 +137,12 @@ export function SpecVersionHistory({
     }
     let cancelled = false;
     setDiffLoading(true);
-    apiFetch<DiffResult>(`/api/specs/${specId}/diff?v1=${selectedV1}&v2=${selectedV2}`)
+    apiFetch<DiffResult>(`/api/specs/${specId}/diff?workspaceId=${encodeURIComponent(workspaceId)}&v1=${selectedV1}&v2=${selectedV2}`)
       .then(res => { if (!cancelled) setDiffResult(res); })
       .catch(() => { if (!cancelled) setDiffResult(null); })
       .finally(() => { if (!cancelled) setDiffLoading(false); });
     return () => { cancelled = true; };
-  }, [specId, selectedV1, selectedV2]);
+  }, [specId, workspaceId, selectedV1, selectedV2]);
 
   const handleRestore = async (version: number) => {
     setRestoring(version);

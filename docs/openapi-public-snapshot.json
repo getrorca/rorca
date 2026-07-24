@@ -1,6 +1,6 @@
 {
-  "contractVersion": "17.0.0",
-  "generatedAt": "2026-07-22T22:04:55.548Z",
+  "contractVersion": "18.0.0",
+  "generatedAt": "2026-07-24T07:30:22.058Z",
   "routes": [
     {
       "method": "GET",
@@ -6194,6 +6194,14 @@
           "schema": {
             "type": "integer"
           }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "responseSchema": {
@@ -6251,7 +6259,7 @@
         "400": {},
         "404": {}
       },
-      "hash": "sha256:92319d3be10d5119838d2668e22c6deb569c4bd0b855d9e4d74caf717b772ff7"
+      "hash": "sha256:f392b8b7e14b568ae60a4162d81e6f76c7de77b5fdb22d8ef0c2cefb58692ee6"
     },
     {
       "method": "POST",
@@ -7061,6 +7069,14 @@
           "schema": {
             "type": "string"
           }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "responseSchema": {
@@ -7106,7 +7122,7 @@
           }
         }
       },
-      "hash": "sha256:be92d4e232439f57f0d91499847c494c06ff60ce03c5e009b82a9cccd161d93c"
+      "hash": "sha256:abac4ad4caf9448a0840cb5645ef507c33c53849e9f6bbb2e68871b163c23aa6"
     },
     {
       "method": "GET",

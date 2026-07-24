@@ -5,55 +5,92 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as path from 'path';
 
+async function waitForClose(proc: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      proc.off('close', onClose);
+      resolve(false);
+    }, timeoutMs);
+    timer.unref();
+    const onClose = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    proc.once('close', onClose);
+  });
+}
+
+async function stopProcess(proc: ChildProcessWithoutNullStreams): Promise<void> {
+  proc.stdin.end();
+  if (!await waitForClose(proc, 1_000)) {
+    proc.kill('SIGTERM');
+    if (!await waitForClose(proc, 2_000)) {
+      proc.kill('SIGKILL');
+      if (!await waitForClose(proc, 2_000)) throw new Error('MCP test child did not exit after SIGKILL');
+    }
+  }
+  proc.stdout.destroy();
+  proc.stderr.destroy();
+}
+
 describe('MCP server integration', () => {
-  it('lists the core friendly spec/pipeline aliases', (done) => {
-    const proc = spawn('npx', ['tsx', path.resolve(__dirname, '../server.ts')], {
+  it('lists the core friendly spec/pipeline aliases and closes its exact child process', async () => {
+    const proc = spawn(process.execPath, [
+      '--import', 'tsx', path.resolve(__dirname, '../server.ts'),
+    ], {
+      cwd: path.resolve(__dirname, '../../..'),
       env: { ...process.env, NODE_ENV: 'production', RORCA_API_URL: 'http://localhost:3030' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    const initialize = JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'initialize',
-      params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } }
-    });
-    const listTools = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    let stderr = '';
+    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    try {
+      const toolsResponse = await new Promise<any>((resolve, reject) => {
+        let output = '';
+        const timer = setTimeout(() => reject(new Error(`Timed out waiting for MCP tools response: ${stderr}`)), 10_000);
+        const finish = (value: unknown, error?: Error) => {
+          clearTimeout(timer);
+          proc.off('error', onError);
+          proc.off('exit', onExit);
+          if (error) reject(error); else resolve(value);
+        };
+        const onError = (error: Error) => finish(undefined, error);
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+          finish(undefined, new Error(`MCP child exited before tools response: code=${code} signal=${signal}; ${stderr}`));
+        };
+        proc.once('error', onError);
+        proc.once('exit', onExit);
+        proc.stdout.on('data', (chunk: Buffer) => {
+          output += chunk.toString();
+          const response = output.split('\n').filter(Boolean)
+            .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+            .find((message) => message?.id === 2);
+          if (response) finish(response);
+        });
 
-    proc.stdin.write(initialize + '\n');
-    proc.stdin.write(listTools + '\n');
-
-    let output = '';
-    proc.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
-
-    setTimeout(() => {
-      proc.kill();
-      const lines = output.trim().split('\n').filter(Boolean);
-      const toolsResponse = lines
-        .map(l => { try { return JSON.parse(l); } catch { return null; } })
-        .find(r => r?.id === 2);
+        proc.stdin.write(`${JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'initialize',
+          params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+        })}\n`);
+        proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })}\n`);
+      });
 
       expect(toolsResponse).toBeTruthy();
-      const toolNames = toolsResponse.result.tools.map((t: { name: string }) => t.name);
-      expect(toolNames).toContain('rorca_get_context');
-      expect(toolNames).toContain('rorca_create_spec');
-      expect(toolNames).toContain('rorca_generate_spec');
-      expect(toolNames).toContain('rorca_persist_spec');
-      expect(toolNames).toContain('rorca_list_specs');
-      expect(toolNames).toContain('rorca_approve_spec');
-      expect(toolNames).toContain('rorca_pipeline_status');
-      expect(toolNames).toContain('rorca_list_workspaces');
-      expect(toolNames).toContain('rorca_trigger_run');
-      expect(toolNames).toContain('rorca_run_status');
-      expect(toolNames).toContain('rorca_retry_story');
-      expect(toolNames).toContain('rorca_list_runs');
-      expect(toolNames).toContain('rorca_edit_story');
-      expect(toolNames).toContain('rorca_add_stories');
-      expect(toolNames).toContain('rorca_delete_story');
-      expect(toolNames).toContain('rorca_save_memory');
-      expect(toolNames).toContain('rorca_get_memories');
-      done();
-    }, 6000);
-  }, 15000);
+      const toolNames = toolsResponse.result.tools.map((tool: { name: string }) => tool.name);
+      expect(toolNames).toEqual(expect.arrayContaining([
+        'rorca_get_context', 'rorca_create_spec', 'rorca_generate_spec', 'rorca_persist_spec',
+        'rorca_list_specs', 'rorca_approve_spec', 'rorca_pipeline_status', 'rorca_list_workspaces',
+        'rorca_trigger_run', 'rorca_run_status', 'rorca_retry_story', 'rorca_list_runs',
+        'rorca_edit_story', 'rorca_add_stories', 'rorca_delete_story', 'rorca_save_memory',
+        'rorca_get_memories',
+      ]));
+    } finally {
+      await stopProcess(proc);
+    }
+  }, 20_000);
 });

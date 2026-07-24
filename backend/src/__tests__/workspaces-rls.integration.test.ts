@@ -22,7 +22,10 @@ async function setJwtClaims(client: PoolClient, sub: string | null, role: 'anon'
     ? JSON.stringify({ sub, role, aud: 'authenticated' })
     : JSON.stringify({ role: 'anon', aud: 'authenticated' });
 
-  await client.query('SELECT set_config($1, $2, true)', ['request.jwt.claims', claims]);
+  await client.query(
+    'SELECT set_config($1, $2, true), set_config($3, $4, true)',
+    ['request.jwt.claims', claims, 'request.jwt.claim.sub', sub ?? '']
+  );
   await client.query(`SET LOCAL ROLE ${role}`);
 }
 
@@ -59,9 +62,12 @@ describe('MU-010 workspaces RLS', () => {
         ['ws-rls-user-1', USER_ONE, 'ws-rls-user-2', USER_TWO]
       );
 
+      await client.query('SAVEPOINT anonymous_read');
       await setJwtClaims(client, null, 'anon');
-      const anonResult = await client.query<{ id: string }>('SELECT id FROM workspaces ORDER BY id');
-      expect(anonResult.rows).toEqual([]);
+      await expect(
+        client.query<{ id: string }>('SELECT id FROM rorca.workspaces ORDER BY id')
+      ).rejects.toThrow(/permission denied/i);
+      await client.query('ROLLBACK TO SAVEPOINT anonymous_read');
 
       await setJwtClaims(client, USER_ONE, 'authenticated');
       const grantsResult = await client.query<{ privilege_type: string }>(
@@ -86,9 +92,15 @@ describe('MU-010 workspaces RLS', () => {
       const userTwoResult = await client.query<{ id: string }>('SELECT id FROM workspaces ORDER BY id');
       expect(userTwoResult.rows.map((row) => row.id)).toEqual(['ws-rls-user-2']);
 
-      await client.query('RESET role');
-      await client.query("SELECT set_config('request.jwt.claims', '', true)");
-      const serviceResult = await client.query<{ id: string }>('SELECT id FROM workspaces ORDER BY id');
+      await client.query('RESET ROLE');
+      await client.query(
+        "SELECT set_config('request.jwt.claims', '', true), set_config('request.jwt.claim.sub', '', true)"
+      );
+      const serviceResult = await client.query<{ id: string }>(
+        `SELECT id FROM workspaces
+         WHERE id IN ('ws-rls-user-1', 'ws-rls-user-2')
+         ORDER BY id`
+      );
       expect(serviceResult.rows.map((row) => row.id)).toEqual(['ws-rls-user-1', 'ws-rls-user-2']);
 
       const policies = await client.query<{ policyname: string }>(

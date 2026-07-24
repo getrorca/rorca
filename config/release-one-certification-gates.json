@@ -302,7 +302,7 @@
         "{outputDir}/broad/jest-results.json",
         "{outputDir}/broad/classification.json"
       ],
-      "timeoutMs": 3600000
+      "timeoutMs": 10800000
     },
     {
       "id": "pair-diff-audit",

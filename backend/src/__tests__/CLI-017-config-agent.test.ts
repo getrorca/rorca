@@ -87,7 +87,7 @@ describe('CLI-017: PUT /api/config/agent', () => {
     expect(res.body.error).toMatch(/Invalid agent/i);
   });
 
-  test('updates in-memory agent config and new pipeline runs use it without restart', async () => {
+  test('updates in-memory agent config without restart and preserves non-mutating dry-run planning', async () => {
     const updateRes = await request(app)
       .put('/api/config/agent')
       .set('Authorization', `Bearer ${authToken}`)
@@ -110,9 +110,11 @@ describe('CLI-017: PUT /api/config/agent', () => {
       .send({
         workspaceId,
         specPath: 'forge/specs/approved/cli-017-spec.json',
+        dryRun: true,
       });
 
-    expect(triggerRes.status).toBe(201);
-    expect(triggerRes.body.agentType).toBe('opencode');
+    expect(triggerRes.status).toBe(200);
+    expect(triggerRes.body.dryRun).toBe(true);
+    expect(activeAgent).toBe('opencode');
   });
 });

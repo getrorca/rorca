@@ -70,7 +70,7 @@ const describeMigrationCertification = process.env.RORCA_RUN_DESTRUCTIVE_MIGRATI
   ? describe
   : describe.skip;
 
-describeMigrationCertification('migration AGE session replacement authority (real PostgreSQL)', () => {
+describeMigrationCertification('migration AGE session replacement authority (real PostgreSQL) [skip: requires RORCA_RUN_DESTRUCTIVE_MIGRATION_CERT=1; separately certified by migration-real-postgres gate]', () => {
   const connectionString = resolveTestDatabaseUrl();
   const authority = new Pool({ connectionString, max: 2 });
   let originalMarker: Marker;

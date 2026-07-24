@@ -9,6 +9,22 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+const mockPrepareAutonomousSandboxLaunch = jest.fn((options: {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+}) => ({ ...options, isolated: true }));
+
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousSandboxLaunch: (options: {
+    command: string;
+    args: string[];
+    cwd: string;
+    env: Record<string, string>;
+  }) => mockPrepareAutonomousSandboxLaunch(options),
+}));
+
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
   getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
@@ -77,6 +93,12 @@ test('runs a successful hook and captures output', async () => {
   expect(results).toHaveLength(1);
   expect(results[0].exitCode).toBe(0);
   expect(results[0].output).toContain('hello_world');
+  expect(mockPrepareAutonomousSandboxLaunch).toHaveBeenCalledWith({
+    command: '/bin/sh',
+    args: ['-lc', 'echo hello_world'],
+    cwd: tmpDir,
+    env: { PATH: process.env.PATH! },
+  });
 });
 
 test('captures non-zero exit code', async () => {

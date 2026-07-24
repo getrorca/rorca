@@ -201,32 +201,20 @@ describe('autonomous exact-SHA merge provider errors', () => {
     global.fetch = originalFetch;
   });
 
-  it('persists only bounded sanitized metadata when GitHub returns a secret-bearing merge body', async () => {
-    const mergeFailureResponse = new Response(JSON.stringify({
+  it('blocks Release-1 provider merge before observation, provider calls, or secret-bearing response handling', async () => {
+    const fetchMock = jest.fn(async () => new Response(JSON.stringify({
       merged: false,
       message: `${bodySecret} ${requestDerivedText}`,
-    }), { status: 422, headers: { 'content-type': 'application/json', 'x-github-request-id': 'REQ-safe-123' } });
-    const mergeFailureBodyRead = jest.spyOn(mergeFailureResponse, 'json');
-    const fetchMock = jest.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        number: 42, html_url: evidence.pullRequest.url,
-        state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: 'clean',
-        head: { sha: headSha, ref: 'rorca/release/run-42-aaaaaaaaaaaa', repo: { full_name: 'getrorca/rorca' } },
-        base: { sha: baseSha, ref: delivery.base_branch, repo: { full_name: 'getrorca/rorca' } },
-      }), { status: 200, headers: { 'content-type': 'application/json' } }))
-      .mockResolvedValueOnce(mergeFailureResponse)
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        number: 42, html_url: evidence.pullRequest.url, state: 'open', draft: false, merged: false,
-        head: { sha: headSha, ref: evidence.pullRequest.headRef, repo: { full_name: 'getrorca/rorca' } },
-        base: { sha: baseSha, ref: evidence.pullRequest.baseRef, repo: { full_name: 'getrorca/rorca' } },
-      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    }), { status: 422 }));
+    const observe = jest.fn(async () => ({ evidence, replayed: false }));
+    const bridge = jest.fn(async () => lifecycle);
     global.fetch = fetchMock as typeof fetch;
 
     await processAutonomousPrDelivery(
       { deliveryId: delivery.id, expectedHeadSha: headSha },
       {
-        observe: jest.fn(async () => ({ evidence, replayed: false })),
-        bridge: jest.fn(async () => lifecycle),
+        observe,
+        bridge,
         schedule: jest.fn(),
         startCiRecovery: jest.fn(),
         recoverConflict: jest.fn(),
@@ -234,12 +222,10 @@ describe('autonomous exact-SHA merge provider errors', () => {
       },
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(mergeFailureBodyRead).not.toHaveBeenCalled();
-    expect(terminalReason).toContain('GITHUB_EXACT_SHA_MERGE_FAILED');
-    expect(terminalReason).toContain('status=422');
-    expect(terminalReason).toContain('request_id=REQ-safe-123');
-    expect(terminalReason).toContain('GitHub rejected the request parameters.');
+    expect(observe).not.toHaveBeenCalled();
+    expect(bridge).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(terminalReason).toBe('release_one_capability_disabled:autonomous_provider_merge');
     const durableText = JSON.stringify({ terminalReason, persistedValues });
     expect(durableText).not.toContain(bodySecret);
     expect(durableText).not.toContain(requestDerivedText);

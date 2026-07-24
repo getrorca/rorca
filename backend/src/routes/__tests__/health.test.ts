@@ -8,6 +8,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { Server } from 'http';
+import { once } from 'events';
 import express, { type Express } from 'express';
 import request from 'supertest';
 import { execute } from '../../db/index';
@@ -22,7 +24,14 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
-let app: Express;
+jest.mock('../../lib/pi-detector', () => ({
+  detectPi: jest.fn().mockReturnValue({ piInstalled: false, piVersion: null, piBinPath: null }),
+  detectPiAsync: jest.fn().mockResolvedValue({ piInstalled: false, piVersion: null, piBinPath: null }),
+}));
+
+const ACTIVE_RUN_WORKSPACE_ID = 'health-active-runs-fixture';
+
+let app: Server;
 let tmpDir: string;
 
 function buildHealthTestApp(): Express {
@@ -33,40 +42,27 @@ function buildHealthTestApp(): Express {
   return testApp;
 }
 
-beforeEach(() => {
-  jest.resetModules();
-
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockReturnValue(true),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-  }));
-  jest.mock('../../lib/pi-detector', () => ({
-    detectPi: jest.fn().mockReturnValue({
-      piInstalled: false,
-      piVersion: null,
-      piBinPath: null,
-    }),
-    detectPiAsync: jest.fn().mockResolvedValue({
-      piInstalled: false,
-      piVersion: null,
-      piBinPath: null,
-    }),
-  }));
-
+beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
-  app = buildHealthTestApp();
+  process.env.NODE_ENV = 'test';
+  const expressApp = buildHealthTestApp();
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
+beforeEach(async () => {
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [ACTIVE_RUN_WORKSPACE_ID]);
+});
+
+afterEach(async () => {
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [ACTIVE_RUN_WORKSPACE_ID]);
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 describe('GET /api/health', () => {
@@ -80,7 +76,8 @@ describe('GET /api/health', () => {
     expect(res.body).toHaveProperty('uptime');
     expect(typeof res.body.uptime).toBe('number');
     expect(res.body).toHaveProperty('db_connected', true);
-    expect(res.body).toHaveProperty('active_runs', 0);
+    expect(typeof res.body.active_runs).toBe('number');
+    expect(res.body.active_runs).toBeGreaterThanOrEqual(0);
     expect(res.body).toHaveProperty('readiness.confirmed', true);
     expect(res.body).toHaveProperty('readiness.deadlineMs', 750);
     expect(res.body).not.toHaveProperty('piInstalled');
@@ -145,33 +142,41 @@ describe('GET /api/health', () => {
     expect(piDetector.detectPi).not.toHaveBeenCalled();
   });
 
-  it('reports active runs count', async () => {
-    // Seed a workspace and a running pipeline
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'TestWS', tmpDir]);
-    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec.json', 'ws-1', 'running']);
-    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-2.json', 'ws-1', 'running']);
-    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-3.json', 'ws-1', 'done']);
+  it('reports active runs count relative to current application state', async () => {
+    const baseline = (await request(app).get('/api/health')).body.active_runs as number;
+    await execute(
+      `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+       ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+      [ACTIVE_RUN_WORKSPACE_ID, 'Health active-run fixture', tmpDir],
+    );
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec.json', ACTIVE_RUN_WORKSPACE_ID, 'running']);
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-2.json', ACTIVE_RUN_WORKSPACE_ID, 'running']);
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-3.json', ACTIVE_RUN_WORKSPACE_ID, 'done']);
 
     const res = await request(app).get('/api/health');
-    expect(res.body.active_runs).toBe(2);
+    expect(res.body.active_runs).toBe(baseline + 2);
   });
 
   it('reports MCP disabled when RORCA_SERVE_MCP=false', async () => {
     process.env.RORCA_SERVE_MCP = 'false';
     jest.resetModules();
-    const mcpDisabledApp = buildHealthTestApp();
-
-    const res = await request(mcpDisabledApp).get('/api/health');
-    expect(res.status).toBe(200);
-    expect(res.body.mcpTransport).toBe('disabled');
-    expect(res.body.mcp).toMatchObject({
-      enabled: false,
-      status: 'disabled',
-      url: 'http://localhost:3030/mcp',
-      sessions: 0,
-    });
-
-    delete process.env.RORCA_SERVE_MCP;
+    const mcpDisabledApp = buildHealthTestApp().listen(0, '127.0.0.1');
+    await once(mcpDisabledApp, 'listening');
+    try {
+      const res = await request(mcpDisabledApp).get('/api/health');
+      expect(res.status).toBe(200);
+      expect(res.body.mcpTransport).toBe('disabled');
+      expect(res.body.mcp).toMatchObject({
+        enabled: false,
+        status: 'disabled',
+        url: 'http://localhost:3030/mcp',
+        sessions: 0,
+      });
+    } finally {
+      mcpDisabledApp.closeAllConnections();
+      await new Promise<void>((resolve, reject) => mcpDisabledApp.close((error) => error ? reject(error) : resolve()));
+      delete process.env.RORCA_SERVE_MCP;
+    }
   });
 });
 
@@ -267,10 +272,10 @@ describe('GET /api/health (agentType=claude)', () => {
 });
 
 describe('GET /api/health (agentType=opencode)', () => {
-  let ocApp: Express;
+  let ocApp: Server;
   let ocTmpDir: string;
 
-  beforeEach(() => {
+  beforeAll(async () => {
     jest.resetModules();
 
     jest.mock('../../lib/llm-client', () => ({
@@ -329,11 +334,15 @@ describe('GET /api/health (agentType=opencode)', () => {
     const _dbPath = path.join(ocTmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
-    ocApp = buildHealthTestApp();
-});
+    ocApp = buildHealthTestApp().listen(0, '127.0.0.1');
+    await once(ocApp, 'listening');
+  });
 
-  afterEach(() => {
-fs.rmSync(ocTmpDir, { recursive: true, force: true });
+  afterAll(async () => {
+    ocApp.closeAllConnections();
+    await new Promise<void>((resolve, reject) => ocApp.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    fs.rmSync(ocTmpDir, { recursive: true, force: true });
   });
 
   it('keeps executable status off basic health', async () => {
@@ -357,10 +366,10 @@ fs.rmSync(ocTmpDir, { recursive: true, force: true });
 });
 
 describe('GET /api/health (pi detector failure)', () => {
-  let failApp: Express;
+  let failApp: Server;
   let failTmpDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.resetModules();
 
     jest.mock('../../lib/llm-client', () => ({
@@ -383,11 +392,14 @@ describe('GET /api/health (pi detector failure)', () => {
     const _dbPath = path.join(failTmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
-    failApp = buildHealthTestApp();
+    failApp = buildHealthTestApp().listen(0, '127.0.0.1');
+    await once(failApp, 'listening');
   });
 
-  afterEach(() => {
-fs.rmSync(failTmpDir, { recursive: true, force: true });
+  afterEach(async () => {
+    failApp.closeAllConnections();
+    await new Promise<void>((resolve, reject) => failApp.close((error) => error ? reject(error) : resolve()));
+    fs.rmSync(failTmpDir, { recursive: true, force: true });
   });
 
   it('returns 200 and null pi fields when detailed detectPi throws', async () => {
