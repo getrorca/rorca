@@ -247,11 +247,19 @@ describe('GET /api/health/detailed', () => {
   });
 
   it('returns last_backup_at as null when no backups exist', async () => {
-    // Point backup dir to empty location
-    process.env.BACKUP_DIR = path.join(tmpDir, 'no-backups');
-
-    const res = await request(app).get('/api/health/detailed');
-    expect(res.body.last_backup_at).toBeNull();
+    // Force a fresh snapshot after binding this assertion to its own empty dir;
+    // a prior detailed-health request may otherwise legitimately remain cached.
+    const previousBackupDir = process.env.BACKUP_DIR;
+    const emptyBackupDir = path.join(tmpDir, 'no-backups');
+    fs.mkdirSync(emptyBackupDir, { recursive: true });
+    process.env.BACKUP_DIR = emptyBackupDir;
+    try {
+      const res = await request(app).get('/api/health/detailed?refresh=true');
+      expect(res.body.last_backup_at).toBeNull();
+    } finally {
+      if (previousBackupDir === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previousBackupDir;
+    }
   });
 
   it('returns memory_usage with positive values', async () => {
