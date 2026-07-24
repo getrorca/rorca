@@ -721,10 +721,15 @@ export function resolvePiRunSafetyOptions(
     };
   }
 
+  const localBranchOnly = requested.autoWorktree
+    && !requested.autoMerge
+    && requested.mergeStrategy === 'branch-only';
   return {
     ...requested,
-    deploy: true,
-    externalSend: true,
+    // An ordinary local run may implement and validate on its isolated branch,
+    // but it never receives deployment or provider-send authority implicitly.
+    deploy: false,
+    externalSend: !localBranchOnly,
     policyLocked: false,
   };
 }

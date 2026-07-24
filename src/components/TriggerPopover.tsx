@@ -261,9 +261,9 @@ export default function TriggerPopover({
   initialReasoning,
   specModel,
 }: TriggerPopoverProps) {
-  const [autoWorktree, setAutoWorktree] = useState(false);
-  const [autoMerge, setAutoMerge] = useState(true);
-  const [mergeStrategy, setMergeStrategy] = useState<'direct' | 'pr' | 'draft-pr' | 'branch-only'>('direct');
+  const [autoWorktree] = useState(true);
+  const [autoMerge, setAutoMerge] = useState(false);
+  const [mergeStrategy, setMergeStrategy] = useState<'direct' | 'pr' | 'draft-pr' | 'branch-only'>('branch-only');
   const [agentConfig, setAgentConfig] = useState<AgentConfigSummary | null>(null);
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
   const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
@@ -276,7 +276,7 @@ export default function TriggerPopover({
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const [forceSequential, setForceSequential] = useState(true);
   const [includeGraph, setIncludeGraph] = useState(false);
-  const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty' | 'native-pty'>('pty');
+  const [terminalMode, setTerminalMode] = useState<'ansi-html' | 'pty' | 'native-pty'>('ansi-html');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
   const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
@@ -308,17 +308,12 @@ export default function TriggerPopover({
     });
   }, []);
 
-  // Fetch persisted pipeline-config on mount (includeGraph preference)
+  // Fetch the context preference only. Historical delivery settings must not
+  // broaden the ordinary local run profile.
   useEffect(() => {
     if (!workspaceId) return;
-    apiFetch<{ config: { includeGraph?: boolean; mergeStrategy?: string } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
-      .then((data) => {
-        setIncludeGraph(data.config.includeGraph ?? false);
-        if (data.config.mergeStrategy) {
-          setMergeStrategy(data.config.mergeStrategy as any);
-          setAutoMerge(data.config.mergeStrategy === 'direct');
-        }
-      })
+    apiFetch<{ config: { includeGraph?: boolean } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
+      .then((data) => setIncludeGraph(data.config.includeGraph ?? false))
       .catch(() => {});
   }, [workspaceId]);
 
@@ -955,14 +950,9 @@ export default function TriggerPopover({
           <div className="relative flex items-center justify-center">
             <input
               type="checkbox"
-              checked={autoWorktree || waveRequested}
-              onChange={(e) => {
-                if (waveRequested) return;
-                setAutoWorktree(e.target.checked);
-                if (e.target.checked) setAutoMerge(true);
-                else setAutoMerge(false);
-              }}
-              disabled={waveRequested}
+              checked
+              onChange={() => {}}
+              disabled
               className="peer sr-only"
             />
             <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-accent transition-colors" />
@@ -972,9 +962,7 @@ export default function TriggerPopover({
             <div className="flex items-center gap-1.5">
               <GitBranch size={12} className="text-muted shrink-0" />
               <span className="text-xs font-medium text-[var(--text)]">Isolate in worktree</span>
-              {waveRequested && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent font-medium">required</span>
-              )}
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent font-medium">required</span>
             </div>
           </div>
         </label>
@@ -994,16 +982,10 @@ export default function TriggerPopover({
               className="w-full px-2.5 py-1.5 text-xs bg-[var(--bg-secondary,var(--bg))] border border-border rounded-md focus:border-accent outline-none text-[var(--text)] appearance-none cursor-pointer"
               style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center', paddingRight: '28px' }}
             >
-              <option value="direct">Merge directly to main</option>
-              <option value="pr">Open Pull Request</option>
-              <option value="draft-pr">Open Draft PR</option>
-              <option value="branch-only">Leave on branch</option>
+              <option value="branch-only">Keep local run branch</option>
             </select>
             <p className="text-[10px] text-muted mt-1 leading-tight">
-              {mergeStrategy === 'direct' && 'Fastest \u2014 merges worktree and pushes main immediately'}
-              {mergeStrategy === 'pr' && 'Recommended \u2014 creates a PR for CI checks and review'}
-              {mergeStrategy === 'draft-pr' && 'Review later \u2014 creates a draft PR for async review'}
-              {mergeStrategy === 'branch-only' && 'Manual control \u2014 pushes branch, you decide what\u2019s next'}
+              {mergeStrategy === 'branch-only' && 'Safe default — no push, merge, PR, or deployment'}
             </p>
           </div>
         )}
@@ -1063,7 +1045,7 @@ export default function TriggerPopover({
                 </span>
               </div>
               <p className="text-[10px] text-muted leading-tight mt-0.5">
-                Choose reliability-first output or the native interactive CLI experience.
+                Reliable autonomous output is the default; interactive mode is explicit.
               </p>
             </div>
             <select
@@ -1076,9 +1058,8 @@ export default function TriggerPopover({
               }}
               className="shrink-0 rounded-md border border-border bg-[var(--bg-elevated)] px-2 py-1 text-[11px] text-[var(--text)]"
             >
-              <option value="pty">PTY Print</option>
-              <option value="native-pty">Native PTY</option>
-              <option value="ansi-html">ANSI Replay</option>
+              <option value="ansi-html">Reliable autonomous</option>
+              <option value="native-pty">Interactive PTY</option>
             </select>
           </div>
           {terminalMode === 'native-pty' && (

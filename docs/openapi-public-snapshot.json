@@ -1,6 +1,6 @@
 {
-  "contractVersion": "18.0.0",
-  "generatedAt": "2026-07-24T07:30:22.058Z",
+  "contractVersion": "19.0.0",
+  "generatedAt": "2026-07-24T18:22:08.747Z",
   "routes": [
     {
       "method": "GET",
@@ -4596,9 +4596,10 @@
                     "type": "boolean"
                   },
                   "mergeStrategy": {
-                    "default": "draft-pr",
-                    "description": "Release-1 delivery preserves human PR review; direct and branch-only execution fail closed.",
+                    "default": "branch-only",
+                    "description": "branch-only keeps output local and is the ordinary run default; PR/draft-PR external delivery requires an exact TaskManifest.",
                     "enum": [
+                      "branch-only",
                       "pr",
                       "draft-pr"
                     ],
@@ -4736,7 +4737,7 @@
         "404": {},
         "422": {}
       },
-      "hash": "sha256:eb224389c6832a728aea0bae84ce7ef3739a86911bc00ba2914c64bb44cf48e7"
+      "hash": "sha256:40961255e0cf271c245eb9d21bc0ac7e3cea128f14ce6a19fe5058a327333e14"
     },
     {
       "method": "GET",

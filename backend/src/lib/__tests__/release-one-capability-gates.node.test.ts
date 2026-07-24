@@ -37,7 +37,7 @@ test('every Release-1 exclusion fails closed independent of runtime state', () =
   }
 });
 
-test('pipeline execution rejects scheduled, wave, direct, branch-only, auto-merge, non-isolated, and local-user requests before mutation', () => {
+test('pipeline execution permits local branch-only work but rejects external or broadened authority before mutation', () => {
   expectDisabled(() => assertReleaseOnePipelineExecutionRequest({ triggerType: 'scheduled', autoWorktree: true, mergeStrategy: 'draft-pr' }), 'scheduled_autonomy');
   expectDisabled(() => assertReleaseOnePipelineExecutionRequest({ orchestrationMode: 'wave-parallel', parallelism: 2, autoWorktree: true, mergeStrategy: 'draft-pr' }), 'high_risk_parallel_autonomy');
   expectDisabled(() => assertReleaseOnePipelineExecutionRequest({ parallelism: 2, autoWorktree: true, mergeStrategy: 'draft-pr' }), 'high_risk_parallel_autonomy');
@@ -53,8 +53,11 @@ test('pipeline execution rejects scheduled, wave, direct, branch-only, auto-merg
       && error.code === 'RELEASE_ONE_TASK_MANIFEST_REQUIRED'
       && error.details?.capabilityId === 'bounded_task_manifest',
   );
-  assert.doesNotThrow(() => assertReleaseOnePipelineExecutionRequest({ autoWorktree: true, mergeStrategy: 'draft-pr', taskManifestAuthority: true }));
-  assert.doesNotThrow(() => assertReleaseOnePipelineExecutionRequest({ autoWorktree: true, mergeStrategy: 'pr', taskManifestAuthority: true }));
+  assert.doesNotThrow(() => assertReleaseOnePipelineExecutionRequest({
+    autoWorktree: true, autoMerge: false, mergeStrategy: 'branch-only', externalSend: false,
+  }));
+  assert.doesNotThrow(() => assertReleaseOnePipelineExecutionRequest({ autoWorktree: true, mergeStrategy: 'draft-pr', externalSend: true, taskManifestAuthority: true }));
+  assert.doesNotThrow(() => assertReleaseOnePipelineExecutionRequest({ autoWorktree: true, mergeStrategy: 'pr', externalSend: true, taskManifestAuthority: true }));
   assert.doesNotThrow(() => assertReleaseOnePipelineExecutionRequest({ dryRun: true }));
 });
 

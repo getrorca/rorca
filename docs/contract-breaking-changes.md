@@ -26,6 +26,16 @@ Migration path:
 - Describe any temporary compatibility strategy.
 ```
 
+<!-- contract-break-v2: 2026-07-24 POST /api/pipeline/trigger sha256:08173cdf717250a248c5d3c595351e631d30e5181803ec2ef169f0faf263de1d sha256:40961255e0cf271c245eb9d21bc0ac7e3cea128f14ce6a19fe5058a327333e14 -->
+## 2026-07-24 `POST /api/pipeline/trigger`
+
+Justification: ordinary authenticated spec execution is restored as a local-only profile instead of requiring a Hermes/provider TaskManifest. Missing run controls now resolve to an isolated worktree, sequential ANSI replay, `branch-only`, no auto-merge, no deployment, and no external send. PR/draft-PR delivery remains unchanged and still requires exact TaskManifest authority.
+
+Migration path:
+- Clients may omit worktree, merge, and terminal controls for an ordinary local run; the server applies the safe profile.
+- Clients that require external PR/draft-PR delivery must continue using `POST /api/pipeline/task-manifests/trigger` with exact authority.
+- Do not interpret `branch-only` as permission to push; the default branch remains local unless separate external-send authority exists.
+
 <!-- contract-break: 2026-07-20 POST /api/specs/authoring/preflight/confirm -->
 ## 2026-07-20 `POST /api/specs/authoring/preflight/confirm`
 

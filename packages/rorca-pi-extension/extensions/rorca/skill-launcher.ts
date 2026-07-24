@@ -59,10 +59,9 @@ export function getRequiredToolGroups(input: RorcaSkillWorkflowRequest): string[
   switch (input.workflow) {
     case "forge": {
       const groups: string[][] = [
-        ["rorca_specs_generation_context"],
-        ["rorca_specs_authoring_preflight", "rorca_preflight_spec_authoring"],
-        ["rorca_specs_authoring_preflight_confirm", "rorca_confirm_spec_authoring_plan"],
-        ["rorca_create_spec", "rorca_persist_spec", "rorca_specs_persist", "rorca_persist_spec_batch", "rorca_specs_persist_batch"],
+        // Until MCP projects the backend's complete lifecycle-authoring schema,
+        // the shared forge operation is the one canonical no-guessing path.
+        ["rorca_specs_forge"],
         ["rorca_get_specs_by_specId"],
         ["rorca_spec_workflow", "rorca_specs_by_specId_workflow", "rorca_spec_readiness", "rorca_specs_by_specId_readiness"],
       ];
@@ -92,16 +91,12 @@ export function formatSkillLaunchPrompt(input: RorcaSkillWorkflowRequest): strin
       `autoRun: ${input.autoRun}`,
       `queue: ${input.queue}`,
       ...(input.modelOverride ? [`modelOverride: ${input.modelOverride}`] : []),
-      "availableToolAliases: [rorca_get_context, rorca_specs_generation_context, rorca_specs_authoring_preflight, rorca_preflight_spec_authoring, rorca_specs_authoring_preflight_confirm, rorca_confirm_spec_authoring_plan, rorca_recall, rorca_search, rorca_get_specs_by_specId, rorca_create_spec, rorca_persist_spec, rorca_persist_spec_batch, rorca_specs_persist_batch, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness, rorca_retry_spec_stage, rorca_repair_spec, rorca_approve_spec, rorca_trigger_run, rorca_pipeline_trigger]",
-      "forgeSequence: [rorca_specs_generation_context, validate_lifecycle_authoring, propose_one_or_many_plan, draft_complete_spec_set, rorca_specs_authoring_preflight, revise_max_3, explicit_human_confirmation_if_required, persist_one_or_batch, get_saved_specs, inspect_workflow_readiness_and_lifecycle_plan]",
-      "authoringContract: lifecycleAuthoring is mandatory for phase-aware claims; deterministic preflight owns structure/coverage/DAG/evidence validation, returns exact amendments, and must accept before canonical persistence",
-      "revisionContract: record each attempt and material revisions, stop after at most 3 attempts, and return blockers or clarification questions without weakening required capabilities or gates",
-      "confirmationContract: show exact spec count, boundaries, requirement ownership, dependency DAG, required capabilities, and revisions; confirmation is a separate human receipt and can never be inferred from model output",
-      "contextContract: fetch rorca_specs_generation_context before persistence, then forward its contextUsed and contextSummary into rorca_create_spec or rorca_persist_spec so the saved spec Context tab reflects the true caller-observed drafting context",
-      "policyContract: persist with explicit policy metadata by passing either policyPresetId or postSavePolicy derived from the effective post-save policy/postSaveDefaults bundle, and report which preset or effective policy was used",
-      "postSaveContract: keep post-save enrich and matchSkills enabled by forwarding the bundle defaults as explicit policy intent unless the launcher or user explicitly requests an opt-out",
-      "verificationContract: after persistence, read the saved spec plus rorca_spec_workflow or rorca_spec_readiness and classify each story skill state as present, pending, skipped:no_installed_skills, or failed:<retryable_reason>; never treat slug creation alone as proof that skill enrichment succeeded",
-      "fallbackContract: backend/server contextSummary backfill is a repair-only fallback and must not be treated as the normal creation contract or as a substitute for caller-observed drafting context",
+      "availableToolAliases: [rorca_specs_forge, rorca_get_specs_by_specId, rorca_spec_workflow, rorca_specs_by_specId_workflow, rorca_spec_readiness, rorca_specs_by_specId_readiness, rorca_retry_spec_stage, rorca_repair_spec, rorca_approve_spec, rorca_trigger_run, rorca_pipeline_trigger]",
+      "forgeSequence: [rorca_specs_forge, get_saved_spec, inspect_workflow_and_readiness, approve_if_requested, trigger_safe_local_run_if_requested]",
+      "authoringContract: call rorca_specs_forge once with this brief and workspace; Rorca owns context gathering, deterministic lifecycle preflight, bounded revisions, policy defaults, enrichment, and canonical persistence",
+      "confirmationContract: if forge reports that explicit human confirmation is required, stop and present that exact request; never invent or self-assert a human receipt",
+      "verificationContract: after forge persistence, read the saved spec plus rorca_spec_workflow or rorca_spec_readiness; do not treat slug creation alone as execution readiness",
+      "runContract: ordinary runs use autoWorktree=true, autoMerge=false, mergeStrategy=branch-only, terminal_mode=ansi-html, and forceSequential=true; external delivery is a separate TaskManifest-authorized workflow",
       "brief: |",
       indentBlock(input.brief),
     ].join("\n");

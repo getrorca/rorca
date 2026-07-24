@@ -1233,12 +1233,12 @@ router.post('/preflight', async (req: Request, res: Response) => {
  * /api/pipeline/trigger:
  *   post:
  *     tags: [Pipeline]
- *     summary: Preview a spec run or receive the Release-1 TaskManifest redirect
+ *     summary: Trigger a safe local spec run or preview external delivery
  *     operationId: triggerPipelineRun
  *     x-rorca-tier: public
- *     x-rorca-rationale: "The legacy trigger remains a stable local dry-run/typed-redirect contract; Release-1 execution itself requires the bounded TaskManifest endpoint."
+ *     x-rorca-rationale: "Approved specs may execute in a host-created isolated local branch with no provider, merge, or deployment effects; external delivery remains TaskManifest-gated."
  *     x-rorca-public-api: true
- *     description: Dry-run previews remain available. Non-dry Release-1 execution fails closed unless this handler is reached through the host-validated TaskManifest broker; callers must use POST /api/pipeline/task-manifests/trigger.
+ *     description: Missing execution options resolve to the safe local profile (isolated worktree, branch-only, no external send, sequential ANSI replay). PR/draft-PR delivery still requires POST /api/pipeline/task-manifests/trigger with exact authority.
  *     requestBody:
  *       required: true
  *       content:
@@ -1251,7 +1251,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               workspaceId: { type: string }
  *               autoWorktree: { type: boolean, enum: [true], default: true, description: "Release-1 execution requires a host-created isolated worktree; dry-run previews may omit this field." }
  *               autoMerge: { type: boolean, enum: [false], default: false, description: "Release-1 never auto-merges." }
- *               mergeStrategy: { type: string, enum: [pr, draft-pr], default: draft-pr, description: "Release-1 delivery preserves human PR review; direct and branch-only execution fail closed." }
+ *               mergeStrategy: { type: string, enum: [branch-only, pr, draft-pr], default: branch-only, description: "branch-only keeps output local and is the ordinary run default; PR/draft-PR external delivery requires an exact TaskManifest." }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual], default: manual, description: "Scheduled unattended execution is disabled in Release-1." }
  *               orchestrationMode: { type: string, enum: [sequential], default: sequential, description: "Wave-parallel/high-risk autonomous execution is disabled in Release-1." }
@@ -1388,7 +1388,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId: requestedReservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride, dispatchPublicationOwner, taskManifestPromotion } = req.body;
+    const { specPath, workspaceId, autoWorktree: requestedAutoWorktree, autoMerge: requestedAutoMerge, mergeStrategy: requestedMergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId: requestedReservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride, dispatchPublicationOwner, taskManifestPromotion } = req.body;
+    // The ordinary create/run path is local-only by default. Callers do not
+    // need to understand delivery authority merely to execute an approved spec.
+    const autoWorktree = requestedAutoWorktree ?? true;
+    const autoMerge = requestedAutoMerge ?? false;
+    const mergeStrategy = requestedMergeStrategy ?? 'branch-only';
+    const externalSend = mergeStrategy !== 'branch-only';
     // Reject disabled execution shapes before compatibility resolvers, workspace
     // reads, Git, run rows, or queue state. Exact TaskManifest authority is
     // checked again after a queued-promotion lease is verified below.
@@ -1401,6 +1407,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoMerge,
       mergeStrategy,
       executionEnvironment,
+      externalSend,
       taskManifestAuthority: taskManifestPromotion === true
         || (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true,
     });
@@ -1441,6 +1448,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoMerge,
       mergeStrategy,
       executionEnvironment,
+      externalSend,
       taskManifestAuthority: (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true,
     });
 
@@ -6399,7 +6407,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       agent: retryAgent,
       model: retryModel,
       effort: retryEffort,
-      terminalMode: originalRun.terminal_mode,
+      // Safe retries are unattended continuations. Never replay an interactive
+      // PTY failure into another approval/prompt stall.
+      terminalMode: enforceSafeRetry ? 'ansi-html' : originalRun.terminal_mode,
       includeGraph: originalRun.include_graph ?? originalEffectiveOptions.graph.enabled,
       worktree: {
         ...originalEffectiveOptions.worktree,

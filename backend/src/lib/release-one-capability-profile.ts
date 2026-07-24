@@ -88,7 +88,7 @@ const capabilities = [
   required(
     'bounded_task_manifest',
     'Hermes supervisory relay plus Rorca host validation',
-    'Execution starts only from a behaviorally identical, identity-bound TaskManifest with frozen scope and options.',
+    'Externally relayed execution starts only from an identity-bound TaskManifest; ordinary local runs use the approved spec plus frozen local-only effective options.',
     ['Hermes/Rorca schema contract', 'HTTP to application outbox to pg-boss to worker certification'],
   ),
   required(
@@ -263,6 +263,8 @@ export interface ReleaseOnePipelineExecutionRequest {
   autoMerge?: boolean;
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   executionEnvironment?: 'remote-rorca' | 'local-user';
+  /** True only when closeout is authorized to push or create provider objects. */
+  externalSend?: boolean;
   taskManifestAuthority?: boolean;
 }
 
@@ -290,12 +292,23 @@ export function assertReleaseOnePipelineExecutionRequest(input: ReleaseOnePipeli
       mergeStrategy: input.mergeStrategy ?? 'direct',
     });
   }
-  if (input.mergeStrategy === 'branch-only') {
-    assertReleaseOneCapabilityEnabled('branch_only_external_push', { mergeStrategy: input.mergeStrategy });
+  if (input.mergeStrategy === 'branch-only' && input.externalSend !== false) {
+    assertReleaseOneCapabilityEnabled('branch_only_external_push', {
+      mergeStrategy: input.mergeStrategy,
+      externalSend: input.externalSend ?? true,
+    });
   }
-  if (input.taskManifestAuthority !== true) {
+  // Local operator runs are allowed to stop at an isolated local branch. They
+  // have no provider, merge, deployment, or protected-checkout authority and
+  // therefore do not need a Hermes/provider TaskManifest. Any external
+  // delivery still requires the exact host-validated TaskManifest path.
+  const localBranchOnly = input.autoWorktree === true
+    && input.autoMerge !== true
+    && input.mergeStrategy === 'branch-only'
+    && input.externalSend === false;
+  if (input.taskManifestAuthority !== true && !localBranchOnly) {
     throw new UnprocessableError(
-      'Release-1 execution requires a host-validated bounded TaskManifest; use /api/pipeline/task-manifests/trigger',
+      'Release-1 external delivery requires a host-validated bounded TaskManifest; use /api/pipeline/task-manifests/trigger',
       'RELEASE_ONE_TASK_MANIFEST_REQUIRED',
       {
         profileId: RELEASE_ONE_CAPABILITY_PROFILE.profileId,

@@ -143,6 +143,7 @@ describe('governed retry dispatch contract', () => {
     expect(route).toContain('resolvePiRunSafetyOptions(originalRun.spec_path, sourceSpecJson');
     expect(route).toContain("? { strategy: 'branch-only', autoMerge: false }");
     expect(route).toContain('deploy: taskManifestSynthetic || enforceSafeRetry ? false : retrySafety.deploy');
+    expect(route).toContain("terminalMode: enforceSafeRetry ? 'ansi-html' : originalRun.terminal_mode");
     expect(route).toContain('externalSend: enforceSafeRetry ? false : retrySafety.externalSend');
     expect(route).not.toMatch(/sourceSpecJson\._notes/);
   });

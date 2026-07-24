@@ -391,7 +391,6 @@ describe('POST /api/pipeline/trigger', () => {
       { body: { ...base, autoMerge: true }, capabilityId: 'auto_merge' },
       { body: { ...base, autoWorktree: false }, capabilityId: 'protected_branch_direct_update' },
       { body: { ...base, mergeStrategy: 'direct' }, capabilityId: 'protected_branch_direct_update' },
-      { body: { ...base, mergeStrategy: 'branch-only' }, capabilityId: 'branch_only_external_push' },
       { body: { ...base, executionEnvironment: 'local-user' }, capabilityId: 'local_user_execution_bridge' },
     ];
 
@@ -448,6 +447,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/blocked-readiness.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
   });
 
@@ -456,6 +457,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/blocked-override.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       readinessOverride: true,
     });
     expect(await queryOne(
@@ -468,6 +471,44 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/ts-fallback.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
+    });
+  });
+
+  test('ordinary trigger defaults create an isolated local-only sequential run', async () => {
+    await seedRunnableSpec('safe-local-default');
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/safe-local-default.json',
+        workspaceId: 'ws-pipe',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      ok: true,
+      queued: true,
+      specId: 'safe-local-default',
+      terminal_mode: 'ansi-html',
+      effectiveOptions: {
+        worktree: { enabled: true },
+        merge: { strategy: 'branch-only', autoMerge: false },
+        terminal: 'ansi-html',
+        safety: { deploy: false, externalSend: false },
+      },
+    });
+    expect(res.body.runId).toEqual(expect.any(Number));
+    expect(res.body.worktreePath).toEqual(expect.any(String));
+    const row = await queryOne<{
+      auto_worktree: boolean; auto_merge: boolean; merge_strategy: string; terminal_mode: string;
+    }>('SELECT auto_worktree, auto_merge, merge_strategy, terminal_mode FROM pipeline_runs WHERE id = $1', [res.body.runId]);
+    expect(row).toEqual({
+      auto_worktree: true,
+      auto_merge: false,
+      merge_strategy: 'branch-only',
+      terminal_mode: 'ansi-html',
     });
   });
 
@@ -529,6 +570,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/test-spec.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
   });
 
@@ -565,6 +608,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/trigger-spec.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
   });
 
@@ -574,6 +619,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/wal-trigger.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
     expect(await query(
       `SELECT id FROM wal_events WHERE workspace_id = 'ws-pipe' AND event_type IN ('run_started', 'run_finished')`,
@@ -631,6 +678,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/excl-trigger.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
     expect(await queryOne(
       `SELECT id FROM wal_events WHERE workspace_id = 'ws-pipe' AND story_id = 'US-002'`,
@@ -662,6 +711,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/reasoning-spec.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
   });
 
@@ -678,6 +729,8 @@ describe('POST /api/pipeline/trigger', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/reasoning-override-spec.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       thinkingEnabled: false,
       reasoningEffort: 'medium',
     });
@@ -1318,6 +1371,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/agent-record.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
   });
 
@@ -1326,6 +1381,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/pi-agent-record.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       agentOverride: 'pi',
     });
   });
@@ -1341,6 +1398,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/pi-model-fallback.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       agentOverride: 'pi',
     });
   });
@@ -1369,6 +1428,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/pi-queued.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       agentOverride: 'pi',
       queue: true,
     });
@@ -1379,6 +1440,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/specific-story.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       agentOverride: 'pi',
       storyId: 'US-001',
     });
@@ -1392,6 +1455,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/force-rerun-continuation.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       forceRerun: true,
     });
     const persisted = JSON.parse(fs.readFileSync(specFile, 'utf8'));
@@ -1474,6 +1539,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     const res = await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/agent-response.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     });
     expect(res.body.agentType).toBeUndefined();
     expect(res.body.agentModel).toBeUndefined();
@@ -1484,6 +1551,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/terminal-mode-pty.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       terminal_mode: 'pty',
     });
   });
@@ -1493,6 +1562,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     await expectReleaseOneManifestlessDenial({
       specPath: 'forge/specs/approved/terminal-mode-invalid.json',
       workspaceId: 'ws-pipe',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
       terminal_mode: 'bogus',
     });
   });

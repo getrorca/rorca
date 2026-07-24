@@ -127,6 +127,20 @@ describe('deterministic fake-CLI PTY adapter smoke harness', () => {
     expect(versionProbe?.args).toEqual(['--version']);
   });
 
+  it('makes Codex PTY approval noninteractive so unattended runs cannot stall', () => {
+    const compatibility = probePtyCliCompatibility('codex', {
+      force: true,
+      env: { ...process.env, CODEX_BIN: fakeCli },
+    });
+    const command = buildPtyCommand(
+      'codex', 'prompt', tempDir, 'gpt-test', null,
+      undefined, undefined, undefined, undefined, [], compatibility,
+    );
+    expect(command.args).toContain('--ask-for-approval');
+    expect(command.args[command.args.indexOf('--ask-for-approval') + 1]).toBe('never');
+    expect(command.args).not.toContain('on-request');
+  });
+
   for (const agentType of ['claude', 'opencode', 'codex', 'pi'] as AgentType[]) {
     it(`${agentType}: live/reconnect, resize, input, completion file, cancellation, and process-group cleanup`, async () => {
       const compatibility = probePtyCliCompatibility(agentType, {

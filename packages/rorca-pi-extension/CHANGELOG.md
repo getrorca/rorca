@@ -6,6 +6,14 @@ The format is inspired by Keep a Changelog and uses semantic-version style relea
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- Spec creation now uses the single shared `rorca_specs_forge` operation instead of requiring agents to reconstruct low-level lifecycle-authoring payloads.
+- Ordinary Pi runs now default to an isolated local branch, no auto-merge or external send, sequential execution, and reliable noninteractive output.
+- Codex PTY runs use noninteractive approval mode so unattended workers fail fast instead of waiting until story timeout.
+
 ## [0.2.0] - 2026-06-22
 
 Hermes launch-handoff release (LHM-006). Makes Rorca usable from Hermes —

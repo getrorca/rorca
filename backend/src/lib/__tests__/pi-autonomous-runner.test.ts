@@ -230,8 +230,23 @@ describe('pi-autonomous-runner', () => {
       autoWorktree: false,
       autoMerge: true,
       mergeStrategy: 'direct',
-      deploy: true,
+      deploy: false,
       externalSend: true,
+      policyLocked: false,
+    });
+  });
+
+  test('ordinary isolated branch-only runs are local-only without special spec prose', () => {
+    expect(resolvePiRunSafetyOptions(
+      'forge/specs/approved/ordinary.json',
+      { userStories: [{ id: 'APP-001' }] },
+      { autoWorktree: true, autoMerge: false, mergeStrategy: 'branch-only' },
+    )).toEqual({
+      autoWorktree: true,
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      deploy: false,
+      externalSend: false,
       policyLocked: false,
     });
   });

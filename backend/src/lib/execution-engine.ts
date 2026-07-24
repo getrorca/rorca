@@ -340,7 +340,7 @@ interface SpecJson {
    *   - direct:      merge to main + push (maximum velocity, default)
    *   - pr:          push branch + create PR (CI-gated)
    *   - draft-pr:    push branch + create Draft PR (review-first)
-   *   - branch-only: push branch to remote, no PR, no merge (manual control)
+   *   - branch-only: preserve the isolated run branch; push only with separate external-send authority
    * If unset, falls back to workspace pipeline_config.mergeStrategy, then 'direct'.
    */
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
@@ -2117,10 +2117,11 @@ export function buildPtyCommand(
       void mcpServers;
       return {
         command: compatibility.binaryPath!,
-        // Codex 0.132+ rejects the old --approval-mode auto-edit spelling.
-        // Only add options that its own --help probe advertised.
+        // Autonomous PTY workers have no operator attached to answer approval
+        // dialogs. Never let a bounded story turn into a timeout waiting for
+        // input; commands outside the sandbox must fail immediately instead.
         args: [
-          ...(compatibility.capabilities.askForApproval ? ['--ask-for-approval', 'on-request'] : []),
+          ...(compatibility.capabilities.askForApproval ? ['--ask-for-approval', 'never'] : []),
           ...(compatibility.capabilities.noAltScreen ? ['--no-alt-screen'] : []),
           ...(agentModel ? ['--model', agentModel] : []),
         ],

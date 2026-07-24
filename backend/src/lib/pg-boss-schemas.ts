@@ -41,7 +41,7 @@ const ExecutionSecretReferencesSchema = z.object({
  *   - direct:      merge to main + push (maximum velocity, default)
  *   - pr:          push branch + create PR (CI-gated)
  *   - draft-pr:    push branch + create Draft PR (review-first)
- *   - branch-only: push branch to remote, no PR, no merge (manual control)
+ *   - branch-only: preserve the isolated run branch; external push requires separate authority
  */
 export const MergeStrategyEnum = z.enum(['direct', 'pr', 'draft-pr', 'branch-only']);
 export type MergeStrategy = z.infer<typeof MergeStrategyEnum>;
