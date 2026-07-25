@@ -66,6 +66,11 @@ import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory 
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import * as piDetector from '../lib/pi-detector';
 import {
+  RorcaExecutionSandboxError,
+  resolveRorcaExecutionSandboxProfile,
+  type RorcaExecutionSandboxMode,
+} from '../lib/ordinary-local-pi-profile';
+import {
   PiExecutionPreflightError,
   preflightPiModelAndEffort,
   resolvePiRunSafetyOptions,
@@ -923,6 +928,8 @@ interface EffectiveRunOptions {
     deploy: boolean;
     externalSend: boolean;
     policyLocked: boolean;
+    /** True only when the route selected the frozen Darwin ordinary-local Pi profile. */
+    ordinaryLocalPi?: boolean;
   };
 }
 
@@ -937,7 +944,8 @@ function isEffectiveRunOptions(value: unknown): value is EffectiveRunOptions {
     && candidate.safety.allowBackendJest === false
     && typeof candidate.safety.deploy === 'boolean'
     && typeof candidate.safety.externalSend === 'boolean'
-    && typeof candidate.safety.policyLocked === 'boolean');
+    && typeof candidate.safety.policyLocked === 'boolean'
+    && (candidate.safety.ordinaryLocalPi === undefined || typeof candidate.safety.ordinaryLocalPi === 'boolean'));
 }
 
 function buildEffectiveRunOptions(input: {
@@ -953,6 +961,7 @@ function buildEffectiveRunOptions(input: {
   policyLocked: boolean;
   deploy: boolean;
   externalSend: boolean;
+  ordinaryLocalPi?: boolean;
 }): EffectiveRunOptions {
   return {
     model: input.model,
@@ -967,6 +976,7 @@ function buildEffectiveRunOptions(input: {
       deploy: input.deploy,
       externalSend: input.externalSend,
       policyLocked: input.policyLocked,
+      ordinaryLocalPi: input.ordinaryLocalPi ?? false,
     },
   };
 }
@@ -1629,52 +1639,23 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       workflowConfig: wfConfig,
       activeAgentFallback: activeAgent,
       activeModelFallback: activeModel,
+      // Pi discovery is mode-sensitive. Defer it until the immutable local
+      // versus Linux-bwrap execution posture has been resolved below.
+      resolvePiModel: false,
       log: logger,
     });
     const resolvedAgentType: AgentType = executionOptions.resolvedAgentType;
     let finalAgentModel = executionOptions.finalAgentModel;
 
-    let piCatalog: piDetector.PiModel[] | null = null;
-    const preflightPiSelection = (model: string | null, effort: string | null | undefined) => {
-      if (!piCatalog) {
-        const piStatus = piDetector.detectPi();
-        if (!piStatus.piInstalled || !piStatus.piBinPath) {
-          throw new ValidationError('pi_preflight:not_installed');
-        }
-        piCatalog = piDetector.listPiModels(piStatus.piBinPath);
-      }
-      try {
-        return preflightPiModelAndEffort(model, effort, piCatalog, DEFAULT_PI_MODEL);
-      } catch (error: unknown) {
-        if (error instanceof PiExecutionPreflightError) {
-          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
-        }
-        throw error;
-      }
-    };
-
-    if (resolvedAgentType === 'pi') {
-      const selection = preflightPiSelection(finalAgentModel, resolvedReasoningEffort);
-      finalAgentModel = selection.model;
-      resolvedReasoningEffort = selection.effort ?? undefined;
-    }
-
-    // Per-story Pi assignments use the same model/effort mechanism and must be
-    // validated before readiness, run-row, worktree, hook, or queue mutation.
+    // Per-story Pi assignments participate in the same frozen profile decision
+    // as the run-level agent. A mixed-engine run never gets the Darwin local
+    // Pi exception and remains on the strict Linux bwrap path.
     const phaseStoriesForPreflight = Array.isArray(specModelJson.phases)
       ? (specModelJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap(phase => phase.stories ?? [])
       : [];
     const storiesForPreflight = (Array.isArray(specModelJson.userStories)
       ? specModelJson.userStories
       : phaseStoriesForPreflight) as DispatchManifestStory[];
-    for (const dispatchStory of storiesForPreflight) {
-      if (dispatchStory.excluded) continue;
-      if (resolveStoryAgent(dispatchStory as EngineUserStory, resolvedAgentType) !== 'pi') continue;
-      preflightPiSelection(
-        dispatchStory.model ?? executionOptions.resolvedAgentModel,
-        dispatchStory.effort ?? resolvedReasoningEffort,
-      );
-    }
 
     const waveStories: WaveUserStory[] = storiesForPreflight.map((story) => ({
       id: story.id,
@@ -1789,6 +1770,96 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         externalSend: queuedOptions.safety.externalSend,
         policyLocked: queuedOptions.safety.policyLocked,
       };
+    }
+
+    const executableStoriesForPreflight = storiesForPreflight.filter((story) => !story.excluded);
+    const hasPiExecution = resolvedAgentType === 'pi'
+      || executableStoriesForPreflight.some((story) => resolveStoryAgent(story as EngineUserStory, resolvedAgentType) === 'pi');
+    const allRequiredAgentsPi = executableStoriesForPreflight.length > 0
+      && executableStoriesForPreflight.every((story) => resolveStoryAgent(story as EngineUserStory, resolvedAgentType) === 'pi');
+    let piExecutionSandboxMode: RorcaExecutionSandboxMode | null = null;
+
+    if (hasPiExecution) {
+      const taskManifestAuthority = (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true;
+      const ordinaryLocalPiProfileRequested = frozenQueuedOptions
+        ? frozenQueuedOptions.safety.ordinaryLocalPi === true
+        : !taskManifestAuthority;
+      try {
+        // Delivery authority never receives the host-local exception. It stays
+        // on the strict Linux profile and will fail closed if bwrap is absent.
+        // Resolve the Darwin exception only for the intentionally narrow
+        // ordinary-local shape so its typed diagnostics remain actionable.
+        const sandboxProfile = ordinaryLocalPiProfileRequested
+          ? resolveRorcaExecutionSandboxProfile({
+              ordinaryLocalPiProfileRequested,
+              agent: resolvedAgentType,
+              allRequiredAgentsPi,
+              autoWorktree: autonomousSafety.autoWorktree,
+              autoMerge: autonomousSafety.autoMerge,
+              mergeStrategy: autonomousSafety.mergeStrategy,
+              deploy: autonomousSafety.deploy,
+              externalSend: autonomousSafety.externalSend,
+              policyLocked: autonomousSafety.policyLocked,
+              parallelism: waveExecutionPolicy.parallelism,
+              orchestrationMode: waveExecutionPolicy.mode,
+              terminalMode: frozenQueuedOptions?.terminal ?? resolvedTerminalMode,
+              executionEnvironment: resolvedExecutionEnvironment.effective,
+              taskManifestAuthority,
+              readinessOverride: readinessOverrideRequested,
+            })
+          : { mode: 'linux-bwrap' as const };
+        piExecutionSandboxMode = sandboxProfile.mode;
+
+        let piCatalog: piDetector.PiModel[] | null = null;
+        const preflightPiSelection = (model: string | null, effort: string | null | undefined) => {
+          if (!piCatalog) {
+            if (sandboxProfile.mode === 'darwin-local-pi') {
+              const inspection = piDetector.inspectPi({ sandboxMode: sandboxProfile.mode });
+              if (!inspection.status.piInstalled || !inspection.status.piBinPath) {
+                throw new ValidationError(`pi_preflight:${inspection.failureCode ?? 'pi_not_installed'}`);
+              }
+              piCatalog = piDetector.listPiModels(inspection.status.piBinPath, { sandboxMode: sandboxProfile.mode });
+            } else {
+              // Keep delivery/autonomous preflight on the legacy Linux-only
+              // probe surface. On a real non-Linux host it resolves to the
+              // typed bwrap requirement below; test/worker bwrap stubs retain
+              // their normal availability contract.
+              const status = piDetector.detectPi();
+              if (!status.piInstalled || !status.piBinPath) {
+                const inspection = piDetector.inspectPi({ sandboxMode: 'linux-bwrap' });
+                throw new ValidationError(`pi_preflight:${inspection.failureCode ?? 'linux_bwrap_required_for_requested_mode'}`);
+              }
+              piCatalog = piDetector.listPiModels(status.piBinPath);
+            }
+          }
+          try {
+            return preflightPiModelAndEffort(model, effort, piCatalog, DEFAULT_PI_MODEL);
+          } catch (error: unknown) {
+            if (error instanceof PiExecutionPreflightError) {
+              throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+            }
+            throw error;
+          }
+        };
+
+        if (resolvedAgentType === 'pi') {
+          const selection = preflightPiSelection(finalAgentModel, resolvedReasoningEffort);
+          finalAgentModel = selection.model;
+          resolvedReasoningEffort = selection.effort ?? undefined;
+        }
+        for (const dispatchStory of executableStoriesForPreflight) {
+          if (resolveStoryAgent(dispatchStory as EngineUserStory, resolvedAgentType) !== 'pi') continue;
+          preflightPiSelection(
+            dispatchStory.model ?? executionOptions.resolvedAgentModel,
+            dispatchStory.effort ?? resolvedReasoningEffort,
+          );
+        }
+      } catch (error) {
+        if (error instanceof RorcaExecutionSandboxError) {
+          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+        }
+        throw error;
+      }
     }
 
     // All model/effort/safety preflight has succeeded. Readiness override audit
@@ -2455,6 +2526,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       policyLocked: autonomousSafety.policyLocked,
       deploy: autonomousSafety.deploy,
       externalSend: autonomousSafety.externalSend,
+      ordinaryLocalPi: piExecutionSandboxMode === 'darwin-local-pi',
     });
 
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
@@ -6274,13 +6346,20 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     let retryModel = originalEffectiveOptions.model ?? originalRun.agent_model ?? null;
     let retryEffort = originalEffectiveOptions.effort;
     if (retryAgent === 'pi') {
-      const piStatus = piDetector.detectPi();
-      if (!piStatus.piInstalled || !piStatus.piBinPath) throw new ValidationError('pi_preflight:not_installed');
+      // A retry can reuse only the already-frozen ordinary local Pi posture;
+      // all other retries remain on the Linux bwrap probe path.
+      const piInspectionOptions = originalEffectiveOptions.safety.ordinaryLocalPi === true
+        ? { sandboxMode: 'darwin-local-pi' as const }
+        : undefined;
+      const inspection = piDetector.inspectPi(piInspectionOptions);
+      if (!inspection.status.piInstalled || !inspection.status.piBinPath) {
+        throw new ValidationError(`pi_preflight:${inspection.failureCode ?? 'pi_not_installed'}`);
+      }
       try {
         const selection = preflightPiModelAndEffort(
           retryModel,
           retryEffort,
-          piDetector.listPiModels(piStatus.piBinPath),
+          piDetector.listPiModels(inspection.status.piBinPath, piInspectionOptions),
           DEFAULT_PI_MODEL,
         );
         retryModel = selection.model;

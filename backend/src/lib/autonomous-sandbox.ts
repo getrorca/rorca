@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-/** Linux capability boundary for every autonomous/model-controlled subprocess. */
+/** Capability boundary for every autonomous/model-controlled subprocess: Linux bwrap or worker-issued Darwin Seatbelt. */
 
 import * as crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -13,6 +13,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ensureAutonomousModelEgress } from './autonomous-model-egress';
+import {
+  ORDINARY_LOCAL_PI_PROFILE_ENV,
+  assertOrdinaryLocalPiRuntimeProfile,
+} from './ordinary-local-pi-profile';
 
 export type AutonomousIsolationPosture = 'linux-bwrap';
 
@@ -159,6 +163,56 @@ function safeProductionEnv(input: Record<string, string>, modelCredentials = fal
   return selected;
 }
 
+/**
+ * The Darwin ordinary-local profile is intentionally not a generic raw-host
+ * fallback. It is issued only by the worker after frozen local-only checks and
+ * keeps the same credential stripping and command-guard environment as the
+ * Linux launch, then executes inside a scoped Seatbelt policy. Its
+ * operator-selected Pi runtime/Home are retained solely for local Pi
+ * authentication; GitHub/SSH/provider-control credentials are absent.
+ */
+function ordinaryLocalGuardDirs(input: Record<string, string>): string[] {
+  const guardPrefix = `${path.resolve(os.tmpdir())}${path.sep}rorca-autonomous-guard-`;
+  return String(input.PATH ?? '')
+    .split(path.delimiter)
+    .filter((entry) => path.resolve(entry).startsWith(guardPrefix))
+    .map((entry) => realExisting(entry))
+    .filter((entry): entry is string => entry !== null);
+}
+
+function safeOrdinaryLocalPiEnv(
+  input: Record<string, string>,
+  profile: { piBinPath: string },
+  cwd: string,
+  modelCredentials: boolean,
+): Record<string, string> {
+  const selected = safeProductionEnv(input, modelCredentials);
+  const home = input.HOME && path.isAbsolute(input.HOME) ? input.HOME : os.homedir();
+  const tmpdir = path.join(fs.realpathSync(cwd), '.rorca', 'ordinary-local-pi-tmp');
+  fs.mkdirSync(tmpdir, { recursive: true, mode: 0o700 });
+  const guardDirs = ordinaryLocalGuardDirs(input);
+  selected.PATH = [...new Set([
+    ...guardDirs,
+    path.dirname(profile.piBinPath),
+    '/usr/local/bin', '/usr/bin', '/bin',
+  ])].join(path.delimiter);
+  selected.HOME = home;
+  selected.TMPDIR = tmpdir;
+  selected.XDG_CONFIG_HOME = path.join(home, '.config');
+  selected.XDG_CACHE_HOME = path.join(home, '.cache');
+  selected.npm_config_cache = path.join(home, '.cache', 'npm');
+  selected.PI_BIN = profile.piBinPath;
+  selected[ORDINARY_LOCAL_PI_PROFILE_ENV] = input[ORDINARY_LOCAL_PI_PROFILE_ENV]!;
+  // The local profile never receives the Linux egress socket/proxy. It is
+  // branch-only/no-send authority, not a release-delivery profile.
+  delete selected.HTTP_PROXY;
+  delete selected.HTTPS_PROXY;
+  delete selected.ALL_PROXY;
+  delete selected.NO_PROXY;
+  delete selected.RORCA_AUTONOMOUS_EGRESS_SOCKET;
+  return selected;
+}
+
 function absoluteGitPath(cwd: string, flag: '--absolute-git-dir' | '--git-common-dir'): string | null {
   try {
     const value = execFileSync('git', ['-C', cwd, 'rev-parse', flag], {
@@ -198,7 +252,7 @@ function addBind(args: string[], source: string, destination: string, readOnly: 
   coveredRoots.push(destination);
 }
 
-function maskWorkspaceCredentialFiles(args: string[], cwd: string): void {
+function workspaceCredentialPaths(cwd: string): string[] {
   const candidates: string[] = [];
   const stack = [cwd];
   let visited = 0;
@@ -231,12 +285,137 @@ function maskWorkspaceCredentialFiles(args: string[], cwd: string): void {
       if (entry.isDirectory() && entry.name !== '.git') stack.push(candidate);
     }
   }
-  for (const candidate of [...new Set(candidates)]) {
+  return [...new Set(candidates)];
+}
+
+function maskWorkspaceCredentialFiles(args: string[], cwd: string): void {
+  for (const candidate of workspaceCredentialPaths(cwd)) {
     const stat = fs.lstatSync(candidate);
     if (stat.isSymbolicLink()) throw new Error('Autonomous workspace credential/archive path cannot be a symbolic link');
     if (stat.isDirectory()) args.push('--tmpfs', candidate);
     else args.push('--ro-bind', os.devNull, candidate);
   }
+}
+
+function seatbeltString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function seatbeltSubpaths(paths: readonly string[]): string {
+  return paths.map(value => `(subpath ${seatbeltString(value)})`).join(' ');
+}
+
+function seatbeltLiterals(paths: readonly string[]): string {
+  return paths.map(value => `(literal ${seatbeltString(value)})`).join(' ');
+}
+
+function pathAncestors(value: string): string[] {
+  const ancestors: string[] = [];
+  let current = path.resolve(value);
+  while (true) {
+    ancestors.push(current);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return ancestors;
+}
+
+function localPiRuntimeRoots(piBinPath: string): string[] {
+  const launcherDir = path.dirname(piBinPath);
+  const roots = [launcherDir];
+  // Global npm/pnpm shims (npx, npm, and the Pi launcher) commonly share the
+  // same Node installation. Allow that installation's module directory, not a
+  // broad user-home ancestor, so ordinary local validation commands can run.
+  const globalNodeModules = path.resolve(launcherDir, '..', 'lib', 'node_modules');
+  if (fs.existsSync(globalNodeModules) && fs.statSync(globalNodeModules).isDirectory()) {
+    roots.push(globalNodeModules);
+  }
+  let current = path.dirname(fs.realpathSync(piBinPath));
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (fs.existsSync(path.join(current, 'package.json'))) {
+      roots.push(current);
+      break;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  // A custom executable does not earn a broad ancestor directory merely
+  // because it has no Node package boundary; its own binary directory is all
+  // the Seatbelt profile needs to grant.
+  return [...new Set(roots.map(value => path.resolve(value)))];
+}
+
+/**
+ * Build the macOS Seatbelt policy for the worker-issued ordinary Pi profile.
+ * This is intentionally a restrictive profile, not a raw-host fallback: it
+ * permits only the isolated worktree, related Git metadata, selected Pi state,
+ * the explicit Pi runtime, and outbound model traffic. Credential-shaped files
+ * in the worktree remain denied even though the worktree is writable.
+ */
+export function buildDarwinOrdinaryLocalPiSeatbeltProfile(
+  cwd: string,
+  profile: { piBinPath: string },
+  env: Record<string, string>,
+): string {
+  const worktree = fs.realpathSync(cwd);
+  const home = env.HOME;
+  const configuredTmpdir = env.TMPDIR;
+  if (!home || !path.isAbsolute(home) || !configuredTmpdir || !path.isAbsolute(configuredTmpdir)) {
+    throw new Error('ordinary local Pi Seatbelt environment is incomplete');
+  }
+  const tmpdir = fs.realpathSync(configuredTmpdir);
+  const gitRoots = [...new Set([
+    absoluteGitPath(worktree, '--absolute-git-dir'),
+    absoluteGitPath(worktree, '--git-common-dir'),
+  ].filter((value): value is string => value !== null))];
+  for (const gitRoot of gitRoots) assertRepositoryConfigHasNoEmbeddedCredential(gitRoot);
+
+  const runtimeRoots = localPiRuntimeRoots(profile.piBinPath);
+  const guardDirs = ordinaryLocalGuardDirs(env);
+  const readableRoots = [...new Set([
+    '/usr', '/bin', '/System', '/Library',
+    worktree, tmpdir,
+    ...runtimeRoots,
+    ...guardDirs,
+    path.join(home, '.pi'),
+    path.join(home, '.config'),
+    path.join(home, '.cache'),
+    ...gitRoots,
+  ].map(value => path.resolve(value)))];
+  const writableRoots = [...new Set([
+    worktree, tmpdir,
+    path.join(home, '.pi', 'agent'),
+    path.join(home, '.cache'),
+    ...gitRoots,
+  ].map(value => path.resolve(value)))];
+  // Node resolves an entrypoint through every ancestor. Permit metadata-only
+  // traversal of those ancestors without granting their file contents.
+  const metadataRoots = [...new Set([home, ...readableRoots].flatMap(pathAncestors))];
+  const credentialDenyRules = workspaceCredentialPaths(worktree).map((candidate) => {
+    const stat = fs.lstatSync(candidate);
+    if (stat.isSymbolicLink()) throw new Error('Autonomous workspace credential/archive path cannot be a symbolic link');
+    const filter = stat.isDirectory()
+      ? `(subpath ${seatbeltString(candidate)})`
+      : `(literal ${seatbeltString(candidate)})`;
+    return `(deny file-read* file-write* file-map-executable ${filter})`;
+  });
+
+  return [
+    '(version 1)',
+    '(import "system.sb")',
+    '(allow process-exec process-fork)',
+    '(deny network-inbound)',
+    '(allow network-outbound)',
+    '(deny file-read*)',
+    `(allow file-read-metadata file-test-existence ${seatbeltLiterals(metadataRoots)})`,
+    `(allow file-read* ${seatbeltSubpaths(readableRoots)})`,
+    `(allow file-map-executable ${seatbeltSubpaths(readableRoots)})`,
+    '(deny file-write*)',
+    `(allow file-write* ${seatbeltSubpaths(writableRoots)})`,
+    ...credentialDenyRules,
+  ].join('\n');
 }
 
 function assertWorkspaceSeparatedFromTrustedRuntime(cwd: string, roots: readonly string[]): void {
@@ -316,6 +495,22 @@ export function sanitizeAutonomousSandboxEnvForTests(
 
 /** Build one launch that cannot see the trusted ancestor namespace/filesystem/network. */
 export function prepareAutonomousSandboxLaunch(options: AutonomousSandboxOptions): AutonomousSandboxLaunch {
+  // This marker is created only by worker.ts after it revalidates the immutable
+  // local-only run envelope. It is deliberately unavailable to API-side model
+  // launchers, TaskManifest delivery, and every Linux/RB-02 qualification path.
+  const ordinaryLocalProfile = assertOrdinaryLocalPiRuntimeProfile(options.cwd, options.env);
+  if (ordinaryLocalProfile) {
+    const cwd = fs.realpathSync(options.cwd);
+    const env = safeOrdinaryLocalPiEnv(options.env, ordinaryLocalProfile, cwd, options.modelCredentials === true);
+    return {
+      command: '/usr/bin/sandbox-exec',
+      args: ['-p', buildDarwinOrdinaryLocalPiSeatbeltProfile(cwd, ordinaryLocalProfile, env), options.command, ...options.args],
+      cwd,
+      env,
+      isolated: true,
+    };
+  }
+
   configuredPosture();
   const cwd = fs.realpathSync(options.cwd);
   if (process.platform !== 'linux') throw new Error('linux-bwrap autonomous isolation requires Linux');

@@ -13,11 +13,29 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './logger';
 import { probeAutonomousCli, probeAutonomousCliSync } from './autonomous-cli-probe';
+import {
+  ORDINARY_LOCAL_PI_PROFILE_ENV,
+  RorcaExecutionSandboxError,
+  ordinaryLocalPiRuntimeProfileFromEnv,
+  type RorcaExecutionSandboxFailureCode,
+  type RorcaExecutionSandboxMode,
+} from './ordinary-local-pi-profile';
 
 export interface PiStatus {
   piInstalled: boolean;
   piVersion: string | null;
   piBinPath: string | null;
+}
+
+/** Detailed result for a run preflight; legacy callers continue to receive PiStatus only. */
+export interface PiInspection {
+  status: PiStatus;
+  failureCode?: RorcaExecutionSandboxFailureCode;
+}
+
+export interface PiInspectionOptions {
+  /** Use only after the route/worker has frozen the ordinary local Pi profile. */
+  sandboxMode?: RorcaExecutionSandboxMode;
 }
 
 export interface PiModel {
@@ -48,16 +66,17 @@ const PI_PROBE_TIMEOUT_MS = 2_000;
  * Resolve the pi binary path.
  * Priority: PI_BIN env var → `which pi`.
  */
-function resolveBinPath(): string | null {
+function resolveBinPath(requireExplicit = false): string | null {
   const envBin = process.env.PI_BIN?.trim();
   if (envBin) {
     try {
+      if (!path.isAbsolute(envBin)) return null;
       fs.accessSync(envBin, fs.constants.X_OK);
       return fs.realpathSync(envBin);
     } catch { return null; }
   }
 
-  return detectPiAvailability().piBinPath;
+  return requireExplicit ? null : detectPiAvailability().piBinPath;
 }
 
 /**
@@ -115,41 +134,84 @@ function parseTokenCount(value: string): number {
   }
 }
 
+/** Resolve the probe posture inherited from a worker-issued ordinary local profile. */
+function inheritedPiProbeMode(): RorcaExecutionSandboxMode | undefined {
+  if (!process.env[ORDINARY_LOCAL_PI_PROFILE_ENV]) return undefined;
+  ordinaryLocalPiRuntimeProfileFromEnv();
+  return 'darwin-local-pi';
+}
+
+function emptyInspection(failureCode?: RorcaExecutionSandboxFailureCode): PiInspection {
+  return {
+    status: { piInstalled: false, piVersion: null, piBinPath: null },
+    ...(failureCode ? { failureCode } : {}),
+  };
+}
+
+function failureCodeForProbe(error: unknown, sandboxMode?: RorcaExecutionSandboxMode): RorcaExecutionSandboxFailureCode {
+  if (error instanceof RorcaExecutionSandboxError) return error.code;
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (/linux-bwrap|bubblewrap|sandbox|isolation/i.test(message)) {
+    return 'linux_bwrap_required_for_requested_mode';
+  }
+  if (sandboxMode === 'darwin-local-pi') return 'unsupported_sandbox_mode';
+  return 'pi_not_installed';
+}
+
+function probeOptions(timeoutMs: number, sandboxMode?: RorcaExecutionSandboxMode) {
+  return sandboxMode ? { timeoutMs, sandboxMode } : { timeoutMs };
+}
+
+/**
+ * Detect Pi with a typed failure cause. Ordinary local Pi discovery is allowed
+ * only through the no-network Darwin probe selected by the frozen profile.
+ */
+export function inspectPi(options: PiInspectionOptions = {}): PiInspection {
+  let sandboxMode: RorcaExecutionSandboxMode | undefined;
+  try {
+    sandboxMode = options.sandboxMode ?? inheritedPiProbeMode();
+  } catch (error) {
+    return emptyInspection(failureCodeForProbe(error, options.sandboxMode));
+  }
+  const binPath = resolveBinPath(sandboxMode === 'darwin-local-pi');
+  if (!binPath) return emptyInspection('pi_not_installed');
+
+  const result = probeAutonomousCliSync(binPath, PI_VERSION_ARGS, probeOptions(PI_PROBE_TIMEOUT_MS, sandboxMode));
+  if (result.status !== 0) return emptyInspection(failureCodeForProbe(result.error, sandboxMode));
+  const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  return {
+    status: {
+      piInstalled: true,
+      piVersion: parseVersion(raw),
+      piBinPath: binPath,
+    },
+  };
+}
+
 /**
  * Detect pi binary: resolve path, run --version, parse output.
- * Never throws — returns a status object.
+ * Never throws — returns a status object for legacy callers.
  */
 export function detectPi(): PiStatus {
-  const binPath = resolveBinPath();
-  if (!binPath) {
-    return { piInstalled: false, piVersion: null, piBinPath: null };
-  }
-
-  try {
-    const result = probeAutonomousCliSync(binPath, PI_VERSION_ARGS, { timeoutMs: PI_PROBE_TIMEOUT_MS });
-    if (result.status !== 0) {
-      return { piInstalled: false, piVersion: null, piBinPath: null };
-    }
-    const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-    const version = parseVersion(raw);
-    return {
-      piInstalled: true,
-      piVersion: version,
-      piBinPath: binPath,
-    };
-  } catch {
-    return { piInstalled: false, piVersion: null, piBinPath: null };
-  }
+  return inspectPi().status;
 }
 
 /** Non-blocking detector for request/diagnostic paths. */
 export async function detectPiAsync(timeoutMs = 1_000): Promise<PiStatus> {
-  const binPath = resolveBinPath();
+  let sandboxMode: RorcaExecutionSandboxMode | undefined;
+  try {
+    sandboxMode = inheritedPiProbeMode();
+  } catch {
+    return { piInstalled: false, piVersion: null, piBinPath: null };
+  }
+  const binPath = resolveBinPath(sandboxMode === 'darwin-local-pi');
   if (!binPath) return { piInstalled: false, piVersion: null, piBinPath: null };
   try {
-    const result = await probeAutonomousCli(binPath, PI_VERSION_ARGS, {
-      timeoutMs: Math.min(timeoutMs, PI_PROBE_TIMEOUT_MS),
-    });
+    const result = await probeAutonomousCli(
+      binPath,
+      PI_VERSION_ARGS,
+      probeOptions(Math.min(timeoutMs, PI_PROBE_TIMEOUT_MS), sandboxMode),
+    );
     if (result.status !== 0) throw result.error ?? new Error('Pi version probe failed');
     const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
     return { piInstalled: true, piVersion: parseVersion(raw), piBinPath: binPath };
@@ -210,11 +272,12 @@ export function parsePiModelTable(stdout: string): PiModel[] {
   }
 }
 
-export function listPiModels(binPath: string): PiModel[] {
+export function listPiModels(binPath: string, options: PiInspectionOptions = {}): PiModel[] {
   try {
-    const result = probeAutonomousCliSync(binPath, ['--list-models'], { timeoutMs: 10_000 });
+    const sandboxMode = options.sandboxMode ?? inheritedPiProbeMode();
+    const result = probeAutonomousCliSync(binPath, ['--list-models'], probeOptions(10_000, sandboxMode));
 
-    if (result.error) {
+    if (result.error || result.status !== 0) {
       return [];
     }
 

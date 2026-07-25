@@ -126,6 +126,14 @@ import {
   taskManifestCommandGuardEnv,
 } from './lib/task-manifest-worker-authority';
 import { assertAutonomousExecutionBoundary } from './lib/autonomous-sandbox';
+import {
+  ORDINARY_LOCAL_PI_PROFILE_ENV,
+  ORDINARY_LOCAL_PI_PROFILE_VERSION,
+  RorcaExecutionSandboxError,
+  resolveRorcaExecutionSandboxProfile,
+  serializeOrdinaryLocalPiRuntimeProfile,
+  type OrdinaryLocalPiRuntimeProfile,
+} from './lib/ordinary-local-pi-profile';
 import { ensureAutonomousModelEgress } from './lib/autonomous-model-egress';
 import {
   drainPendingRunReleases,
@@ -183,6 +191,52 @@ const WORKER_STARTED_AT: Date = new Date();
 
 const HEARTBEAT_INTERVAL_MS = 30_000; // 30 s
 const OPTIONAL_WORKER_MODE = process.env.RORCA_OPTIONAL_WORKER === 'true';
+
+function parseWorkerJsonRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function ordinaryLocalPiRequested(effectiveOptions: unknown): boolean {
+  const options = parseWorkerJsonRecord(effectiveOptions);
+  const safety = parseWorkerJsonRecord(options?.safety);
+  return safety?.ordinaryLocalPi === true;
+}
+
+function readinessOverrideWasRequested(triggerOptions: unknown): boolean {
+  const options = parseWorkerJsonRecord(triggerOptions);
+  return options?.readinessOverride === true
+    || options?.runAnywayOverride === true
+    || options?.overrideReadinessGate === true;
+}
+
+function canonicalWorkerDirectory(value: unknown): string | null {
+  if (typeof value !== 'string' || !path.isAbsolute(value)) return null;
+  try {
+    return fs.statSync(value).isDirectory() ? fs.realpathSync(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function frozenExecutionManifestIsPiOnly(executionManifestPath: string | undefined): boolean {
+  if (!executionManifestPath || !fs.existsSync(executionManifestPath)) return false;
+  try {
+    const manifests = JSON.parse(fs.readFileSync(executionManifestPath, 'utf8')) as unknown;
+    return Array.isArray(manifests) && manifests.length > 0 && manifests.every((candidate) => {
+      const execution = parseWorkerJsonRecord(parseWorkerJsonRecord(candidate)?.execution);
+      return execution?.agent === 'pi';
+    });
+  } catch {
+    return false;
+  }
+}
 
 // ── Active process map (runId → ChildProcess) ────────────────────────────
 // Declared early so writeHeartbeat() can read .size before activeProcesses
@@ -638,10 +692,15 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
       execution_worktree_path: string | null;
       task_manifest_id: string | null;
       effective_options: unknown;
+      trigger_options: unknown;
+      execution_environment: string | null;
+      agent_type: string | null;
+      orchestration_mode: string | null;
     }>(
       `SELECT workspace_id, parallelism, branch_name, worktree_path,
               execution_workspace_path, execution_worktree_path, task_manifest_id,
-              effective_options
+              effective_options, trigger_options, execution_environment, agent_type,
+              orchestration_mode
          FROM pipeline_runs WHERE id = $1`,
       [runId],
     );
@@ -776,13 +835,88 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
       throw error;
     }
 
-    // Prove the mandatory process/filesystem/network boundary after policy
-    // claim and before the run can become running.
-    assertAutonomousExecutionBoundary({
-      cwd,
-      providerCapable: payload.safetyOptions.externalSend,
+    // Re-derive the sandbox posture from immutable run state. The narrow
+    // Darwin exception exists only for the worker-issued ordinary local Pi
+    // profile; a queue payload can never broaden it.
+    const effectiveOptions = parseWorkerJsonRecord(runRow.effective_options);
+    const effectiveWorktree = parseWorkerJsonRecord(effectiveOptions?.worktree);
+    const effectiveMerge = parseWorkerJsonRecord(effectiveOptions?.merge);
+    const effectiveSafety = parseWorkerJsonRecord(effectiveOptions?.safety);
+    const effectiveTerminal = effectiveOptions?.terminal;
+    const effectiveWorktreePath = canonicalWorkerDirectory(effectiveWorktree?.path);
+    const localPiRequested = ordinaryLocalPiRequested(runRow.effective_options);
+    if (localPiRequested && (
+      agent !== 'pi'
+      || runRow.agent_type !== 'pi'
+      || payload.autoWorktree !== true
+      || payload.autoMerge !== false
+      || payload.mergeStrategy !== 'branch-only'
+      || payload.safetyOptions.deploy !== false
+      || payload.safetyOptions.externalSend !== false
+      || payload.safetyOptions.policyLocked !== false
+      || terminalMode !== 'ansi-html'
+      || payloadParallelism !== 1
+      || orchestrationMode !== 'sequential'
+      || executionEnvironment !== 'remote-rorca'
+      || effectiveWorktree?.enabled !== true
+      || effectiveWorktreePath !== cwd
+      || effectiveWorktree?.branch !== runRow.branch_name
+      || effectiveMerge?.strategy !== 'branch-only'
+      || effectiveMerge?.autoMerge !== false
+      || effectiveSafety?.deploy !== false
+      || effectiveSafety?.externalSend !== false
+      || effectiveSafety?.policyLocked !== false
+      || effectiveTerminal !== 'ansi-html'
+      || runRow.execution_environment !== 'remote-rorca'
+      || runRow.orchestration_mode !== 'sequential'
+    )) {
+      throw new RorcaExecutionSandboxError(
+        'linux_bwrap_required_for_requested_mode',
+        'linux_bwrap_required_for_requested_mode: immutable run options no longer satisfy the ordinary local Pi profile',
+      );
+    }
+    const executionSandbox = resolveRorcaExecutionSandboxProfile({
+      ordinaryLocalPiProfileRequested: localPiRequested,
+      agent: runRow.agent_type ?? agent,
+      allRequiredAgentsPi: frozenExecutionManifestIsPiOnly(executionManifestPath),
+      autoWorktree: effectiveWorktree?.enabled === true,
+      workspacePath: frozenExecution.workspacePath,
+      worktreePath: cwd,
+      branchName: runRow.branch_name,
+      autoMerge: effectiveMerge?.autoMerge === true,
+      mergeStrategy: typeof effectiveMerge?.strategy === 'string' ? effectiveMerge.strategy : '',
+      deploy: effectiveSafety?.deploy === true,
+      externalSend: effectiveSafety?.externalSend === true,
+      policyLocked: effectiveSafety?.policyLocked === true,
+      parallelism: Number(parallelism ?? 1),
+      orchestrationMode: runRow.orchestration_mode ?? orchestrationMode,
+      terminalMode: typeof effectiveTerminal === 'string' ? effectiveTerminal : terminalMode,
+      executionEnvironment: runRow.execution_environment ?? executionEnvironment,
+      taskManifestAuthority: Boolean(runRow.task_manifest_id),
+      readinessOverride: readinessOverrideWasRequested(runRow.trigger_options),
+      requireConcreteWorktree: localPiRequested,
     });
-    await ensureAutonomousModelEgress();
+    const ordinaryLocalPiRuntimeProfile: OrdinaryLocalPiRuntimeProfile | null = executionSandbox.mode === 'darwin-local-pi'
+      ? {
+        schemaVersion: ORDINARY_LOCAL_PI_PROFILE_VERSION,
+        runId,
+        workspacePath: frozenExecution.workspacePath,
+        worktreePath: cwd,
+        branchName: runRow.branch_name,
+        piBinPath: executionSandbox.piBinPath!,
+        piRealPath: executionSandbox.piRealPath!,
+      }
+      : null;
+
+    // Strict Linux bwrap remains mandatory for every autonomous, delivery, or
+    // externally deliverable mode. The profile above is the sole Darwin branch.
+    if (executionSandbox.mode === 'linux-bwrap') {
+      assertAutonomousExecutionBoundary({
+        cwd,
+        providerCapable: payload.safetyOptions.externalSend,
+      });
+      await ensureAutonomousModelEgress();
+    }
 
     // The atomic claim already moved queued -> starting and persisted owner,
     // fence and lease. Do not overwrite it with an unfenced lifecycle write.
@@ -874,6 +1008,10 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
       RORCA_GOVERNED_WAVE_POLICY: JSON.stringify(claimedWavePolicy),
       ...taskManifestCommandGuardEnv(commandDenylist),
     };
+    if (ordinaryLocalPiRuntimeProfile) {
+      env.PI_BIN = ordinaryLocalPiRuntimeProfile.piBinPath;
+      env[ORDINARY_LOCAL_PI_PROFILE_ENV] = serializeOrdinaryLocalPiRuntimeProfile(ordinaryLocalPiRuntimeProfile);
+    }
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_ENTRYPOINT;
     delete env.CLAUDE_AGENT_SDK_VERSION;
@@ -1318,11 +1456,13 @@ export async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>
     const runId = parsed.data.runId;
     const reasonText = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
     logger.error({ runId, error: outcome.reason, reasonText }, '[worker] Fresh pipeline run rejected before spawn');
-    const reason = /sandbox|isolation|bubblewrap/i.test(reasonText)
-      ? 'autonomous_sandbox_preflight_failed'
-      : /egress|broker/i.test(reasonText)
-        ? 'autonomous_model_egress_preflight_failed'
-        : 'worker_preflight_failed';
+    const reason = outcome.reason instanceof RorcaExecutionSandboxError
+      ? outcome.reason.code
+      : /sandbox|isolation|bubblewrap/i.test(reasonText)
+        ? 'autonomous_sandbox_preflight_failed'
+        : /egress|broker/i.test(reasonText)
+          ? 'autonomous_model_egress_preflight_failed'
+          : 'worker_preflight_failed';
     await terminalizeFreshRunPreflightFailure(runId, reason, {
       bindFailure: (id, failureReason) => queryOne<{ workspace_id: string }>(`
         UPDATE pipeline_runs run

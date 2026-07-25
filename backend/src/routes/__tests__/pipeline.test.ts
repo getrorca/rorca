@@ -531,6 +531,108 @@ describe('POST /api/pipeline/trigger', () => {
     });
   });
 
+  test('ordinary macOS Pi branch-only preflight uses the explicit local profile and freezes no-send authority', async () => {
+    await seedRunnableSpec('safe-local-pi');
+    const fakePi = path.join(tmpDir, 'explicit-pi');
+    fs.writeFileSync(fakePi, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const piDetector = require('../../lib/pi-detector') as typeof import('../../lib/pi-detector');
+    const localProfile = require('../../lib/ordinary-local-pi-profile') as typeof import('../../lib/ordinary-local-pi-profile');
+    const profileSpy = jest.spyOn(localProfile, 'resolveRorcaExecutionSandboxProfile').mockReturnValue({
+      mode: 'darwin-local-pi',
+      piBinPath: fakePi,
+    });
+    const inspectionSpy = jest.spyOn(piDetector, 'inspectPi').mockReturnValue({
+      status: { piInstalled: true, piVersion: '0.80.6', piBinPath: fakePi },
+    });
+    const catalogSpy = jest.spyOn(piDetector, 'listPiModels').mockReturnValue([{
+      provider: 'openai-codex', model: 'gpt-5.4', contextTokens: 272000,
+      maxOutTokens: 128000, thinking: true, images: true,
+    }]);
+
+    try {
+      const res = await request(app)
+        .post('/api/pipeline/trigger')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          specPath: 'forge/specs/approved/safe-local-pi.json',
+          workspaceId: 'ws-pipe',
+          agentOverride: 'pi',
+          modelOverride: 'openai-codex/gpt-5.4',
+          autoWorktree: true,
+          autoMerge: false,
+          mergeStrategy: 'branch-only',
+          terminal_mode: 'ansi-html',
+          forceSequential: true,
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.effectiveOptions.safety).toMatchObject({
+        deploy: false,
+        externalSend: false,
+        ordinaryLocalPi: true,
+      });
+      expect(profileSpy).toHaveBeenCalledWith(expect.objectContaining({
+        agent: 'pi',
+        allRequiredAgentsPi: true,
+        autoWorktree: true,
+        autoMerge: false,
+        mergeStrategy: 'branch-only',
+        deploy: false,
+        externalSend: false,
+        parallelism: 1,
+        orchestrationMode: 'sequential',
+        terminalMode: 'ansi-html',
+        readinessOverride: false,
+      }));
+      expect(inspectionSpy).toHaveBeenCalledWith({ sandboxMode: 'darwin-local-pi' });
+      expect(catalogSpy).toHaveBeenCalledWith(fakePi, { sandboxMode: 'darwin-local-pi' });
+    } finally {
+      profileSpy.mockRestore();
+      inspectionSpy.mockRestore();
+      catalogSpy.mockRestore();
+    }
+  });
+
+  test('unsafe local Pi shapes return the typed Linux-bwrap requirement before any run mutation', async () => {
+    await seedRunnableSpec('unsafe-local-pi');
+    const localProfile = require('../../lib/ordinary-local-pi-profile') as typeof import('../../lib/ordinary-local-pi-profile');
+    const profileSpy = jest.spyOn(localProfile, 'resolveRorcaExecutionSandboxProfile').mockImplementation(() => {
+      throw new localProfile.RorcaExecutionSandboxError(
+        'linux_bwrap_required_for_requested_mode',
+        'linux_bwrap_required_for_requested_mode: branch-only is required',
+      );
+    });
+    const before = await queryOne<{ total: number }>(
+      'SELECT COUNT(*)::int AS total FROM pipeline_runs WHERE workspace_id = $1', ['ws-pipe'],
+    );
+
+    try {
+      const res = await request(app)
+        .post('/api/pipeline/trigger')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          specPath: 'forge/specs/approved/unsafe-local-pi.json',
+          workspaceId: 'ws-pipe',
+          agentOverride: 'pi',
+          autoWorktree: true,
+          autoMerge: false,
+          mergeStrategy: 'branch-only',
+          terminal_mode: 'ansi-html',
+          forceSequential: true,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('pi_preflight:linux_bwrap_required_for_requested_mode');
+      expect(res.body.error).not.toContain('pi_not_installed');
+      const after = await queryOne<{ total: number }>(
+        'SELECT COUNT(*)::int AS total FROM pipeline_runs WHERE workspace_id = $1', ['ws-pipe'],
+      );
+      expect(after?.total).toBe(before?.total);
+    } finally {
+      profileSpy.mockRestore();
+    }
+  });
+
   test('sequential defaults do not grant manifestless publication authority', async () => {
     await seedRunnableSpec('safe-sequential-default');
     await expectReleaseOneManifestlessDenial({

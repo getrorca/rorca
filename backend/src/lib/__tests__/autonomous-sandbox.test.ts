@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   assertAutonomousExecutionBoundary,
+  buildDarwinOrdinaryLocalPiSeatbeltProfile,
   buildLinuxSandboxArgumentsForTests,
   resetAutonomousSandboxProbeForTests,
   sanitizeAutonomousSandboxEnvForTests,
@@ -101,6 +102,32 @@ test('Linux launch topology has fresh namespaces, private proc/home/tmp, exact w
     expect(text).toContain(`--ro-bind\n${os.devNull}\n${path.join(fs.realpathSync(cwd), 'node_modules', 'fixture', '.env.local')}`);
     expect(text).not.toMatch(/--(?:ro-)?bind\n\/\n\//);
     expect(args.slice(-3)).toEqual(['--', '/usr/bin/node', '--version']);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('ordinary local Pi uses a scoped Seatbelt profile rather than a raw host launch', () => {
+  const cwd = fixture();
+  try {
+    const secret = path.join(cwd, '.env');
+    fs.writeFileSync(secret, 'DATABASE_URL=must-not-be-readable\n', { mode: 0o600 });
+    const tmpdir = path.join(cwd, '.rorca', 'ordinary-local-pi-tmp');
+    fs.mkdirSync(tmpdir, { recursive: true });
+    const profile = buildDarwinOrdinaryLocalPiSeatbeltProfile(cwd, {
+      piBinPath: process.execPath,
+    }, {
+      HOME: os.homedir(),
+      TMPDIR: tmpdir,
+      PATH: '',
+    });
+
+    expect(profile).toContain('(deny network-inbound)');
+    expect(profile).toContain('(allow network-outbound)');
+    expect(profile).toContain('(deny file-read*)');
+    expect(profile).toContain(`(subpath ${JSON.stringify(fs.realpathSync(cwd))})`);
+    expect(profile).toContain(`(deny file-read* file-write* file-map-executable (literal ${JSON.stringify(fs.realpathSync(secret))}))`);
+    expect(profile).not.toContain('(allow default)');
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

@@ -59,6 +59,19 @@ test('worker proves isolation before either fresh or retry lifecycle can become 
   expect(worker).toContain('providerCapable: approvedPreview.options.safety.externalSend');
 });
 
+test('the Darwin ordinary-local Pi exception is worker-issued Seatbelt isolation, never a raw host fallback', () => {
+  expect(worker).toContain('resolveRorcaExecutionSandboxProfile({');
+  expect(worker).toContain('ORDINARY_LOCAL_PI_PROFILE_ENV');
+  expect(worker).toContain('serializeOrdinaryLocalPiRuntimeProfile');
+  expect(sandbox).toContain('buildDarwinOrdinaryLocalPiSeatbeltProfile');
+  expect(sandbox).toContain("command: '/usr/bin/sandbox-exec'");
+  expect(sandbox).toContain("'(deny network-inbound)'");
+  expect(sandbox).toContain("'(deny file-read*)'");
+  expect(sandbox).toContain('workspaceCredentialPaths(worktree)');
+  expect(sandbox).toContain('isolated: true');
+  expect(sandbox).not.toMatch(/command:\s*options\.command,\s*\n\s*args:\s*\[\.\.\.options\.args\]/);
+});
+
 test('semantic, RPC, PTY, conflict resolution, and worktree-controlled host validation all use one sandbox launch seam', () => {
   expect(engine.match(/isolatedAgentLaunch\(/g)?.length).toBeGreaterThanOrEqual(7);
   expect(engine).toContain('nodePty.spawn(launch.command, launch.args');
