@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
 import type { Express } from 'express';
+import type { Server } from 'node:http';
 import { getAuthToken } from './helpers/auth-helper';
 
 // ---------------------------------------------------------------------------
@@ -32,39 +33,46 @@ const mockFetch = jest.fn<Promise<Response>, [any, any]>();
 (global as any).fetch = mockFetch;
 
 let app: Express;
+let testServer: Server;
 let tmpDir: string;
 let authToken: string;
 
-beforeEach(async () => {
-  jest.resetModules();
-  jest.clearAllMocks();
-
-  // Re-apply mocks after resetModules
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: (...args: any[]) => mockChatComplete(args[0]),
-    getActiveProvider: () => 'mock',
-    getActiveModel: () => 'mock-model',
-    isValidModel: () => false,
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
-  }));
-  (global as any).fetch = mockFetch;
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-context-test-'));
-process.env.NODE_ENV = 'test';
-
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  testServer = await new Promise<Server>((resolve, reject) => {
+    const listener = expressApp.listen(0, '127.0.0.1', () => {
+      listener.off('error', reject);
+      resolve(listener);
+    });
+    listener.once('error', reject);
+  });
+  // Keep the entire route matrix on one owned, already-listening loopback server.
+  // The cast preserves existing request(app) calls while avoiding Supertest's
+  // implicit per-request listener and repeated server-module/pool initialization.
+  app = testServer as unknown as Express;
+  authToken = await getAuthToken(expressApp);
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(() => {
+  jest.clearAllMocks();
+  (global as any).fetch = mockFetch;
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-context-test-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  if (testServer) {
+    testServer.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      testServer.close(error => error ? reject(error) : resolve());
+    });
+  }
+  delete process.env.NODE_ENV;
 });
 
 // ---------------------------------------------------------------------------
