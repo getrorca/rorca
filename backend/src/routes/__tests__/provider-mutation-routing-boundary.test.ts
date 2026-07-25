@@ -6,6 +6,7 @@
  */
 
 import express from 'express';
+import type { Server } from 'http';
 import request from 'supertest';
 import {
   PROVIDER_MUTATION_ROUTES,
@@ -119,10 +120,19 @@ function boundaryApp() {
   return app;
 }
 
+let app: Server;
+
 async function call(pathname: string, method: ProviderMutationRoute['method']) {
-  const operation = method === 'DELETE' ? request(boundaryApp()).delete(pathname) : request(boundaryApp()).post(pathname);
+  const operation = method === 'DELETE' ? request(app).delete(pathname) : request(app).post(pathname);
   return operation.send({ workspaceId: 'ws-1' });
 }
+
+beforeAll(async () => {
+  app = await new Promise<Server>((resolve, reject) => {
+    const listener = boundaryApp().listen(0, '127.0.0.1', () => resolve(listener));
+    listener.once('error', reject);
+  });
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -131,7 +141,9 @@ beforeEach(() => {
   global.fetch = fetchMock as typeof fetch;
 });
 
-afterAll(() => {
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
   delete process.env.AUTH_REQUIRED;
   delete process.env.RORCA_OPERATOR_CAPABILITY_SHA256;
   global.fetch = originalFetch;
@@ -155,13 +167,13 @@ function expectNoPreGuardEffects(): void {
 
 test('read-only diagnostics, local previews, setup-state creation, and inert compatibility remain capability-free', async () => {
   const probes = [
-    request(boundaryApp()).get('/api/workspaces/ws-1/github'),
-    request(boundaryApp()).get('/api/workspaces/ws-1/github/account'),
-    request(boundaryApp()).get('/api/workspaces/ws-1/github/app'),
-    request(boundaryApp()).post('/api/workspaces/ws-1/github/test-connection'),
-    request(boundaryApp()).post('/api/workspaces/ws-1/github/pr-template-preview'),
-    request(boundaryApp()).post('/api/workspaces/ws-1/github/app/setup/start'),
-    request(boundaryApp()).post('/api/workspaces/ws-1/github/dispatch'),
+    request(app).get('/api/workspaces/ws-1/github'),
+    request(app).get('/api/workspaces/ws-1/github/account'),
+    request(app).get('/api/workspaces/ws-1/github/app'),
+    request(app).post('/api/workspaces/ws-1/github/test-connection'),
+    request(app).post('/api/workspaces/ws-1/github/pr-template-preview'),
+    request(app).post('/api/workspaces/ws-1/github/app/setup/start'),
+    request(app).post('/api/workspaces/ws-1/github/dispatch'),
   ];
   for (const probe of probes) {
     const response = await probe.send({});

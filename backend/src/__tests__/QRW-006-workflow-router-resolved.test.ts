@@ -118,6 +118,7 @@ jest.mock('../lib/logger', () => ({
 // ── Imports after mocks ──────────────────────────────────────────────────────
 
 import express from 'express';
+import type { Server } from 'http';
 import request from 'supertest';
 
 async function buildApp() {
@@ -152,10 +153,19 @@ afterAll(() => {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('QRW-006: GET /api/workflow-router/resolved/:workflowId returns full fallback chain', () => {
-  let app: express.Application;
+  let app: Server;
 
   beforeAll(async () => {
-    app = await buildApp();
+    const expressApp = await buildApp();
+    app = await new Promise<Server>((resolve, reject) => {
+      const listener = expressApp.listen(0, '127.0.0.1', () => resolve(listener));
+      listener.once('error', reject);
+    });
+  });
+
+  afterAll(async () => {
+    app.closeAllConnections();
+    await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
   });
 
   // ── (1) Response shape ────────────────────────────────────────────────────
