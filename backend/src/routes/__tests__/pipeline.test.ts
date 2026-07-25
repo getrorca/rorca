@@ -11,6 +11,7 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 import crypto from 'node:crypto';
 import type { Express } from 'express';
+import type { Server } from 'node:http';
 import request from 'supertest';
 import { gzipSync } from 'zlib';
 import { getAuthToken } from './helpers/auth-helper';
@@ -64,6 +65,7 @@ jest.mock('../../lib/pty-manager', () => ({
 }));
 
 let app: Express;
+let testServer: Server;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
@@ -77,9 +79,20 @@ const LIST_WORKSPACE_ID = `ws-pipe-list-${process.pid}`;
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
-  serviceAuthToken = await getAuthToken(app, {
+  const expressApp = serverMod.default as Express;
+  testServer = await new Promise<Server>((resolve, reject) => {
+    const listener = expressApp.listen(0, '127.0.0.1', () => {
+      listener.off('error', reject);
+      resolve(listener);
+    });
+    listener.once('error', reject);
+  });
+  // Keep every Supertest request on one owned, already-listening loopback server.
+  // Casting preserves the existing request(app) call sites while its runtime value is
+  // an http.Server, preventing Supertest from creating an implicit listener per call.
+  app = testServer as unknown as Express;
+  authToken = await getAuthToken(expressApp);
+  serviceAuthToken = await getAuthToken(expressApp, {
     email: 'hermes-pipeline-test@rorca.internal',
     role: 'admin',
     displayName: 'Hermes Pipeline Test Service',
@@ -177,6 +190,12 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  if (testServer) {
+    testServer.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      testServer.close(error => error ? reject(error) : resolve());
+    });
+  }
   delete process.env.NODE_ENV;
   delete process.env.RORCA_EXPERIMENTAL_WAVE_PARALLEL;
 });
