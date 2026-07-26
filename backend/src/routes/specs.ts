@@ -28,7 +28,7 @@ import {
 } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey, getOpenRouterPrefs } from './vault';
-import { authRequired } from '../lib/auth-utils';
+import { authRequired, isLocalHumanApprovalPrincipal } from '../lib/auth-utils';
 import { getEffectiveUser } from '../lib/get-user';
 import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
@@ -10165,6 +10165,9 @@ router.post('/:specId/approval-target', validateBody(SpecApprovalTargetRequestSc
  *                 approvedPath: { type: string }
  *                 readiness: { type: object }
  *                 providerApproval: { type: object }
+ *                 localApproval:
+ *                   type: object
+ *                   description: Explicit local-single-user approval identity; never available to authenticated hosted users or internal services.
  *                 mutationReceipt: { type: object }
  *                 responseIdentity:
  *                   type: object
@@ -10262,6 +10265,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
             approvedPath: approvedFile,
             readiness: approvalResult.readiness,
             ...(approvalResult.providerApproval ? { providerApproval: approvalResult.providerApproval } : {}),
+            ...(approvalResult.localApproval ? { localApproval: approvalResult.localApproval } : {}),
             mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
             ...(approvalResult.responseIdentity ? { responseIdentity: approvalResult.responseIdentity } : {}),
           };
@@ -10309,11 +10313,17 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
       : null;
     const governedAuthoring = pendingContent.source === 'hermes-chatops-skill-first'
       || Boolean(authoringRecord?.mutationReceipt);
-    if (governedAuthoring && !input.humanApproval) {
+    const localHumanApprovalPrincipal = isLocalHumanApprovalPrincipal(req.user);
+    if (governedAuthoring && !input.humanApproval && !localHumanApprovalPrincipal) {
       throw new ForbiddenError('Governed provider-authored specs require exact provider-human approval authority');
     }
 
     let providerApproval: { receiptId: string; actorId: string; targetHash: string } | null = null;
+    let localApproval: {
+      schemaVersion: 'rorca.local-human-approval.v1';
+      actorId: string;
+      authorityMode: 'local-single-user';
+    } | null = null;
     if (input.humanApproval) {
       if (!authoringRecord) throw new UnprocessableError('Provider-human approval requires governed authoring metadata', 'AUTHORING_PREFLIGHT_REQUIRED');
       const parentPlan = authoringRecord.parentAuthoringPlan as Record<string, unknown> | undefined;
@@ -10362,6 +10372,13 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
         acceptedPreflightHash: input.humanApproval.acceptedPreflightHash,
         persistReceiptId: input.humanApproval.persistReceiptId,
       };
+    } else if (localHumanApprovalPrincipal) {
+      localApproval = {
+        schemaVersion: 'rorca.local-human-approval.v1',
+        actorId: req.user!.id,
+        authorityMode: 'local-single-user',
+      };
+      if (authoringRecord) authoringRecord.localApproval = localApproval;
     } else if (servicePrincipal) {
       throw new ForbiddenError('Service principals must relay exact provider-human approval authority');
     }
@@ -10388,9 +10405,10 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
       mutableAuthoring.approvalResult = {
         readiness,
         providerApproval,
+        localApproval,
         materialHash: authoringSpecMaterialHash(pendingContent),
-        actorId: providerApproval?.actorId ?? req.user!.id,
-        walPayload: { workspaceId, providerApproval },
+        actorId: providerApproval?.actorId ?? localApproval?.actorId ?? req.user!.id,
+        walPayload: { workspaceId, providerApproval, localApproval },
         ...(responseIdentity ? { responseIdentity } : {}),
       };
     }
@@ -10424,8 +10442,8 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
        VALUES ('spec_approved', $1, $2, $3, $4, $5)
        ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
        RETURNING *`,
-      [specId, workspaceId, providerApproval?.actorId ?? req.user!.id,
-        JSON.stringify({ workspaceId, providerApproval }),
+      [specId, workspaceId, providerApproval?.actorId ?? localApproval?.actorId ?? req.user!.id,
+        JSON.stringify({ workspaceId, providerApproval, localApproval }),
         claim ? `authoring-approve:v1:${claim.receiptId}` : null],
     );
     if (walEvent) broadcastAll(walEvent);
@@ -10445,6 +10463,7 @@ router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (r
       approvedPath: approvedFile,
       readiness,
       ...(providerApproval ? { providerApproval } : {}),
+      ...(localApproval ? { localApproval } : {}),
       ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
       ...(responseIdentity ? { responseIdentity } : {}),
     };

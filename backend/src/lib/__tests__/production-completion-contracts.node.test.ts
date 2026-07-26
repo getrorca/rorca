@@ -65,6 +65,20 @@ test('authoring persistence and approval are durable idempotent operations with 
   assert.doesNotMatch(migration, /(?:CREATE|ALTER|DROP|DELETE FROM|UPDATE)\s+(?:TABLE\s+)?pgboss\./i);
 });
 
+test('local single-user approval is narrow, auditable, and never grants Hermes service authority', () => {
+  const auth = readSource('lib', 'auth-utils.ts');
+  const specs = readSource('routes', 'specs.ts');
+  assert.match(auth, /process\.env\.AUTH_REQUIRED !== 'true'/);
+  assert.match(auth, /user\?\.id === LOCAL_ADMIN\.id/);
+  assert.match(auth, /user\.email === LOCAL_ADMIN\.email/);
+  assert.match(auth, /user\.supabaseId === LOCAL_ADMIN\.supabaseId/);
+  assert.match(specs, /governedAuthoring && !input\.humanApproval && !localHumanApprovalPrincipal/);
+  assert.match(specs, /schemaVersion: 'rorca\.local-human-approval\.v1'/);
+  assert.match(specs, /authorityMode: 'local-single-user'/);
+  assert.match(specs, /Service principals must relay exact provider-human approval authority/);
+  assert.match(specs, /JSON\.stringify\(\{ workspaceId, providerApproval, localApproval \}\)/);
+});
+
 test('strict post-save memory stage reports degradation instead of converting failure to success', () => {
   const memory = readSource('lib', 'auto-memory.ts');
   const handler = readSource('lib', 'spec-job-handlers.ts');

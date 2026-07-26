@@ -169,6 +169,21 @@ export function isSuperUser(user: { role?: string } | null | undefined): boolean
   return user?.role === 'admin';
 }
 
+/**
+ * The unauthenticated local topology has one explicit human principal. This
+ * helper must stay narrower than a generic admin check: hosted/authenticated
+ * users and internal services require their provider-bound approval authority.
+ */
+export function isLocalHumanApprovalPrincipal(
+  user: { id?: string; email?: string; supabaseId?: string; role?: string } | null | undefined,
+): boolean {
+  return process.env.AUTH_REQUIRED !== 'true'
+    && user?.id === LOCAL_ADMIN.id
+    && user.email === LOCAL_ADMIN.email
+    && user.supabaseId === LOCAL_ADMIN.supabaseId
+    && user.role === LOCAL_ADMIN.role;
+}
+
 async function resolveAuthUserFromLocalJwt(token: string): Promise<AuthUser | null> {
   try {
     const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;

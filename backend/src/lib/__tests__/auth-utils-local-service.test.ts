@@ -7,7 +7,12 @@
 
 import express from 'express';
 import request from 'supertest';
-import { authRequired, INTERNAL_SERVICE_TOKEN } from '../auth-utils';
+import {
+  authRequired,
+  INTERNAL_SERVICE_TOKEN,
+  isLocalHumanApprovalPrincipal,
+  LOCAL_ADMIN,
+} from '../auth-utils';
 
 function app() {
   const instance = express();
@@ -29,6 +34,21 @@ describe('local topology service authentication', () => {
     const response = await request(app()).get('/identity');
     expect(response.status).toBe(200);
     expect(response.body.user).toMatchObject({ id: 'local-admin', email: 'admin@rorca.local' });
+  });
+
+  test('only the exact local fallback principal has local-human approval authority', () => {
+    process.env.AUTH_REQUIRED = 'false';
+    expect(isLocalHumanApprovalPrincipal(LOCAL_ADMIN)).toBe(true);
+    expect(isLocalHumanApprovalPrincipal({ ...LOCAL_ADMIN, email: 'forged@rorca.local' })).toBe(false);
+    expect(isLocalHumanApprovalPrincipal({
+      id: 'rorca-hermes-service',
+      email: 'hermes@rorca.internal',
+      supabaseId: '00000000-0000-0000-0000-000000000002',
+      role: 'admin',
+    })).toBe(false);
+
+    process.env.AUTH_REQUIRED = 'true';
+    expect(isLocalHumanApprovalPrincipal(LOCAL_ADMIN)).toBe(false);
   });
 
   test('the exact internal Bearer and Hermes label resolve as service authority before local fallback', async () => {
