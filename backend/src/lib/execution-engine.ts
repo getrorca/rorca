@@ -3571,9 +3571,13 @@ async function spawnPiRpc(
     });
   }
 
+  // Keep Pi's structured session inside the isolated worktree. Linux bwrap
+  // mounts this path and Darwin Seatbelt grants only this scoped writable root;
+  // a host os.tmpdir() path is intentionally unavailable to the child.
   const sessionDirectory = createPiSessionDirectory(
     piSessionOptions?.runId ?? process.pid,
     piSessionOptions?.storyId ?? 'story',
+    path.join(cwd, '.rorca', 'ordinary-local-pi-tmp'),
   );
   const logStream = fs.createWriteStream(logFile, { flags: 'a' });
   const mappedEvent = (event: unknown, stream: 'stdout' | 'stderr'): void => {

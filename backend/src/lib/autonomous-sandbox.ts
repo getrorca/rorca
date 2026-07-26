@@ -47,12 +47,12 @@ export interface AutonomousBoundaryPreflightOptions {
 
 const SAFE_PRODUCTION_ENV_KEYS = new Set([
   'PATH', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM',
-  'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ',
+  'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ', 'DEVELOPER_DIR',
   'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
   'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_COUNT',
   'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1',
   'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GIT_SSH_COMMAND', 'GCM_INTERACTIVE', 'GH_CONFIG_DIR',
-  'PI_OFFLINE', 'PI_SKIP_VERSION_CHECK', 'PI_TELEMETRY',
+  'PI_OFFLINE', 'PI_SKIP_VERSION_CHECK', 'PI_TELEMETRY', 'RORCA_PI_MCP_TOKEN',
   'OPENCODE_DISABLE_AUTOUPDATE', 'OPENCODE_DISABLE_DEFAULT_PLUGINS',
   'RORCA_AUTONOMOUS_COMMAND_GUARD', 'RORCA_AUTONOMOUS_WORKSPACE_ROOT',
   'RORCA_EVENT', 'RORCA_HOOK_TYPE', 'RORCA_RUN_ID', 'RORCA_STORY_ID',
@@ -204,6 +204,11 @@ function safeOrdinaryLocalPiEnv(
   selected.XDG_CACHE_HOME = path.join(home, '.cache');
   selected.npm_config_cache = path.join(home, '.cache', 'npm');
   selected.PI_BIN = profile.piBinPath;
+  // Apple command-line tool shims otherwise ask xcrun to create a cache in
+  // Darwin's global per-user temp root, which is deliberately outside this
+  // Seatbelt profile. An explicit toolchain avoids that unscoped write.
+  const commandLineTools = '/Library/Developer/CommandLineTools';
+  if (fs.existsSync(commandLineTools)) selected.DEVELOPER_DIR = commandLineTools;
   selected[ORDINARY_LOCAL_PI_PROFILE_ENV] = input[ORDINARY_LOCAL_PI_PROFILE_ENV]!;
   // The local profile never receives the Linux egress socket/proxy. It is
   // branch-only/no-send authority, not a release-delivery profile.

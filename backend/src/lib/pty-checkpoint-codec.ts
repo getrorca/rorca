@@ -7,7 +7,8 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { Terminal } from '@xterm/headless';
+import * as HeadlessTerminalModule from '@xterm/headless';
+import type { Terminal as HeadlessTerminal } from '@xterm/headless';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { CheckpointCorruptionError, RetentionBudgetExhaustedError } from './errors';
 
@@ -15,6 +16,17 @@ export const PTY_CHECKPOINT_VERSION = 1;
 export const DEFAULT_PTY_CHECKPOINT_SCROLLBACK = 10_000;
 export const DEFAULT_MAX_PTY_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 const MAX_INCOMPLETE_ANSI_BYTES = 64 * 1024;
+type HeadlessTerminalConstructor = typeof import('@xterm/headless').Terminal;
+const terminalModule = HeadlessTerminalModule as unknown as {
+  Terminal?: HeadlessTerminalConstructor;
+  default?: { Terminal?: HeadlessTerminalConstructor };
+};
+function resolveTerminalConstructor(): HeadlessTerminalConstructor {
+  const constructor = terminalModule.Terminal ?? terminalModule.default?.Terminal;
+  if (!constructor) throw new Error('@xterm/headless did not expose a Terminal constructor');
+  return constructor;
+}
+const TerminalConstructor = resolveTerminalConstructor();
 
 export interface EncodedPtyCheckpoint {
   version: number;
@@ -152,7 +164,7 @@ export function decodePtyCheckpoint(
 
 /** A single-writer headless xterm emulator used only by PTY ingestion. */
 export class PtyCheckpointEmulator {
-  private readonly terminal: Terminal;
+  private readonly terminal: HeadlessTerminal;
   private readonly serializer: SerializeAddon;
   private readonly scrollback: number;
   private readonly maxCheckpointBytes: number;
@@ -165,7 +177,7 @@ export class PtyCheckpointEmulator {
     this.scrollback = options.scrollback ?? DEFAULT_PTY_CHECKPOINT_SCROLLBACK;
     this.maxCheckpointBytes = options.maxCheckpointBytes ?? DEFAULT_MAX_PTY_CHECKPOINT_BYTES;
     this.onMalformedInput = options.onMalformedInput;
-    this.terminal = new Terminal({
+    this.terminal = new TerminalConstructor({
       cols: options.cols,
       rows: options.rows,
       scrollback: this.scrollback,

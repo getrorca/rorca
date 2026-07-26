@@ -51,6 +51,22 @@ describe('Pi structured autonomous profile', () => {
     expect(fs.existsSync(directory.path)).toBe(false);
   });
 
+  test('can scope session state to an isolation-visible private parent', () => {
+    const root = fs.mkdtempSync(path.join(process.cwd(), '.pi-session-test-'));
+    try {
+      const parent = path.join(root, '.rorca', 'ordinary-local-pi-tmp');
+      const directory = createPiSessionDirectory(18, 'SOW/001', parent);
+
+      expect(directory.path.startsWith(`${parent}${path.sep}`)).toBe(true);
+      expect(mode(parent)).toBe(0o700);
+      expect(mode(directory.path)).toBe(0o700);
+      directory.cleanup();
+      expect(fs.existsSync(directory.path)).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('stores very large prompts exactly in a private file and cleanup is idempotent', () => {
     const prompt = `${'x'.repeat(2 * 1024 * 1024)}\nEOF\n$HOME\n$(touch should-not-run)`;
     const file = createPiPromptFile(17, 'PTY/004', prompt);
