@@ -9,11 +9,15 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AutonomousDeliverySettings from '../AutonomousDeliverySettings';
-import { apiFetch } from '../../lib/apiFetch';
+import { apiFetch, apiFetchProviderMutation } from '../../lib/apiFetch';
 
-vi.mock('../../lib/apiFetch', () => ({ apiFetch: vi.fn() }));
+vi.mock('../../lib/apiFetch', () => ({
+  apiFetch: vi.fn(),
+  apiFetchProviderMutation: vi.fn(),
+}));
 
 const mockApiFetch = vi.mocked(apiFetch);
+const mockApiFetchProviderMutation = vi.mocked(apiFetchProviderMutation);
 const policyDigest = `sha256:${'a'.repeat(64)}`;
 
 function policy(status: 'disabled' | 'active' | 'revoked' = 'disabled') {
@@ -35,7 +39,12 @@ function installLoads(policies: ReturnType<typeof policy>[] = [], evidence: unkn
     }
     if (!init && url.includes('/delivery-evidence')) return { items: evidence } as any;
     if (!init && url.includes('/autonomous-deliveries')) return { items: deliveries } as any;
-    if (init?.method === 'POST' && url.includes('/autonomous-deliveries')) return { queued: true, deliveryId: 'delivery-1', reason: null } as any;
+    return { policy: policies[0] ?? policy(), replayed: false } as any;
+  });
+  mockApiFetchProviderMutation.mockImplementation(async (url) => {
+    if (url.includes('/autonomous-deliveries')) {
+      return { queued: true, deliveryId: 'delivery-1', reason: null } as any;
+    }
     return { policy: policies[0] ?? policy(), replayed: false } as any;
   });
 }
@@ -61,11 +70,11 @@ describe('AutonomousDeliverySettings', () => {
     await user.click(screen.getByRole('button', { name: 'Draft a new policy revision' }));
     await user.click(screen.getByRole('button', { name: 'Create disabled revision' }));
 
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+    await waitFor(() => expect(mockApiFetchProviderMutation).toHaveBeenCalledWith(
       '/api/workspaces/ws-1/github/delivery-policies',
       expect.objectContaining({ method: 'POST' }),
     ));
-    const createCall = mockApiFetch.mock.calls.find(([, init]) => init?.method === 'POST' && !String(init?.body).includes('ENABLE_AUTONOMOUS'))!;
+    const createCall = mockApiFetchProviderMutation.mock.calls.find(([, init]) => init?.method === 'POST' && !String(init?.body).includes('ENABLE_AUTONOMOUS'))!;
     const body = JSON.parse(String(createCall[1]?.body));
     expect(body).toMatchObject({
       allowedRiskLevels: ['low'],
@@ -85,7 +94,7 @@ describe('AutonomousDeliverySettings', () => {
 
     expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('Deployment remains separately controlled'));
     await waitFor(() => {
-      const activation = mockApiFetch.mock.calls.find(([url, init]) => url.endsWith('/policy-1/activate') && init?.method === 'POST');
+      const activation = mockApiFetchProviderMutation.mock.calls.find(([url, init]) => url.endsWith('/policy-1/activate') && init?.method === 'POST');
       expect(activation).toBeDefined();
       expect(JSON.parse(String(activation?.[1]?.body))).toEqual({
         expectedPolicyDigest: policyDigest,
@@ -102,7 +111,7 @@ describe('AutonomousDeliverySettings', () => {
     await user.type(screen.getByLabelText('Delivery evidence run ID'), '20260316000001');
     await user.click(screen.getByRole('button', { name: /Start\/recheck delivery/ }));
     await waitFor(() => {
-      const start = mockApiFetch.mock.calls.find(([url, init]) => url.endsWith('/autonomous-deliveries') && init?.method === 'POST');
+      const start = mockApiFetchProviderMutation.mock.calls.find(([url, init]) => url.endsWith('/autonomous-deliveries') && init?.method === 'POST');
       expect(start).toBeDefined();
       expect(JSON.parse(String(start?.[1]?.body))).toEqual({ runId: 20260316000001 });
       expect(start?.[1]?.headers).toMatchObject({ 'Idempotency-Key': expect.stringMatching(/^autonomous-delivery-start-/) });
@@ -119,7 +128,7 @@ describe('AutonomousDeliverySettings', () => {
     await user.click(screen.getByRole('button', { name: 'Observe' }));
 
     await waitFor(() => {
-      const observation = mockApiFetch.mock.calls.find(([url, init]) => url.endsWith('/delivery-evidence') && init?.method === 'POST');
+      const observation = mockApiFetchProviderMutation.mock.calls.find(([url, init]) => url.endsWith('/delivery-evidence') && init?.method === 'POST');
       expect(observation).toBeDefined();
       expect(JSON.parse(String(observation?.[1]?.body))).toEqual({
         runId: 20260316000001,

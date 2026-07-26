@@ -6,6 +6,7 @@
  */
 
 import { execute, query, queryOne } from '../db/index';
+import { getPgBossTableSql } from './pg-boss-schema';
 import {
   DEFAULT_CAPTURE_POLICY,
   formatRedactionDiagnostics,
@@ -279,7 +280,7 @@ const emptyQueueMetrics = (): ContextCaptureQueueMetrics => ({
   lastCompletedAt: null,
 });
 
-const BROWNFIELD_CANDIDATE_COMPATIBILITY_MIGRATION = 20260714150000;
+const BROWNFIELD_CANDIDATE_COMPATIBILITY_MIGRATION = 20260714143000;
 const BROWNFIELD_MISSING_CANDIDATE_PAYLOAD_ERROR = 'column "payload" of relation "memory_candidates" does not exist';
 
 function classifyDistillationError(message: string): string {
@@ -307,11 +308,11 @@ export async function getContextCaptureMonitoring(workspaceId: string, windowHou
     }>(
       `WITH relevant_jobs AS (
          SELECT id, name, state::text, data, retry_count, created_on, completed_on, completed_on AS terminal_at
-           FROM pgboss.job
+           FROM ${getPgBossTableSql('job')}
           WHERE name IN ('context:capture', 'context:distill')
          UNION ALL
          SELECT id, name, state::text, data, retry_count, created_on, completed_on, COALESCE(completed_on, archived_on) AS terminal_at
-           FROM pgboss.archive
+           FROM ${getPgBossTableSql('archive')}
           WHERE name IN ('context:capture', 'context:distill')
             AND archived_on >= NOW() - ($2::int * INTERVAL '1 hour')
        )
@@ -342,11 +343,11 @@ export async function getContextCaptureMonitoring(workspaceId: string, windowHou
     const failureRows = await query<{ id: string; name: 'context:capture' | 'context:distill'; failed_at: string | null; retry_count: number }>(
       `WITH failed_jobs AS (
          SELECT id, name, state::text, data, retry_count, COALESCE(completed_on, created_on) AS failed_at
-           FROM pgboss.job
+           FROM ${getPgBossTableSql('job')}
           WHERE name IN ('context:capture', 'context:distill') AND state = 'failed'
          UNION ALL
          SELECT id, name, state::text, data, retry_count, COALESCE(completed_on, archived_on) AS failed_at
-           FROM pgboss.archive
+           FROM ${getPgBossTableSql('archive')}
           WHERE name IN ('context:capture', 'context:distill')
             AND state = 'failed'
             AND archived_on >= NOW() - ($2::int * INTERVAL '1 hour')
@@ -403,7 +404,7 @@ export async function getContextCaptureMonitoring(workspaceId: string, windowHou
                 FROM information_schema.columns
                WHERE table_schema = 'rorca'
                  AND table_name = 'memory_candidates'
-                 AND column_name = 'dedupe_key'
+                 AND column_name = 'payload'
             )
        ), event_outcomes AS (
          SELECT ce.distillation_status, ce.distillation_attempted_at,
@@ -466,7 +467,7 @@ export async function getContextCaptureMonitoring(workspaceId: string, windowHou
                 FROM information_schema.columns
                WHERE table_schema = 'rorca'
                  AND table_name = 'memory_candidates'
-                 AND column_name = 'dedupe_key'
+                 AND column_name = 'payload'
             )
        )
        SELECT ce.id::text, ce.event_type, ce.distillation_attempted_at::text AS attempted_at, ce.distillation_error,
@@ -574,7 +575,7 @@ export async function getContextCaptureQueueDepth(workspaceId: string): Promise<
   try {
     const row = await queryOne<{ count: string }>(
       `SELECT COUNT(*)::text AS count
-         FROM pgboss.job
+         FROM ${getPgBossTableSql('job')}
         WHERE name = 'context:capture'
           AND (data->>'workspaceId' = $1 OR data->'data'->>'workspaceId' = $1)
           AND state IN ('created', 'retry', 'active')`,

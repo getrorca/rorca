@@ -176,13 +176,12 @@ Usage:
 
 Behavior:
 - prefers dispatching `/skill:rorca-forge` (or `/skill:rorca-forge-run` when both `--approve` and `--run` are requested)
-- the skill-first forge path is only used when the MCP surface exposes generation-context retrieval, deterministic authoring preflight/confirmation, canonical one-or-batch persistence, saved-spec reads, and workflow/readiness verification tools
-- Pi/skill performs the drafting, validates the versioned `lifecycleAuthoring` bundle, proposes an explicit one-versus-many plan, submits the complete draft set to deterministic preflight, and performs at most three bounded diagnostic-driven revisions
-- multi-spec or high-risk plans require a separately recorded human confirmation receipt after the user inspects exact boundaries, requirement ownership, dependency DAG, capabilities, and revisions; model output can never imply confirmation
-- accepted persistence forwards `contextUsed` + `contextSummary` plus the accepted authoring plan/preflight identity and explicit post-save policy via `policyPresetId` or effective `postSavePolicy`
-- post-persist verification is expected to read the saved spec plus workflow/readiness surfaces and classify story skill state as `present`, `pending`, `skipped:no_installed_skills`, or `failed:<retryable_reason>` rather than assuming persist success implies enrichment success
-- if that MCP forge bundle is unavailable, the extension falls back to the shared backend `/api/specs/forge` workflow as a recovery path only
-- backend/server context backfill is a repair-only fallback, not the normal creation contract and not a substitute for true caller-observed drafting context
+- the skill path uses the single `rorca_specs_forge` operation; Rorca owns context retrieval, lifecycle preflight, bounded revisions, policy selection, enrichment, and persistence
+- callers never construct low-level `plannerInput` or `authoringPreflight` payloads
+- multi-spec or high-risk plans still require the exact separate human confirmation requested by forge; model output can never imply confirmation
+- after persistence, the skill verifies the saved spec and workflow/readiness state before approval or execution
+- if MCP forge is unavailable, the extension uses the same shared backend `/api/specs/forge` workflow
+- ordinary runs use an isolated local branch, sequential autonomous output, and no push/PR/merge/deployment effects
 - this is the preferred explicit and reliable create-spec command in Pi
 
 Examples:

@@ -1109,7 +1109,10 @@ export async function backfillAll(workspaceId?: string, force?: boolean): Promis
       try {
         const dbSpecs = await query<{ spec_slug: string; content_json: string }>(
           `SELECT DISTINCT ON (spec_slug) spec_slug, content_json::text as content_json
-           FROM spec_versions ORDER BY spec_slug, version DESC`
+           FROM spec_versions
+           WHERE workspace_id = $1
+           ORDER BY spec_slug, version DESC`,
+          [ws.id],
         );
         for (const row of dbSpecs) {
           if (seenSpecSlugs.has(row.spec_slug)) continue; // Already processed from disk

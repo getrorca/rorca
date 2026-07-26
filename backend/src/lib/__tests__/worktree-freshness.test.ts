@@ -110,6 +110,33 @@ describe('validateReusableWorktree', () => {
     expect(safelyRefreshReusableWorktree({ workspacePath: repoDir, worktreePath: worktreeDir }).status).toBe('operator_action_required');
   });
 
+  test('permits only deterministic Rorca runtime projections created before worker preflight', () => {
+    fs.mkdirSync(path.join(worktreeDir, '.rorca', 'runtime'), { recursive: true });
+    fs.mkdirSync(path.join(worktreeDir, '.rorca', 'run-specs'), { recursive: true });
+    fs.writeFileSync(path.join(worktreeDir, '.rorca', 'runtime', 'run-543-story-execution-manifests.json'), '[]\n');
+    fs.writeFileSync(path.join(worktreeDir, '.rorca', 'run-specs', 'run-543.json'), '{}\n');
+
+    const generated = validateReusableWorktree({
+      workspacePath: repoDir,
+      worktreePath: worktreeDir,
+      expectedBranchName: 'feat/test-branch',
+      allowRorcaRuntimeMetadata: true,
+    });
+    expect(generated.ok).toBe(true);
+    expect(generated.classification).toBe('dirty_expected_work');
+
+    fs.writeFileSync(path.join(worktreeDir, '.rorca', 'runtime', 'operator-notes.json'), '{}\n');
+    const arbitraryRuntimeFile = validateReusableWorktree({
+      workspacePath: repoDir,
+      worktreePath: worktreeDir,
+      expectedBranchName: 'feat/test-branch',
+      allowRorcaRuntimeMetadata: true,
+    });
+    expect(arbitraryRuntimeFile.ok).toBe(false);
+    expect(arbitraryRuntimeFile.reason).toBe('dirty_worktree');
+    expect(arbitraryRuntimeFile.detail).toContain('.rorca/runtime/operator-notes.json');
+  });
+
   test('classifies refresh conflict risk and leaves commits intact', () => {
     fs.writeFileSync(path.join(worktreeDir, 'README.md'), 'story change\n');
     git(worktreeDir, 'git add README.md');

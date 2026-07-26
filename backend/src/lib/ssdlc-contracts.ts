@@ -16,6 +16,7 @@
 
 import crypto from 'node:crypto';
 import { z } from 'zod';
+import { GitShaSchema } from './git-sha';
 
 export const SSDLC_SCHEMA_VERSION = 1 as const;
 export const schemaVersion = SSDLC_SCHEMA_VERSION;
@@ -430,10 +431,7 @@ export type PhaseDisposition = z.infer<typeof PhaseDispositionSchema>;
 
 export const ReleaseSubjectSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('spec_hash'), value: Sha256Schema }).strict(),
-  z.object({
-    type: z.literal('commit_sha'),
-    value: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/, 'Commit SHA must be 40 or 64 lowercase hex characters'),
-  }).strict(),
+  z.object({ type: z.literal('commit_sha'), value: GitShaSchema }).strict(),
   z.object({ type: z.literal('artifact_digest'), value: Sha256Schema }).strict(),
   z.object({ type: z.literal('deployment_id'), value: StableIdSchema }).strict(),
 ]);

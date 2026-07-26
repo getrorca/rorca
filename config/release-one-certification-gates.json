@@ -1,0 +1,335 @@
+{
+  "schemaVersion": "rorca.release-one-certification-gates.v1",
+  "profileId": "release-1-supervised-core",
+  "roadmapAuthority": "Linear ROR-21",
+  "publicationBoundary": "No gate may push, publish, create a provider object, merge, deploy, install an App, activate ingress, or mutate protected checkouts.",
+  "phases": {
+    "gate0": {
+      "description": "Dirty-tree pre-commit certification of the complete candidate content.",
+      "requireCleanRepositories": false,
+      "gateIds": [
+        "capability-profile-regenerate",
+        "release-profile-contracts",
+        "rorca-supervised-disabled-profile",
+        "hermes-supervised-profile",
+        "rorca-static-contracts",
+        "hermes-static-contracts",
+        "migration-real-postgres",
+        "hermes-build",
+        "rorca-build",
+        "live-built-pair",
+        "pair-diff-audit"
+      ]
+    },
+    "gate1": {
+      "description": "Clean exact-SHA certification of the committed Rorca/Hermes pair.",
+      "requireCleanRepositories": true,
+      "gateIds": [
+        "capability-profile-regenerate",
+        "release-profile-contracts",
+        "rorca-supervised-disabled-profile",
+        "hermes-supervised-profile",
+        "rorca-static-contracts",
+        "hermes-static-contracts",
+        "migration-real-postgres",
+        "real-pgboss-runtime",
+        "sandbox-egress-containment",
+        "real-platform-boundaries",
+        "hermes-build",
+        "rorca-build",
+        "live-built-pair",
+        "release-image-build",
+        "classified-broad-harness",
+        "pair-diff-audit"
+      ]
+    }
+  },
+  "gates": [
+    {
+      "id": "capability-profile-regenerate",
+      "repo": "rorca",
+      "description": "Regenerate the evidence-bound Release-1 failure map and require a byte-identical checked-in result.",
+      "steps": [
+        {
+          "command": "{node}",
+          "args": ["scripts/generate-release-one-f2-classification.mjs", "{historicalBroadJson}", "{outputDir}/release-1-f2-broad-classification.generated.json"]
+        },
+        {
+          "command": "cmp",
+          "args": ["-s", "docs/release-certification/release-1-f2-broad-classification.json", "{outputDir}/release-1-f2-broad-classification.generated.json"]
+        }
+      ],
+      "artifacts": ["{outputDir}/release-1-f2-broad-classification.generated.json"],
+      "timeoutMs": 120000
+    },
+    {
+      "id": "release-profile-contracts",
+      "repo": "rorca",
+      "description": "Prove immutable capability data, every exclusion, scheduler denial, harness authority, and production resolver behavior.",
+      "command": "backend/node_modules/.bin/tsx",
+      "args": [
+        "--test",
+        "backend/src/lib/__tests__/release-one-capability-profile.node.test.ts",
+        "backend/src/lib/__tests__/release-one-capability-gates.node.test.ts",
+        "backend/src/lib/__tests__/release-one-scheduler-gate.node.test.ts",
+        "backend/src/lib/__tests__/test-harness-authority.node.test.ts",
+        "scripts/__tests__/build-cli.test.mjs",
+        "scripts/__tests__/check-opencore-export.test.mjs",
+        "backend/src/db/__tests__/runtime-migration-resolution.node.test.ts",
+        "backend/src/lib/__tests__/pg-boss-configured-schema.node.test.ts",
+        "backend/src/__tests__/golden-terminal-contract.node.test.ts",
+        "backend/src/lib/__tests__/graph-runtime-identity.node.test.ts",
+        "backend/src/lib/__tests__/real-terminal-certification.node.test.ts",
+        "scripts/__tests__/release-one-certification.test.mjs",
+        "scripts/__tests__/real-platform-boundaries.test.mjs"
+      ],
+      "timeoutMs": 180000
+    },
+    {
+      "id": "rorca-supervised-disabled-profile",
+      "repo": "rorca-backend",
+      "description": "Run the union of all 17 supervised-core and 12 disabled-capability suites from the deterministic F2 map.",
+      "requiresDb": true,
+      "command": "{node}",
+      "args": [
+        "--max-old-space-size=8192",
+        "node_modules/jest/bin/jest.js",
+        "src/__tests__/CLI-019-pi-rpc-retry-context.test.ts",
+        "src/__tests__/golden-terminal-parity.test.ts",
+        "src/__tests__/opencode-integration.test.ts",
+        "src/__tests__/QRW-010-pipeline-trigger-workflow-config.test.ts",
+        "src/db/__tests__/autonomous-delivery-governance-migration.test.ts",
+        "src/db/__tests__/autonomous-reviewed-delivery-migration.test.ts",
+        "src/lib/__tests__/context-distillation.test.ts",
+        "src/lib/__tests__/execution-engine-closeout.test.ts",
+        "src/lib/__tests__/execution-environment-registry.test.ts",
+        "src/lib/__tests__/main-reconciliation-collision.test.ts",
+        "src/lib/__tests__/pi-parity.test.ts",
+        "src/lib/__tests__/plan-gate-default-deny.test.ts",
+        "src/lib/__tests__/release-reconciler-state-transitions.test.ts",
+        "src/lib/__tests__/release-restart-reconciliation.test.ts",
+        "src/lib/__tests__/ssdlc-pass-reconciler.test.ts",
+        "src/lib/__tests__/wave-integration-store.test.ts",
+        "src/routes/__tests__/auto-merge-pipeline.test.ts",
+        "src/routes/__tests__/execution-environments.test.ts",
+        "src/routes/__tests__/retry-merge.test.ts",
+        "src/routes/__tests__/security-audit.test.ts",
+        "src/routes/__tests__/team-rls.test.ts",
+        "src/routes/__tests__/worktrees.test.ts",
+        "--runInBand",
+        "--no-cache",
+        "--detectOpenHandles"
+      ],
+      "timeoutMs": 1800000
+    },
+    {
+      "id": "hermes-supervised-profile",
+      "repo": "hermes",
+      "description": "Run the scoped supervisory, provider-human, TaskManifest, replay, lifecycle, authoring, scheduler, and repair profile.",
+      "command": "{node}",
+      "args": [
+        "--import", "tsx", "--test",
+        "tests/task-manifest-contract.test.ts",
+        "tests/task-manifest.test.ts",
+        "tests/rorca-client.test.ts",
+        "tests/production-completion-contracts.test.ts",
+        "tests/lifecycle-decision-chatops.test.ts",
+        "tests/rorca-spec-authoring.test.ts",
+        "tests/chatops-golden-scenarios.test.ts",
+        "tests/ambient-scheduler.test.ts",
+        "tests/repair-dispatcher.test.ts",
+        "tests/conversation.test.ts"
+      ],
+      "timeoutMs": 600000
+    },
+    {
+      "id": "rorca-static-contracts",
+      "repo": "rorca",
+      "description": "Run type, lint, OpenAPI, MCP, public-contract, license, and OpenCore boundaries.",
+      "requiresDb": true,
+      "steps": [
+        { "command": "npm", "args": ["run", "typecheck"] },
+        { "command": "npm", "args": ["run", "lint"] },
+        { "command": "npm", "args": ["--prefix", "backend", "run", "lint"] },
+        { "command": "npm", "args": ["run", "lint:swagger"] },
+        { "command": "npm", "args": ["run", "lint:tier"] },
+        { "command": "npm", "args": ["run", "build:contract"] },
+        { "command": "npm", "args": ["run", "check:contract"] },
+        { "command": "npm", "args": ["run", "check:licenses"] },
+        { "command": "npm", "args": ["run", "check:license-boundaries"] },
+        { "command": "npm", "args": ["run", "split:check", "--", "--candidate", "--report-review-boundary"] },
+        {
+          "command": "{node}",
+          "cwd": "rorca-backend",
+          "args": [
+            "--max-old-space-size=4096", "node_modules/jest/bin/jest.js",
+            "src/__tests__/mcp-aegis.test.ts",
+            "src/__tests__/mcp-oauth-disabled.test.ts",
+            "src/routes/__tests__/mcp-tools.test.ts",
+            "src/lib/__tests__/github-openapi-mcp-contract.test.ts",
+            "--runInBand", "--no-cache", "--detectOpenHandles"
+          ]
+        }
+      ],
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "hermes-static-contracts",
+      "repo": "hermes",
+      "description": "Run Hermes type and lint gates.",
+      "steps": [
+        { "command": "npm", "args": ["run", "typecheck"] },
+        { "command": "npm", "args": ["run", "lint"] }
+      ],
+      "timeoutMs": 300000
+    },
+    {
+      "id": "migration-real-postgres",
+      "repo": "rorca-backend",
+      "description": "Run migration contract, repeat/idempotence, canonical lock/session, and current authority migrations against authorized PostgreSQL.",
+      "requiresDb": true,
+      "env": { "RORCA_RUN_DESTRUCTIVE_MIGRATION_CERT": "1" },
+      "command": "{node}",
+      "args": [
+        "--max-old-space-size=4096", "node_modules/jest/bin/jest.js",
+        "src/db/__tests__/pg-migrations-contract.test.ts",
+        "src/db/__tests__/pg-migration-age-lock-recovery.test.ts",
+        "src/db/__tests__/context-event-contract-migration.test.ts",
+        "src/db/__tests__/autonomous-delivery-governance-migration.test.ts",
+        "src/db/__tests__/autonomous-reviewed-delivery-migration.test.ts",
+        "src/lib/__tests__/dispatch-publication-recovery.test.ts",
+        "src/__tests__/workflow-configs-migration.test.ts",
+        "--runInBand", "--no-cache", "--detectOpenHandles"
+      ],
+      "timeoutMs": 600000
+    },
+    {
+      "id": "real-pgboss-runtime",
+      "repo": "rorca-backend",
+      "description": "Exercise real configured pg-boss startup, cancellation, concurrency, restart, scheduling, retention, load, and zero-downtime paths.",
+      "requiresDb": true,
+      "env": { "RORCA_PGBOSS_SCHEMA": "pgboss_cert_{pairNonce}" },
+      "command": "{node}",
+      "args": [
+        "--max-old-space-size=8192", "node_modules/jest/bin/jest.js", "--config", "jest.pg-boss.config.ts",
+        "src/__tests__/pg-boss-cancel.test.ts",
+        "src/__tests__/pg-boss-concurrency.test.ts",
+        "src/__tests__/pg-boss-dlq.test.ts",
+        "src/__tests__/pg-boss-integration.test.ts",
+        "src/__tests__/pg-boss-load.test.ts",
+        "src/__tests__/pg-boss-restart.test.ts",
+        "src/__tests__/pg-boss-scheduler.test.ts",
+        "src/__tests__/pg-boss-zero-downtime.test.ts",
+        "--runInBand", "--no-cache", "--detectOpenHandles"
+      ],
+      "timeoutMs": 1800000
+    },
+    {
+      "id": "sandbox-egress-containment",
+      "repo": "rorca-backend",
+      "description": "Prove host sandbox, model egress, command, symlink, artifact, and Git inventory containment.",
+      "requiresDb": true,
+      "command": "{node}",
+      "args": [
+        "--max-old-space-size=4096", "node_modules/jest/bin/jest.js",
+        "src/lib/__tests__/api-model-launchers-sandbox.test.ts",
+        "src/lib/__tests__/autonomous-command-guard.test.ts",
+        "src/lib/__tests__/autonomous-model-egress.test.ts",
+        "src/lib/__tests__/autonomous-sandbox-boundary-static.test.ts",
+        "src/lib/__tests__/autonomous-sandbox.test.ts",
+        "src/lib/__tests__/task-manifest-artifact-containment.test.ts",
+        "src/lib/__tests__/task-manifest-git-scope.test.ts",
+        "--runInBand", "--no-cache", "--detectOpenHandles"
+      ],
+      "timeoutMs": 900000
+    },
+    {
+      "id": "real-platform-boundaries",
+      "repo": "rorca",
+      "description": "Require one exact-source disposable Linux artifact with actual non-skipped bwrap, PG16+AGE/Cypher, Pi, and OpenCode evidence plus broker and teardown bindings.",
+      "command": "{node}",
+      "args": [
+        "scripts/verify-real-platform-boundaries.mjs",
+        "--manifest", "{realPlatformBoundariesManifest}",
+        "--rorca-root", "{rorcaRoot}",
+        "--output", "{outputDir}/real-platform-boundaries.verified.json"
+      ],
+      "artifacts": ["{outputDir}/real-platform-boundaries.verified.json"],
+      "timeoutMs": 120000
+    },
+    {
+      "id": "hermes-build",
+      "repo": "hermes",
+      "description": "Build exact Hermes runtime artifacts consumed by the cross-service gate.",
+      "command": "npm",
+      "args": ["run", "build"],
+      "artifacts": ["{hermesRoot}/dist/src/clients/rorca.js", "{hermesRoot}/dist/src/runtime/task-manifest.js"],
+      "timeoutMs": 300000
+    },
+    {
+      "id": "rorca-build",
+      "repo": "rorca",
+      "description": "Build exact frontend, backend, CLI, Pi-extension contract, and capture artifacts.",
+      "command": "npm",
+      "args": ["run", "build"],
+      "artifacts": ["{rorcaRoot}/dist", "{rorcaRoot}/backend/dist", "{rorcaRoot}/packages/rorca-capture/dist"],
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "live-built-pair",
+      "repo": "rorca-backend",
+      "description": "Run built Hermes through real HTTP, authorized PostgreSQL, configured pg-boss, worker, isolated Git worktree, and trusted child closeout.",
+      "requiresDb": true,
+      "env": {
+        "RORCA_RUN_LIVE_CROSS_CERT": "1",
+        "HERMES_CERT_CLIENT_PATH": "{hermesRoot}/dist/src/clients/rorca.js",
+        "HERMES_CERT_MANIFEST_PATH": "{hermesRoot}/dist/src/runtime/task-manifest.js"
+      },
+      "command": "{node}",
+      "args": [
+        "--experimental-vm-modules", "--max-old-space-size=4096", "node_modules/jest/bin/jest.js",
+        "src/routes/__tests__/live-hermes-task-manifest-worker.cert.test.ts",
+        "--runInBand", "--no-cache", "--detectOpenHandles"
+      ],
+      "timeoutMs": 600000
+    },
+    {
+      "id": "release-image-build",
+      "repo": "rorca",
+      "description": "Build the exact local release image without push, publication, or deployment.",
+      "command": "docker",
+      "args": [
+        "build", "--pull=false",
+        "--iidfile", "{outputDir}/rorca-release-one-image.iid",
+        "--tag", "rorca-release-one-cert:{pairNonce}",
+        "{rorcaRoot}"
+      ],
+      "artifacts": ["{outputDir}/rorca-release-one-image.iid"],
+      "timeoutMs": 1800000
+    },
+    {
+      "id": "classified-broad-harness",
+      "repo": "rorca",
+      "description": "Run the complete candidate-current Jest corpus and write a machine classification for every failure or skip.",
+      "requiresDb": true,
+      "command": "{node}",
+      "args": [
+        "scripts/run-release-one-broad-certification.mjs",
+        "--output", "{outputDir}/broad",
+        "--baseline", "docs/release-certification/release-1-f2-broad-classification.json"
+      ],
+      "artifacts": [
+        "{outputDir}/broad/jest-results.json",
+        "{outputDir}/broad/classification.json"
+      ],
+      "timeoutMs": 10800000
+    },
+    {
+      "id": "pair-diff-audit",
+      "repo": "pair",
+      "description": "Require both repository contents to remain byte-bound and pass staged/unstaged diff checks after all gates.",
+      "builtin": "pair-diff-audit",
+      "timeoutMs": 120000
+    }
+  ]
+}

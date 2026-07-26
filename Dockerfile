@@ -44,9 +44,12 @@ ARG OPENCODE_NPM_PACKAGE=opencode-ai@1.17.10
 ARG PI_NPM_PACKAGE=@earendil-works/pi-coding-agent@0.80.6
 RUN apk add --no-cache \
     bash \
+    bubblewrap \
     git \
+    github-cli \
     openssh-client \
     postgresql16-client \
+    python3 \
     ripgrep \
   && if [ "$INSTALL_AGENT_CLIS" = "true" ]; then \
     npm install -g \
@@ -82,6 +85,12 @@ COPY --from=build /app/backend/src/db/pg-migrations ./backend/src/db/pg-migratio
 COPY cli.js package.json ./
 
 ENV NODE_ENV=production
+# Every autonomous/model-controlled subprocess must cross the worker's verified
+# PID/mount/user/network namespace boundary. Runtime preflight fails closed when
+# the host kernel/container policy does not permit bubblewrap isolation.
+ENV RORCA_AUTONOMOUS_ISOLATION=linux-bwrap
+ENV RORCA_BWRAP_BIN=/usr/bin/bwrap
+ENV RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS=api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com
 ENV RORCA_SERVE_STATIC=1
 ENV RORCA_STATIC_DIR=/app/dist
 EXPOSE 3030

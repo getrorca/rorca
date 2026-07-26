@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
@@ -9,25 +9,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const migrationPath = path.resolve(__dirname, '../pg-migrations/050_knowledge_graph.sql');
+const runnerPath = path.resolve(__dirname, '../pg-index.ts');
 
-describe('PostgreSQL 16 AGE fresh-install migration', () => {
+describe('PostgreSQL 16 AGE graph migration contract', () => {
   const sql = fs.readFileSync(migrationPath, 'utf8');
+  const runner = fs.readFileSync(runnerPath, 'utf8');
 
-  test('transactionally bridges the application schema and AGE graph namespace collision', () => {
-    expect(sql).toContain('ALTER SCHEMA rorca RENAME TO rorca_pre_age_050');
-    expect(sql).toContain("PERFORM create_graph('rorca')");
-    expect(sql).toContain('ALTER TABLE %I.%I SET SCHEMA rorca');
-    expect(sql).toContain('DROP SCHEMA rorca_pre_age_050');
+  test('keeps migration 050 capability-only and never creates the obsolete application-schema graph', () => {
+    expect(sql).toContain('CREATE EXTENSION IF NOT EXISTS age');
+    expect(sql).toContain('`rorca_v2` graph');
+    expect(sql).not.toMatch(/create_graph\s*\(\s*'rorca'/i);
+    expect(sql).not.toContain('ALTER SCHEMA rorca');
+    expect(sql).not.toContain('rorca_pre_age_050');
   });
 
-  test('relocates extension-owned objects before removing the bridge schema', () => {
-    expect(sql).toContain('ALTER EXTENSION pgcrypto SET SCHEMA public');
-    expect(sql).toContain('ALTER EXTENSION vector SET SCHEMA public');
-    expect(sql).toContain('ALTER FUNCTION %I.%I(%s) SET SCHEMA rorca');
+  test('runs the canonical bootstrap after the migration loop even when version 050 was already recorded', () => {
+    expect(runner).toContain("import { bootstrapRorcaV2GraphForLifecycle } from '../lib/graph-contract'");
+    expect(runner).toMatch(/for \(const file of files\)[\s\S]+bootstrapRorcaV2GraphForLifecycle\(pool\)/);
+    expect(runner).toContain('[graph bootstrap: rorca_v2]');
+    expect(runner).not.toMatch(/create_graph\s*\(\s*['"]rorca['"]/i);
   });
 
-  test('remains idempotent for databases with the canonical graph already registered', () => {
-    expect(sql).toMatch(/IF NOT EXISTS \(\s*SELECT 1 FROM ag_catalog\.ag_graph WHERE name = 'rorca'/);
-    expect(sql).toContain("IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'rorca')");
+  test('retains Graph Lite as the explicit compatibility behavior when AGE cannot be used', () => {
+    expect(runner).toContain('[skipped: extension unavailable]');
+    expect(runner).toContain('Graph Lite active: rorca_v2 bootstrap');
   });
 });

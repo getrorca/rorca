@@ -28,6 +28,14 @@ const router = Router();
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+function parseProposalId(value: unknown): number {
+  const proposalId = typeof value === 'string' ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(proposalId) || proposalId <= 0) {
+    throw new ValidationError('Proposal id must be a positive integer');
+  }
+  return proposalId;
+}
+
 interface WorkspaceRow {
   id: string;
   label: string;
@@ -50,6 +58,8 @@ interface ProposalRow {
  * @swagger
  * /api/conventions/drift/{workspaceId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Get latest convention drift report
  *     description: Returns the most recent drift report for this workspace. Currently a stub — convention drift detection is not yet implemented.
@@ -74,6 +84,8 @@ router.get('/drift/:workspaceId', (_req: Request, res: Response) => {
  * @swagger
  * /api/conventions/discover:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Discover conventions from workspace codebase
  *     description: Spawns an analysis agent that reads config files, source code, and existing context files to produce convention artifacts staged for human review.
@@ -161,6 +173,8 @@ router.post('/discover', async (req: Request, res: Response) => {
  * @swagger
  * /api/conventions/proposals/{workspaceId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: List convention proposals for a workspace
  *     parameters:
@@ -212,6 +226,8 @@ router.get('/proposals/:workspaceId', async (req: Request, res: Response) => {
  * @swagger
  * /api/conventions/proposals/{workspaceId}/{id}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Get a single convention proposal
  *     parameters:
@@ -231,10 +247,11 @@ router.get('/proposals/:workspaceId', async (req: Request, res: Response) => {
  */
 router.get('/proposals/:workspaceId/:id', async (req: Request, res: Response) => {
   const { workspaceId, id } = req.params;
+  const proposalId = parseProposalId(id);
 
   const row = await queryOne<ProposalRow>(
     'SELECT * FROM convention_proposals WHERE id = $1 AND workspace_id = $2',
-    [Number(id), workspaceId],
+    [proposalId, workspaceId],
   );
 
   if (!row) {
@@ -259,6 +276,8 @@ router.get('/proposals/:workspaceId/:id', async (req: Request, res: Response) =>
  * @swagger
  * /api/conventions/proposals/{id}/approve:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Approve and apply a convention proposal
  *     description: Applies L3 direction layer, writes AGENTS.md, and creates skill files in .rorca/skills/
@@ -276,11 +295,11 @@ router.get('/proposals/:workspaceId/:id', async (req: Request, res: Response) =>
  *         description: Proposal already resolved
  */
 router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
-  const { id } = req.params;
+  const proposalId = parseProposalId(req.params.id);
 
   const row = await queryOne<ProposalRow>(
     'SELECT * FROM convention_proposals WHERE id = $1',
-    [Number(id)],
+    [proposalId],
   );
 
   if (!row) {
@@ -357,7 +376,7 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
   // Mark approved
   await execute(
     `UPDATE convention_proposals SET status = 'approved', resolved_at = NOW() WHERE id = $1`,
-    [Number(id)],
+    [proposalId],
   );
 
   // WAL event
@@ -375,6 +394,8 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
  * @swagger
  * /api/conventions/proposals/{id}/reject:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Conventions]
  *     summary: Reject a convention proposal
  *     parameters:
@@ -400,12 +421,12 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
  *         description: Proposal already resolved
  */
 router.post('/proposals/:id/reject', async (req: Request, res: Response) => {
-  const { id } = req.params;
+  const proposalId = parseProposalId(req.params.id);
   const { reason } = req.body || {};
 
   const row = await queryOne<ProposalRow>(
     'SELECT * FROM convention_proposals WHERE id = $1',
-    [Number(id)],
+    [proposalId],
   );
 
   if (!row) {
@@ -420,7 +441,7 @@ router.post('/proposals/:id/reject', async (req: Request, res: Response) => {
 
   await execute(
     `UPDATE convention_proposals SET status = 'rejected', reject_reason = $1, resolved_at = NOW() WHERE id = $2`,
-    [reason || null, Number(id)],
+    [reason || null, proposalId],
   );
 
   // WAL event

@@ -24,6 +24,8 @@
 
 import PgBoss from 'pg-boss';
 import { logger } from './logger';
+import { getPgBossSchemaName } from './pg-boss-schema';
+export { getPgBossSchemaName, getPgBossSchemaSql, getPgBossTableSql } from './pg-boss-schema';
 
 let bossInstance: PgBoss | null = null;
 let bossInitPromise: Promise<void> | null = null;
@@ -50,10 +52,12 @@ export async function initBoss(): Promise<void> {
       throw new Error('[pg-boss] DATABASE_URL is not set — cannot initialise pg-boss');
     }
 
+    const configuredSchema = getPgBossSchemaName();
     const boss = new PgBoss({
       connectionString,
-      // Keep pg-boss internal tables in their own schema (pgboss.*)
-      schema: 'pgboss',
+      // pg-boss alone creates/migrates this schema. The override exists for
+      // isolated real-runtime certification and parallel service instances.
+      schema: configuredSchema,
       // Data retention and archiving settings (US-001)
       // - Move completed jobs from pgboss.job → pgboss.archive after 1 hour
       archiveCompletedAfterSeconds: 3600,
@@ -112,10 +116,13 @@ export async function ensureQueues(boss: PgBoss): Promise<void> {
   await boss.createQueue('workspace:hydrate');
   await boss.createQueue('context:capture');
   await boss.createQueue('context:distill');
+  // pg-boss v10+ requires scheduled queue names to exist before schedule().
+  await boss.createQueue('queue-snapshot-prune');
+  await boss.createQueue('integration:health-check');
   await boss.createQueue('spec:match-skills');
   await boss.createQueue('spec:memory-synthesis');
   await boss.createQueue('spec:suggest-skills');
-  logger.debug('[pg-boss] ensureQueues — pipeline, reviewed PR delivery, context capture/distillation, and spec job queues created');
+  logger.debug('[pg-boss] ensureQueues — pipeline, reviewed PR delivery, maintenance, context capture/distillation, and spec job queues created');
 }
 
 /**

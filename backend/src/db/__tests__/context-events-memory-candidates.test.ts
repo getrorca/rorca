@@ -18,7 +18,7 @@
  */
 
 import { Pool } from 'pg';
-import { getTestPool, closeTestPool, truncateAll } from '../../__tests__/helpers/pg-test-utils';
+import { getTestPool, closeTestPool } from '../../__tests__/helpers/pg-test-utils';
 
 let pool: Pool;
 
@@ -26,14 +26,22 @@ beforeAll(() => {
   pool = getTestPool();
 });
 
+async function cleanOwnedFixtures(): Promise<void> {
+  await pool.query("DELETE FROM memory_candidates WHERE workspace_id = 'ws-ci'");
+  await pool.query("DELETE FROM context_events WHERE workspace_id = 'ws-ci'");
+  await pool.query("DELETE FROM memories WHERE workspace_id = 'ws-ci'");
+  await pool.query("DELETE FROM workspaces WHERE id = 'ws-ci'");
+}
+
 afterAll(async () => {
+  await cleanOwnedFixtures();
   await closeTestPool();
 });
 
 beforeEach(async () => {
-  await truncateAll(pool);
+  await cleanOwnedFixtures();
   await pool.query(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-ci', 'CI', '/tmp/ws-ci') ON CONFLICT (id) DO NOTHING"
+    "INSERT INTO workspaces (id, label, path) VALUES ('ws-ci', 'CI', '/tmp/ws-ci')"
   );
 });
 
@@ -111,7 +119,7 @@ describe('memory_candidates', () => {
     }
   });
 
-  test('defaults a fresh candidate to pending / unverified / medium', async () => {
+  test('defaults a fresh candidate to pending / agent observation / low confidence', async () => {
     const { rows } = await pool.query(
       `INSERT INTO memory_candidates (workspace_id, source_system, category, title, rule, idempotency_key)
        VALUES ('ws-ci', 'git', 'Pattern', 'T', 'do it', 'mc-def')
@@ -119,8 +127,8 @@ describe('memory_candidates', () => {
     );
     expect(rows[0]).toMatchObject({
       review_status: 'pending',
-      trust_tier: 'unverified',
-      confidence: 'medium',
+      trust_tier: 'agent_observation',
+      confidence: 'low',
     });
   });
 

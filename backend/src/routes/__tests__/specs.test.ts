@@ -8,12 +8,13 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
+import type { Server } from 'http';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 import { updateJobStatus } from '../../db/spec-jobs';
-import { advancePersistPostSaveDependencies, syncPersistPostSaveStageFromJob } from '../../lib/spec-post-save';
+import { advanceSpecPostSaveWorkflowDependencies } from '../../lib/spec-post-save-workflow';
+import * as runSpecSnapshot from '../../lib/run-spec-snapshot';
 import { SpecReadinessReasonCode } from '../../reason-codes';
 import { adaptCanonicalStoriesToAuthoringDraft } from '../../lib/ssdlc-forge-authoring';
 import { planAuthoring } from '../../lib/ssdlc-authoring-planner';
@@ -22,6 +23,27 @@ import { planAuthoring } from '../../lib/ssdlc-authoring-planner';
 function parsePayload(p: unknown): Record<string, unknown> {
   if (typeof p === 'string') return JSON.parse(p);
   return p as Record<string, unknown>;
+}
+
+async function loadWorkflowStages(specId: string): Promise<Array<{
+  stage_key: string;
+  requested: boolean;
+  status: string;
+  reason: string;
+  boss_job_id: string | null;
+  error_message: string | null;
+}>> {
+  return query(
+    `SELECT stage.stage_key, stage.requested, stage.status, stage.reason,
+            stage.boss_job_id, stage.error_message
+       FROM spec_post_save_workflow_stages stage
+       JOIN spec_post_save_workflow_runs run ON run.id = stage.run_id
+      WHERE run.workspace_id = 'ws-test' AND run.spec_id = $1
+      ORDER BY CASE stage.stage_key
+        WHEN 'context' THEN 1 WHEN 'enrich' THEN 2
+        WHEN 'matchSkills' THEN 3 WHEN 'memorySynthesis' THEN 4 END`,
+    [specId],
+  );
 }
 
 // Mock llm-client before any imports that use it
@@ -53,13 +75,15 @@ jest.mock('../../lib/pg-boss', () => {
   };
 });
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let mockDraftSpecWithPi: jest.Mock;
 let mockDraftSpecWithCodex: jest.Mock;
 let mockBossSend: jest.Mock;
 let authToken: string;
+let suiteTempRoot: string;
+let originalTmpDirEnv: string | undefined;
 
 const validLlmResponse = JSON.stringify({
   stories: [
@@ -90,8 +114,15 @@ const validLlmResponse = JSON.stringify({
 // plus TRUNCATE deadlocks between module-0 cleanup queries and module-N migrations.
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
+  originalTmpDirEnv = process.env.TMPDIR;
+  suiteTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-suite-'));
+  process.env.TMPDIR = suiteTempRoot;
   const serverMod = require('../../server');
-  app = serverMod.default;
+  app = serverMod.default.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    app.once('listening', resolve);
+    app.once('error', reject);
+  });
   const llmClient = require('../../lib/llm-client');
   const piDrafter = require('../../lib/pi-spec-drafter');
   const codexDrafter = require('../../lib/codex-spec-drafter');
@@ -100,6 +131,15 @@ beforeAll(async () => {
   mockDraftSpecWithPi = piDrafter.draftSpecWithPi;
   mockDraftSpecWithCodex = codexDrafter.draftSpecWithCodex;
   mockBossSend = pgBoss.getBoss().send;
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  if (originalTmpDirEnv === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTmpDirEnv;
+  fs.rmSync(suiteTempRoot, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 beforeEach(async () => {
@@ -112,32 +152,66 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-test-'));
 
-  // Clean up any stale spec files from prior test suites that share os.tmpdir()
+  // Clean only this suite-owned TMPDIR; never touch the process-global temp root.
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
 
-  // Clean up DB tables that accumulate between tests within the same run.
-  const tablesToClean = [
-    'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
-    'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
-    'workspace_context', 'direction_layers', 'batch_spec_generation',
-    'spec_post_save_stage_dependencies', 'spec_post_save_workflow_stages', 'spec_post_save_workflow_runs',
-    'spec_jobs',
-  ];
-  for (const t of tablesToClean) {
-    await execute(`TRUNCATE ${t} CASCADE`).catch(() => {});
+  // Delete only rows owned by this suite's reserved workspace. The certification
+  // database is shared across isolated Jest processes, so global TRUNCATE would
+  // erase unrelated append-only evidence and make suite ordering authoritative.
+  const ownedWalSpecs = await query<{ spec_id: string }>(
+    `SELECT DISTINCT spec_id
+       FROM wal_events
+      WHERE spec_id IS NOT NULL
+        AND (workspace_id = 'ws-test' OR payload ->> 'workspaceId' = 'ws-test')`,
+  );
+  const ownedSpecSlugs = [...new Set([
+    ...ownedWalSpecs.map((row) => row.spec_id),
+    'multi-ver',
+    'diff-test',
+  ])];
+  const workflowRows = await query<{ id: number; generation_log_id: number | null }>(
+    `SELECT id, generation_log_id
+       FROM spec_post_save_workflow_runs
+      WHERE workspace_id = 'ws-test'`,
+  );
+  const workflowIds = workflowRows.map((row) => row.id);
+  const generationLogIds = workflowRows
+    .map((row) => row.generation_log_id)
+    .filter((id): id is number => id !== null);
+  if (workflowIds.length > 0) {
+    await execute('DELETE FROM spec_post_save_stage_dependencies WHERE run_id = ANY($1::bigint[])', [workflowIds]);
+    await execute('DELETE FROM spec_post_save_workflow_stages WHERE run_id = ANY($1::bigint[])', [workflowIds]);
   }
+  await execute("DELETE FROM spec_jobs WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM spec_post_save_workflow_runs WHERE workspace_id = 'ws-test'");
+  if (generationLogIds.length > 0) {
+    await execute('DELETE FROM spec_generation_logs WHERE id = ANY($1::bigint[])', [generationLogIds]);
+  }
+  await execute("DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-test')");
+  await execute("DELETE FROM story_commits WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM pipeline_dispatch_publications WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM pipeline_run_cancellation_requests WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM pipeline_runs WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-test' OR payload ->> 'workspaceId' = 'ws-test'");
+  await execute(
+    "DELETE FROM spec_versions WHERE workspace_id = 'ws-test' OR (workspace_id IS NULL AND spec_slug = ANY($1::text[]))",
+    [ownedSpecSlugs],
+  );
+  await execute("DELETE FROM spec_search_index WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM workspace_context WHERE workspace_id = 'ws-test'");
+  await execute("DELETE FROM direction_layers WHERE workspace_id = 'ws-test'");
 
   // Seed a workspace for tests
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [os.tmpdir()]);
 
-  authToken = await getAuthToken(app);
+  authToken = await getAuthToken();
 });
 
 afterEach(async () => {
-  // Clean up any spec files written to os.tmpdir()
+  // Clean up only files under this suite-owned TMPDIR.
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
@@ -546,6 +620,7 @@ test('POST /api/specs/generate with existing slug snapshots old version and succ
       domain: 'backend',
       title: 'Duplicate Check',
       brief: 'Build something',
+      postSave: false,
     });
   expect(res1.status).toBe(200);
 
@@ -558,6 +633,7 @@ test('POST /api/specs/generate with existing slug snapshots old version and succ
       domain: 'backend',
       title: 'Duplicate Check',
       brief: 'Build something again',
+      postSave: false,
     });
   expect(res2.status).toBe(200);
   expect(res2.body.slug).toBe('duplicate-check');
@@ -717,7 +793,8 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
       expect.objectContaining({ priority: 1, singletonKey: 'persist-post-save:ws-test:generate-post-save' }),
     );
 
-    // Verify spec_jobs rows were created
+    // Only executable work becomes a transport job. Deferred authority lives in
+    // the application-owned workflow graph until its dependency completes.
     const jobs = await query(
       `SELECT job_type, status, boss_job_id, request_payload, error_message
        FROM spec_jobs
@@ -725,11 +802,15 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
        ORDER BY created_at ASC`,
     ) as Array<{ job_type: string; status: string; boss_job_id: string | null; request_payload: unknown; error_message: string | null }>;
 
-    expect(jobs).toHaveLength(2);
+    expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'pending', boss_job_id: 'aaa11111-1111-4111-8111-111111111111', error_message: null });
-    expect(parsePayload(jobs[0].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'enrich' });
-    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'pending', boss_job_id: null, error_message: null });
-    expect(parsePayload(jobs[1].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'matchSkills', waitForStage: 'enrich' });
+    expect(parsePayload(jobs[0].request_payload)).toMatchObject({ origin: 'persist-post-save', workflow: 'spec-post-save-v1', stage: 'enrich' });
+    expect(await loadWorkflowStages('generate-post-save')).toEqual([
+      expect.objectContaining({ stage_key: 'context', requested: true, status: 'completed', reason: 'context_captured' }),
+      expect.objectContaining({ stage_key: 'enrich', requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency', boss_job_id: 'aaa11111-1111-4111-8111-111111111111' }),
+      expect.objectContaining({ stage_key: 'matchSkills', requested: true, status: 'pending', reason: 'requested_by_policy', boss_job_id: null }),
+      expect.objectContaining({ stage_key: 'memorySynthesis', requested: true, status: 'pending', reason: 'requested_by_policy', boss_job_id: null }),
+    ]);
 
     // Verify generation log has postSaveStages in context_summary_json
     const logRes = await request(app)
@@ -740,10 +821,10 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
     expect(logRes.body.status).toBe('pending_enrichment');
     const summary = parsePayload(logRes.body.context_summary_json);
     expect(summary.postSaveStages).toBeDefined();
-    expect(summary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: 'aaa11111-1111-4111-8111-111111111111' }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'pending', reason: 'waiting_for_enrich', bossJobId: null }),
-      memorySynthesis: expect.objectContaining({ requested: true, status: 'pending', reason: 'requested_by_caller' }),
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency', bossJobId: 'aaa11111-1111-4111-8111-111111111111' },
+      matchSkills: { requested: true, status: 'pending', reason: 'requested_by_policy' },
+      memorySynthesis: { requested: true, status: 'pending', reason: 'requested_by_policy' },
     });
     expect(summary.workspaceId).toBe('ws-test');
     expect(summary.source).toBe('generate');
@@ -764,7 +845,8 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
 
     expect(res.status).toBe(200);
 
-    // Verify both jobs marked as failed in spec_jobs
+    // The failed executable job is retained while downstream denial is durable
+    // application workflow state, not a fabricated transport job.
     const jobs = await query(
       `SELECT job_type, status, boss_job_id, error_message
        FROM spec_jobs
@@ -772,11 +854,15 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
        ORDER BY created_at ASC`,
     ) as Array<{ job_type: string; status: string; boss_job_id: string | null; error_message: string | null }>;
 
-    expect(jobs).toHaveLength(2);
+    expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'failed', boss_job_id: null });
-    expect(jobs[0].error_message).toContain('boss.send() returned null for enrich');
-    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'failed', boss_job_id: null });
-    expect(jobs[1].error_message).toContain('Blocked because enrich could not be enqueued');
+    expect(jobs[0].error_message).toContain('boss.send() returned null for spec:enrich');
+    expect(await loadWorkflowStages('generate-failed-queue')).toEqual([
+      expect.objectContaining({ stage_key: 'context', status: 'completed' }),
+      expect.objectContaining({ stage_key: 'enrich', status: 'failed', reason: 'enqueue_failed', error_message: expect.stringContaining('boss.send() returned null for spec:enrich') }),
+      expect.objectContaining({ stage_key: 'matchSkills', status: 'failed', reason: 'blocked_by_required_stage_failed', error_message: 'Blocked because enrich did not complete successfully' }),
+      expect.objectContaining({ stage_key: 'memorySynthesis', status: 'failed', reason: 'blocked_by_required_stage_failed', error_message: 'Blocked because matchSkills did not complete successfully' }),
+    ]);
 
     // Verify failure is visible through generation-log API (not just logger)
     const logRes = await request(app)
@@ -786,10 +872,10 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
     expect(logRes.status).toBe(200);
     expect(logRes.body.status).toBe('failed');
     const summary = parsePayload(logRes.body.context_summary_json);
-    expect(summary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'failed', reason: 'enqueue_failed', error: expect.stringContaining('boss.send() returned null for enrich') }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'failed', reason: 'blocked_by_enrich_enqueue_failure', error: 'Blocked because enrich could not be enqueued' }),
-      memorySynthesis: expect.objectContaining({ requested: true, status: 'pending', reason: 'requested_by_caller' }),
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'failed', reason: 'enqueue_failed', error: expect.stringContaining('boss.send() returned null for spec:enrich') },
+      matchSkills: { requested: true, status: 'failed', reason: 'blocked_by_required_stage_failed', error: 'Blocked because enrich did not complete successfully' },
+      memorySynthesis: { requested: true, status: 'failed', reason: 'blocked_by_required_stage_failed', error: 'Blocked because matchSkills did not complete successfully' },
     });
   });
 
@@ -817,8 +903,7 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
     expect(enrichJob).toBeDefined();
 
     await updateJobStatus(enrichJob!.id, 'completed', { finishedAt: new Date() });
-    await syncPersistPostSaveStageFromJob(enrichJob!.id);
-    await advancePersistPostSaveDependencies(enrichJob!.id);
+    await advanceSpecPostSaveWorkflowDependencies(enrichJob!.id);
 
     // match-skills should now be enqueued
     expect(mockBossSend).toHaveBeenCalledTimes(2);
@@ -842,10 +927,10 @@ describe('POST /api/specs/generate post-save durable enqueue (PSE-002)', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     const summary = parsePayload(logRes.body.context_summary_json);
-    expect(summary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'completed', reason: 'job_completed' }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued_after_enrich', bossJobId: 'ddd44444-4444-4444-8444-444444444444' }),
-      memorySynthesis: expect.objectContaining({ requested: true, status: 'pending', reason: 'requested_by_caller' }),
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'completed', reason: 'job_completed' },
+      matchSkills: { requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency', bossJobId: 'ddd44444-4444-4444-8444-444444444444' },
+      memorySynthesis: { requested: true, status: 'pending', reason: 'requested_by_policy' },
     });
   });
 });
@@ -1237,10 +1322,10 @@ describe('POST /api/specs/persist', () => {
       contextUsed: 'provided',
       contextSummary: 'provided',
     });
-    expect(summary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: '11111111-1111-4111-8111-111111111111' }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'pending', reason: 'waiting_for_enrich', bossJobId: null }),
-      memorySynthesis: { requested: true, status: 'pending', reason: 'requested_by_caller' },
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency', bossJobId: '11111111-1111-4111-8111-111111111111' },
+      matchSkills: { requested: true, status: 'pending', reason: 'requested_by_policy' },
+      memorySynthesis: { requested: true, status: 'pending', reason: 'requested_by_policy' },
     });
     const contextUsed = summary.contextUsed as { text: string };
     const contextSummary = summary.contextSummary as {
@@ -1333,11 +1418,15 @@ describe('POST /api/specs/persist', () => {
        ORDER BY created_at ASC`,
     ) as Array<{ job_type: string; status: string; boss_job_id: string | null; request_payload: unknown; error_message: string | null }>;
 
-    expect(jobs).toHaveLength(2);
+    expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'pending', boss_job_id: '22222222-2222-4222-8222-222222222222', error_message: null });
-    expect(parsePayload(jobs[0].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'enrich' });
-    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'pending', boss_job_id: null, error_message: null });
-    expect(parsePayload(jobs[1].request_payload)).toMatchObject({ origin: 'persist-post-save', stage: 'matchSkills', waitForStage: 'enrich' });
+    expect(parsePayload(jobs[0].request_payload)).toMatchObject({ origin: 'persist-post-save', workflow: 'spec-post-save-v1', stage: 'enrich' });
+    expect(await loadWorkflowStages('queued-post-save-draft')).toEqual([
+      expect.objectContaining({ stage_key: 'context', status: 'completed' }),
+      expect.objectContaining({ stage_key: 'enrich', status: 'queued', reason: 'durable_job_enqueued_after_dependency', boss_job_id: '22222222-2222-4222-8222-222222222222' }),
+      expect.objectContaining({ stage_key: 'matchSkills', status: 'pending', reason: 'requested_by_policy', boss_job_id: null }),
+      expect.objectContaining({ stage_key: 'memorySynthesis', requested: false, status: 'skipped', reason: 'disabled_by_policy' }),
+    ]);
 
     const logRes = await request(app)
       .get('/api/specs/queued-post-save-draft/generation-log')
@@ -1346,10 +1435,10 @@ describe('POST /api/specs/persist', () => {
     expect(logRes.status).toBe(200);
     const summary = parsePayload(logRes.body.context_summary_json);
     expect(logRes.body.status).toBe('pending_enrichment');
-    expect(summary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: '22222222-2222-4222-8222-222222222222' }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'pending', reason: 'waiting_for_enrich', bossJobId: null }),
-      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency', bossJobId: '22222222-2222-4222-8222-222222222222' },
+      matchSkills: { requested: true, status: 'pending', reason: 'requested_by_policy' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
     });
 
     const enrichJob = await queryOne(
@@ -1358,8 +1447,7 @@ describe('POST /api/specs/persist', () => {
     expect(enrichJob).toBeDefined();
 
     await updateJobStatus(enrichJob!.id, 'completed', { finishedAt: new Date() });
-    await syncPersistPostSaveStageFromJob(enrichJob!.id);
-    await advancePersistPostSaveDependencies(enrichJob!.id);
+    await advanceSpecPostSaveWorkflowDependencies(enrichJob!.id);
 
     expect(mockBossSend).toHaveBeenCalledTimes(2);
     expect(mockBossSend).toHaveBeenLastCalledWith(
@@ -1382,10 +1470,10 @@ describe('POST /api/specs/persist', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     const releasedSummary = parsePayload(afterReleaseLogRes.body.context_summary_json);
-    expect(releasedSummary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'completed', reason: 'job_completed' }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued_after_enrich', bossJobId: '33333333-3333-4333-8333-333333333333' }),
-      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    expect(releasedSummary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'completed', reason: 'job_completed' },
+      matchSkills: { requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency', bossJobId: '33333333-3333-4333-8333-333333333333' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
     });
   });
 
@@ -1413,11 +1501,15 @@ describe('POST /api/specs/persist', () => {
        ORDER BY created_at ASC`,
     ) as Array<{ job_type: string; status: string; boss_job_id: string | null; error_message: string | null }>;
 
-    expect(jobs).toHaveLength(2);
+    expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ job_type: 'enrich', status: 'failed', boss_job_id: null });
-    expect(jobs[0].error_message).toContain('boss.send() returned null for enrich');
-    expect(jobs[1]).toMatchObject({ job_type: 'match-skills', status: 'failed', boss_job_id: null });
-    expect(jobs[1].error_message).toContain('Blocked because enrich could not be enqueued');
+    expect(jobs[0].error_message).toContain('boss.send() returned null for spec:enrich');
+    expect(await loadWorkflowStages('failed-queue-draft')).toEqual([
+      expect.objectContaining({ stage_key: 'context', status: 'completed' }),
+      expect.objectContaining({ stage_key: 'enrich', status: 'failed', reason: 'enqueue_failed' }),
+      expect.objectContaining({ stage_key: 'matchSkills', status: 'failed', reason: 'blocked_by_required_stage_failed' }),
+      expect.objectContaining({ stage_key: 'memorySynthesis', requested: false, status: 'skipped', reason: 'disabled_by_policy' }),
+    ]);
 
     const logRes = await request(app)
       .get('/api/specs/failed-queue-draft/generation-log')
@@ -1426,10 +1518,10 @@ describe('POST /api/specs/persist', () => {
     expect(logRes.status).toBe(200);
     expect(logRes.body.status).toBe('failed');
     const summary = parsePayload(logRes.body.context_summary_json);
-    expect(summary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'failed', reason: 'enqueue_failed', error: expect.stringContaining('boss.send() returned null for enrich') }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'failed', reason: 'blocked_by_enrich_enqueue_failure', error: 'Blocked because enrich could not be enqueued' }),
-      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'failed', reason: 'enqueue_failed', error: expect.stringContaining('boss.send() returned null for spec:enrich') },
+      matchSkills: { requested: true, status: 'failed', reason: 'blocked_by_required_stage_failed', error: 'Blocked because enrich did not complete successfully' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
     });
   });
 
@@ -1459,15 +1551,20 @@ describe('POST /api/specs/persist', () => {
       errorMessage: 'LLM provider timeout',
       finishedAt: new Date(),
     });
-    await syncPersistPostSaveStageFromJob(enrichJob!.id);
-    await advancePersistPostSaveDependencies(enrichJob!.id);
+    await advanceSpecPostSaveWorkflowDependencies(enrichJob!.id);
 
     expect(mockBossSend).toHaveBeenCalledTimes(1);
 
     const matchJob = await queryOne(
       `SELECT status, boss_job_id, error_message FROM spec_jobs WHERE workspace_id = 'ws-test' AND spec_id = 'failed-enrich-draft' AND job_type = 'match-skills'`,
     ) as { status: string; boss_job_id: string | null; error_message: string | null } | undefined;
-    expect(matchJob).toEqual({ status: 'failed', boss_job_id: null, error_message: 'LLM provider timeout' });
+    expect(matchJob).toBeUndefined();
+    expect(await loadWorkflowStages('failed-enrich-draft')).toEqual([
+      expect.objectContaining({ stage_key: 'context', status: 'completed' }),
+      expect.objectContaining({ stage_key: 'enrich', status: 'failed', reason: 'job_failed', error_message: 'LLM provider timeout' }),
+      expect.objectContaining({ stage_key: 'matchSkills', status: 'failed', reason: 'blocked_by_required_stage_failed', error_message: 'Blocked because enrich did not complete successfully' }),
+      expect.objectContaining({ stage_key: 'memorySynthesis', requested: false, status: 'skipped', reason: 'disabled_by_policy' }),
+    ]);
 
     const logRes = await request(app)
       .get('/api/specs/failed-enrich-draft/generation-log')
@@ -1476,10 +1573,10 @@ describe('POST /api/specs/persist', () => {
     expect(logRes.status).toBe(200);
     expect(logRes.body.status).toBe('failed');
     const summary = parsePayload(logRes.body.context_summary_json);
-    expect(summary.postSaveStages).toEqual({
-      enrich: expect.objectContaining({ requested: true, status: 'failed', reason: 'job_failed', error: 'LLM provider timeout' }),
-      matchSkills: expect.objectContaining({ requested: true, status: 'failed', reason: 'blocked_by_enrich_failure', error: 'LLM provider timeout' }),
-      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: true, status: 'failed', reason: 'job_failed', error: 'LLM provider timeout' },
+      matchSkills: { requested: true, status: 'failed', reason: 'blocked_by_required_stage_failed', error: 'Blocked because enrich did not complete successfully' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
     });
   });
 
@@ -1545,10 +1642,10 @@ describe('POST /api/specs/persist', () => {
       contextUsed: 'provided',
       contextSummary: 'backfilled',
     });
-    expect(summary.postSaveStages).toEqual({
-      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
-      matchSkills: expect.objectContaining({ requested: true, status: 'queued', reason: 'durable_job_enqueued', bossJobId: '11111111-1111-4111-8111-111111111111' }),
-      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_caller' },
+    expect(summary.postSaveStages).toMatchObject({
+      enrich: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
+      matchSkills: { requested: true, status: 'queued', reason: 'durable_job_enqueued_after_dependency', bossJobId: '11111111-1111-4111-8111-111111111111' },
+      memorySynthesis: { requested: false, status: 'skipped', reason: 'disabled_by_policy' },
     });
     expect(summary.contextSummary).toMatchObject({
       directionLayers: {
@@ -1627,7 +1724,7 @@ describe('POST /api/specs/persist', () => {
     expect(res.body.overwrote).toBe(true);
     expect(res.body.source).toBe('skill-first');
 
-    const version = await queryOne(`SELECT content_json, status FROM spec_versions WHERE spec_slug = 'persist-overwrite' ORDER BY version DESC LIMIT 1`) as { content_json: unknown; status: string } | undefined;
+    const version = await queryOne(`SELECT content_json, status FROM spec_versions WHERE spec_slug = 'persist-overwrite' ORDER BY version ASC LIMIT 1`) as { content_json: unknown; status: string } | undefined;
     expect(version).toBeDefined();
     expect(version?.status).toBe('pending');
     const oldContent = typeof version?.content_json === 'string' ? JSON.parse(version.content_json) : version?.content_json as Record<string, unknown>;
@@ -2291,7 +2388,8 @@ describe('POST /api/specs/:id/approve', () => {
 
     expect(event).toBeDefined();
     expect(event.spec_id).toBe('wal-approve');
-    expect(event.actor).toBe('user');
+    const approvingUser = await queryOne<{ id: string }>(`SELECT id FROM users WHERE email = 'testauth@example.com'`);
+    expect(event.actor).toBe(approvingUser?.id);
     const payload = parsePayload(event.payload);
     expect(payload.workspaceId).toBe('ws-test');
   });
@@ -2314,6 +2412,34 @@ describe('POST /api/specs/:id/approve', () => {
     expect(fs.existsSync(approvedDir)).toBe(true);
   });
 
+  test('durably publishes creation of a previously absent approved directory through its parent', async () => {
+    const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
+    const pendingDir = path.join(specsRoot, 'pending');
+    const approvedDir = path.join(specsRoot, 'approved');
+    seedSpecFile(pendingDir, 'durable-auto-mkdir');
+    await seedSpecReadinessLog('durable-auto-mkdir');
+    expect(fs.existsSync(approvedDir)).toBe(false);
+
+    const originalFsyncDirectory = runSpecSnapshot.fsyncDirectory;
+    const syncedDirectories: string[] = [];
+    const fsyncSpy = jest.spyOn(runSpecSnapshot, 'fsyncDirectory').mockImplementation((directory) => {
+      syncedDirectories.push(path.resolve(directory));
+      originalFsyncDirectory(directory);
+    });
+    try {
+      const res = await request(app)
+        .post('/api/specs/durable-auto-mkdir/approve')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ workspaceId: 'ws-test' });
+      expect(res.status).toBe(200);
+    } finally {
+      fsyncSpy.mockRestore();
+    }
+
+    expect(syncedDirectories).toContain(specsRoot);
+    expect(syncedDirectories).toContain(approvedDir);
+  });
+
   test('rejects blocked specs by default with canonical readiness details', async () => {
     const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedSpecFile(pendingDir, 'blocked-approve');
@@ -2330,7 +2456,7 @@ describe('POST /api/specs/:id/approve', () => {
     ]));
   });
 
-  test('allows readiness override and records audit WAL events', async () => {
+  test('rejects readiness override without publishing or emitting override authority', async () => {
     const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedSpecFile(pendingDir, 'blocked-approve-override');
@@ -2340,14 +2466,13 @@ describe('POST /api/specs/:id/approve', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', readinessOverride: true });
 
-    expect(res.status).toBe(200);
-    expect(fs.existsSync(path.join(approvedDir, 'blocked-approve-override.json'))).toBe(true);
+    expect(res.status).toBe(422);
+    expect(fs.existsSync(path.join(pendingDir, 'blocked-approve-override.json'))).toBe(true);
+    expect(fs.existsSync(path.join(approvedDir, 'blocked-approve-override.json'))).toBe(false);
     const event = await queryOne<{ payload: unknown }>(
       `SELECT payload FROM wal_events WHERE event_type = 'spec_readiness_override_used' AND spec_id = 'blocked-approve-override' ORDER BY id DESC LIMIT 1`,
     );
-    expect(event).toBeDefined();
-    const payload = typeof event?.payload === 'string' ? JSON.parse(event.payload) : event?.payload;
-    expect(payload).toMatchObject({ reasonCode: 'run_anyway_override_used', action: 'approve' });
+    expect(event).toBeUndefined();
   });
 
   test('spec not found → 404', async () => {
@@ -2359,13 +2484,13 @@ describe('POST /api/specs/:id/approve', () => {
     expect(res.status).toBe(404);
   });
 
-  test('missing workspaceId → 400', async () => {
+  test('missing workspaceId → 422 schema validation', async () => {
     const res = await request(app)
       .post('/api/specs/whatever/approve')
       .set('Authorization', `Bearer ${authToken}`)
       .send({});
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 });
 
@@ -2393,7 +2518,9 @@ describe('POST /api/specs/:id/reject', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', reason: 'Too many stories' });
 
-    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'spec_rejected'`) as { event_type: string; spec_id: string; actor: string; payload: string };
+    const event = await queryOne(
+      `SELECT * FROM wal_events WHERE event_type = 'spec_rejected' AND spec_id = 'wal-reject'`,
+    ) as { event_type: string; spec_id: string; actor: string; payload: string };
 
     expect(event).toBeDefined();
     expect(event.spec_id).toBe('wal-reject');
@@ -2451,7 +2578,7 @@ describe('GET /api/specs/:specId (detail)', () => {
 
 describe('GET /api/specs/:specId/versions', () => {
   test('returns empty array when no versions exist', async () => {
-    const res = await request(app).get('/api/specs/nonexistent-slug/versions').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/nonexistent-slug/versions?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     
     expect(res.body.items).toEqual([]);
@@ -2473,7 +2600,7 @@ describe('GET /api/specs/:specId/versions', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', reason: 'Needs more stories' });
 
-    const res = await request(app).get('/api/specs/versioned-spec/versions').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/versioned-spec/versions?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(1);
     expect(res.body.items[0].version).toBe(1);
@@ -2486,10 +2613,10 @@ describe('GET /api/specs/:specId/versions', () => {
 
   test('returns multiple versions in ascending order', async () => {
     // Manually insert two versions
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['multi-ver', 1, JSON.stringify({ title: 'V1', userStories: [] }), 'rejected']);
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending']);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status) VALUES ('ws-test', $1, $2, $3, $4)`, ['multi-ver', 1, JSON.stringify({ title: 'V1', userStories: [] }), 'rejected']);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status) VALUES ('ws-test', $1, $2, $3, $4)`, ['multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending']);
 
-    const res = await request(app).get('/api/specs/multi-ver/versions').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/multi-ver/versions?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(2);
     expect(res.body.items[0].version).toBe(1);
@@ -2518,12 +2645,12 @@ describe('GET /api/specs/:specId/diff', () => {
         { id: 'US-003', title: 'Password Reset', description: 'Reset flow', acceptanceCriteria: ['AC5'], dependsOn: ['US-001'] },
       ],
     };
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['diff-test', 1, JSON.stringify(v1), 'rejected']);
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES ($1, $2, $3, $4, $5)`, ['diff-test', 2, JSON.stringify(v2), 'pending', null]);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status) VALUES ('ws-test', $1, $2, $3, $4)`, ['diff-test', 1, JSON.stringify(v1), 'rejected']);
+    await execute(`INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status, rejection_reason) VALUES ('ws-test', $1, $2, $3, $4, $5)`, ['diff-test', 2, JSON.stringify(v2), 'pending', null]);
   });
 
   test('returns structured diff with added, removed, modified, unchanged stories', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=2').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1&v2=2').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
 
     expect(res.body.specSlug).toBe('diff-test');
@@ -2561,25 +2688,25 @@ describe('GET /api/specs/:specId/diff', () => {
   });
 
   test('missing v1/v2 → 400', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('v1 and v2');
   });
 
   test('same v1 and v2 → 400', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=1').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1&v2=1').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('different');
   });
 
   test('nonexistent version → 404', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=99').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=1&v2=99').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('v99');
   });
 
   test('both versions missing → 404 mentioning both', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=98&v2=99').set('Authorization', `Bearer ${authToken}`);
+    const res = await request(app).get('/api/specs/diff-test/diff?workspaceId=ws-test&v1=98&v2=99').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('v98');
     expect(res.body.error).toContain('v99');
@@ -2828,6 +2955,7 @@ describe('POST /api/specs/generate/batch', () => {
     expect(res.body.batchId).toBeDefined();
     expect(typeof res.body.batchId).toBe('string');
     expect(res.body.briefCount).toBe(2);
+    await waitForBatch(res.body.batchId);
   });
 
   test('batch generation calls the Pi forge drafter when a brief sets agentOverride=pi', async () => {
@@ -2848,7 +2976,7 @@ describe('POST /api/specs/generate/batch', () => {
     expect(createRes.status).toBe(201);
     expect(createRes.body.batchId).toBeDefined();
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await waitForBatch(createRes.body.batchId);
 
     const statusRes = await request(app)
       .get(`/api/specs/generate/batch/${createRes.body.batchId}`)
@@ -2909,6 +3037,7 @@ describe('POST /api/specs/generate/batch', () => {
 
     // Any model string is accepted for openai-compat pass-through
     expect(res.status).not.toBe(400);
+    if (res.status === 201) await waitForBatch(res.body.batchId);
   });
 
   test('emits batch_started WAL event', async () => {
@@ -2925,12 +3054,18 @@ describe('POST /api/specs/generate/batch', () => {
 
     expect(res.status).toBe(201);
 
-    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'batch_started'`) as { event_type: string; payload: string };
+    const event = await queryOne(
+      `SELECT * FROM wal_events
+        WHERE event_type = 'batch_started'
+          AND payload ->> 'batchId' = $1`,
+      [res.body.batchId],
+    ) as { event_type: string; payload: string };
 
     expect(event).toBeDefined();
     const payload = parsePayload(event.payload);
     expect(payload.batchId).toBe(res.body.batchId);
     expect(payload.briefCount).toBe(1);
+    await waitForBatch(res.body.batchId);
   });
 });
 
@@ -2982,8 +3117,10 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
   test('nonexistent batchId → 404', async () => {
     const res = await request(app).get('/api/specs/generate/batch/nonexistent-id').set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(404);
-    expect(res.body.error).toContain('not found');
+    expect({ status: res.status, body: res.body }).toEqual({
+      status: 404,
+      body: expect.objectContaining({ error: expect.stringContaining('not found') }),
+    });
   });
 
   test('completed batch has finishedAt and all items completed', async () => {

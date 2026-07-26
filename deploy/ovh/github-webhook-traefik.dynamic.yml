@@ -1,0 +1,54 @@
+# Dedicated GitHub webhook ingress for hooks.rorca.ai.
+# REVIEW-ONLY ARTIFACT: do not install without explicit deployment authority.
+# Observed topology: Traefik uses entrypoints http/https on external network
+# coolify; Rorca remains on rorca_default and receives the private alias below
+# only when the reviewed compose overlay is applied.
+http:
+  routers:
+    rorca-github-webhook-http:
+      entryPoints: [http]
+      rule: "Host(`hooks.rorca.ai`) && Path(`/api/webhooks/github`) && Method(`POST`)"
+      priority: 10000
+      middlewares: [rorca-github-webhook-https]
+      service: noop@internal
+    rorca-github-webhook-https:
+      entryPoints: [https]
+      rule: "Host(`hooks.rorca.ai`) && Path(`/api/webhooks/github`) && Method(`POST`)"
+      priority: 10000
+      middlewares:
+        - rorca-github-webhook-bounds
+        - rorca-github-webhook-headers
+      service: rorca-github-webhook
+      tls:
+        certResolver: letsencrypt
+
+  middlewares:
+    rorca-github-webhook-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+    rorca-github-webhook-bounds:
+      buffering:
+        maxRequestBodyBytes: 1048576
+        memRequestBodyBytes: 262144
+        retryExpression: "IsNetworkError() && Attempts() < 2"
+    rorca-github-webhook-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        customResponseHeaders:
+          Server: ""
+
+  services:
+    rorca-github-webhook:
+      loadBalancer:
+        passHostHeader: true
+        healthCheck:
+          # GET /api/health/live exists in backend/src/routes/health.ts and is
+          # private here because no router exposes it on hooks.rorca.ai.
+          path: /api/health/live
+          interval: 30s
+          timeout: 3s
+        servers:
+          - url: "http://rorca-github-webhook:3030"

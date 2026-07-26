@@ -98,7 +98,7 @@ describe('context event memory distillation', () => {
     expect(candidate?.status).toBe('review_required');
     expect(candidate?.securitySensitive).toBe(true);
     expect(candidate?.reviewReason).toBe('security_or_regulated_signal_requires_explicit_review');
-    expect(candidate?.content).toContain('token=[REDACTED]');
+    expect(candidate?.content).toContain('[REDACTED_SECRET_ASSIGNMENT]');
     expect(candidate?.content).not.toContain('supersecretvalue');
     expect(candidate?.evidenceSnippets[0].redacted).toBe(true);
   });
@@ -124,14 +124,16 @@ describe('context event memory distillation', () => {
     expect(isCandidateVisibleInDefaultRetrieval(candidate!.status)).toBe(false);
   });
 
-  test('deduplicates deterministically by event id, content hash, and source session', () => {
+  test('deduplicates one canonical event across repeated source-session delivery while separating event identities', () => {
     const payload = shell();
     const a = distillContextEventToCandidate({ eventId: 46, payload, safetyContentHash: 'hash-5' });
     const b = distillContextEventToCandidate({ eventId: 46, payload, safetyContentHash: 'hash-5' });
     const c = distillContextEventToCandidate({ eventId: 46, payload: shell({ session_id: 'session-2', source_identity: { ...base.source_identity, session_id: 'session-2' } } as Partial<UnifiedContextEventPayloadType>), safetyContentHash: 'hash-5' });
+    const d = distillContextEventToCandidate({ eventId: 47, payload, safetyContentHash: 'hash-5' });
 
     expect(a?.dedupeKey).toBe(b?.dedupeKey);
-    expect(a?.dedupeKey).not.toBe(c?.dedupeKey);
+    expect(a?.dedupeKey).toBe(c?.dedupeKey);
+    expect(a?.dedupeKey).not.toBe(d?.dedupeKey);
   });
 
   test('only approved candidates are considered default retrieval eligible', () => {

@@ -80,8 +80,8 @@ interface OntologyRelationRow {
   id: number | string;
   relation_type: 'SUPERSEDES' | 'CONFLICTS_WITH';
   status: 'active' | 'superseded' | 'deleted';
-  updated_at: string;
-  created_at: string;
+  updated_at: string | Date;
+  created_at: string | Date;
   source_memory_id: number | string;
   target_memory_id: number | string;
   source_content: string;
@@ -101,12 +101,12 @@ interface OntologyHotspotRow {
   memory_count: number | string;
   conflict_count: number | string;
   superseded_count: number | string;
-  last_touched_at: string | null;
+  last_touched_at: string | Date | null;
   sample_memory_ids: number[] | string | null;
 }
 
 interface OntologyActivityRow {
-  ts: string;
+  ts: string | Date;
   event_type: string;
   payload: Record<string, unknown> | string | null;
   spec_id: string | null;
@@ -254,6 +254,12 @@ async function loadOntologyHotspots(workspaceId: string, scope: OntologyHotspotS
   );
 }
 
+function normalizeOntologyTimestamp(value: string | Date | null): string | null {
+  if (value === null) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 function mapOntologyHotspotItems(rows: OntologyHotspotRow[], scopeType: OntologyHotspotScope) {
   return rows.map((row) => ({
     scopeType,
@@ -262,7 +268,7 @@ function mapOntologyHotspotItems(rows: OntologyHotspotRow[], scopeType: Ontology
     memoryCount: Number(row.memory_count),
     conflictCount: Number(row.conflict_count),
     supersededCount: Number(row.superseded_count),
-    lastTouchedAt: row.last_touched_at,
+    lastTouchedAt: normalizeOntologyTimestamp(row.last_touched_at),
     sampleMemoryIds: parseNumericArray(row.sample_memory_ids),
   }));
 }
@@ -278,6 +284,8 @@ function mapOntologyHotspotItems(rows: OntologyHotspotRow[], scopeType: Ontology
  * @swagger
  * /api/analytics/usage:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Get token usage analytics
  *     operationId: getTokenUsage
@@ -502,6 +510,8 @@ interface PeriodCostRow {
  * @swagger
  * /api/analytics/costs:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Get cost analytics
  *     operationId: getCostAnalytics
@@ -727,6 +737,8 @@ interface ModelPricingFullRow {
  * @swagger
  * /api/analytics/pricing:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: List all model pricing entries
  *     operationId: listModelPricing
@@ -781,6 +793,8 @@ router.get('/pricing', async (_req: Request, res: Response) => {
  * @swagger
  * /api/analytics/pricing/{modelId}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Update or create model pricing
  *     operationId: upsertModelPricing
@@ -894,6 +908,8 @@ router.put('/pricing/:modelId', async (req: Request, res: Response) => {
  * @swagger
  * /api/analytics/pricing/{modelId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Remove model pricing entry
  *     operationId: deleteModelPricing
@@ -957,6 +973,8 @@ interface ModelComparisonRow {
  * @swagger
  * /api/analytics/models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Model comparison metrics
  *     operationId: getModelComparison
@@ -1086,6 +1104,8 @@ interface VelocityWeek {
  * @swagger
  * /api/analytics/velocity:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Weekly story completion velocity
  *     operationId: getVelocity
@@ -1278,6 +1298,8 @@ interface CompletionGroup {
  * @swagger
  * /api/analytics/completion-rates:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Pass/fail/skip rates by complexity and tag
  *     operationId: getCompletionRates
@@ -1709,6 +1731,8 @@ async function buildCompletionExport(from: string, to: string, workspaceId?: str
  * @swagger
  * /api/analytics/export:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Export analytics data (CSV or JSON)
  *     operationId: exportAnalyticsData
@@ -3366,7 +3390,7 @@ router.get('/ontology-health', async (req: Request, res: Response) => {
       relationId: Number(row.id),
       relationType: row.relation_type,
       status: row.status,
-      updatedAt: row.updated_at,
+      updatedAt: normalizeOntologyTimestamp(row.updated_at),
       sourceMemoryId: Number(row.source_memory_id),
       targetMemoryId: Number(row.target_memory_id),
       sourceCategory: row.source_category,
@@ -3388,7 +3412,7 @@ router.get('/ontology-health', async (req: Request, res: Response) => {
       relationId: Number(row.id),
       relationType: row.relation_type,
       status: row.status,
-      updatedAt: row.updated_at,
+      updatedAt: normalizeOntologyTimestamp(row.updated_at),
       memoryId: Number(row.target_memory_id),
       supersededByMemoryId: Number(row.source_memory_id),
       category: row.source_category,
@@ -3425,7 +3449,7 @@ router.get('/ontology-health', async (req: Request, res: Response) => {
         : row.spec_id;
       return {
         kind: 'review' as const,
-        at: row.ts,
+        at: normalizeOntologyTimestamp(row.ts) ?? '',
         action,
         summary: `Review action: ${action}`,
         memoryIds: Number.isInteger(memoryId) && memoryId > 0 ? [memoryId] : [],
@@ -3436,8 +3460,10 @@ router.get('/ontology-health', async (req: Request, res: Response) => {
 
     const relationActivities = relationActivityRows.map((row) => ({
       kind: 'relation' as const,
-      at: row.updated_at,
-      action: row.status === 'deleted' ? 'remove' : row.created_at === row.updated_at ? 'create' : 'update',
+      at: normalizeOntologyTimestamp(row.updated_at) ?? '',
+      action: row.status === 'deleted'
+        ? 'remove'
+        : normalizeOntologyTimestamp(row.created_at) === normalizeOntologyTimestamp(row.updated_at) ? 'create' : 'update',
       relationType: row.relation_type,
       summary: row.relation_type === 'CONFLICTS_WITH'
         ? `Conflict pair updated (#${row.source_memory_id} ↔ #${row.target_memory_id})`
@@ -3836,6 +3862,8 @@ interface SkillEffectivenessResult {
  * @swagger
  * /api/analytics/skills/effectiveness:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Analytics]
  *     summary: Skill effectiveness analytics
  *     operationId: getSkillEffectiveness

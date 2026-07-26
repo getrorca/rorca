@@ -16,6 +16,7 @@
  */
 
 import crypto from 'crypto';
+import type { PoolClient } from 'pg';
 import { query, queryOne, execute } from '../db/index';
 import { ValidationError } from './errors';
 
@@ -23,6 +24,26 @@ import { ValidationError } from './errors';
 
 export type IntegrationProvider = 'github' | 'linear' | 'vercel' | 'slack';
 export type TokenType = 'oauth_access' | 'oauth_refresh' | 'api_key' | 'webhook_secret';
+export type IntegrationSecretKind = 'private_key' | 'webhook_secret';
+
+export interface StoredIntegrationSecret {
+  id: string;
+  provider: 'github_app';
+  secretKind: IntegrationSecretKind;
+  fingerprint: `sha256:${string}`;
+  createdAt: string;
+  rotatedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface PreparedIntegrationSecret {
+  id: string;
+  provider: 'github_app';
+  secretKind: IntegrationSecretKind;
+  encryptedValue: string;
+  fingerprint: `sha256:${string}`;
+  createdBy: string;
+}
 
 export interface TokenData {
   token: string;
@@ -42,6 +63,17 @@ export interface StoredToken {
   lastValidatedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+interface IntegrationSecretRow {
+  id: string;
+  provider: 'github_app';
+  secret_kind: IntegrationSecretKind;
+  encrypted_value: string;
+  fingerprint: `sha256:${string}`;
+  created_at: string;
+  rotated_at: string | null;
+  revoked_at: string | null;
 }
 
 interface TokenRow {
@@ -93,10 +125,17 @@ function encrypt(plaintext: string): string {
 
 function decrypt(stored: string): string {
   const key = getVaultKey();
-  const [ivHex, authTagHex, ciphertextHex] = stored.split(':');
+  const parts = stored.split(':');
+  if (parts.length !== 3 || !parts.every((part) => /^[0-9a-f]+$/i.test(part))) {
+    throw new ValidationError('Encrypted integration secret is malformed');
+  }
+  const [ivHex, authTagHex, ciphertextHex] = parts;
   const iv = Buffer.from(ivHex, 'hex');
   const authTag = Buffer.from(authTagHex, 'hex');
   const ciphertext = Buffer.from(ciphertextHex, 'hex');
+  if (iv.length !== 12 || authTag.length !== 16 || ciphertext.length === 0) {
+    throw new ValidationError('Encrypted integration secret is malformed');
+  }
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAuthTag(authTag);
   return decipher.update(ciphertext) + decipher.final('utf8');
@@ -120,6 +159,92 @@ function rowToStoredToken(row: TokenRow): StoredToken {
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
+
+/** Encrypt and fingerprint one App secret for an enclosing database transaction. */
+export function prepareIntegrationSecret(
+  secretKind: IntegrationSecretKind,
+  plaintext: string,
+  createdBy: string,
+): PreparedIntegrationSecret {
+  const value = plaintext.trim();
+  const maxLength = secretKind === 'private_key' ? 65_536 : 1_024;
+  if (!value || value.length > maxLength) {
+    throw new ValidationError(`${secretKind} must be between 1 and ${maxLength} characters`);
+  }
+  if (!createdBy.trim() || createdBy.length > 255) {
+    throw new ValidationError('createdBy is required and must be at most 255 characters');
+  }
+  return {
+    id: crypto.randomUUID(),
+    provider: 'github_app',
+    secretKind,
+    encryptedValue: encrypt(value),
+    fingerprint: `sha256:${crypto.createHash('sha256').update(value, 'utf8').digest('hex')}`,
+    createdBy: createdBy.trim(),
+  };
+}
+
+/** Insert a prepared App secret through the caller's transaction. */
+export async function insertPreparedIntegrationSecret(
+  client: PoolClient,
+  prepared: PreparedIntegrationSecret,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO integration_vault_secrets
+       (id, provider, secret_kind, encrypted_value, fingerprint, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [prepared.id, prepared.provider, prepared.secretKind, prepared.encryptedValue, prepared.fingerprint, prepared.createdBy],
+  );
+}
+
+/**
+ * Store a non-workspace App secret in the same AES-256-GCM integration vault.
+ * Prefer prepareIntegrationSecret + insertPreparedIntegrationSecret when the
+ * secret belongs to a larger registration transaction.
+ */
+export async function storeIntegrationSecret(
+  secretKind: IntegrationSecretKind,
+  plaintext: string,
+  createdBy: string,
+): Promise<StoredIntegrationSecret> {
+  const prepared = prepareIntegrationSecret(secretKind, plaintext, createdBy);
+  const row = await queryOne<IntegrationSecretRow>(
+    `INSERT INTO integration_vault_secrets
+       (id, provider, secret_kind, encrypted_value, fingerprint, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING *`,
+    [prepared.id, prepared.provider, prepared.secretKind, prepared.encryptedValue, prepared.fingerprint, prepared.createdBy],
+  );
+  if (!row) throw new ValidationError('Failed to store encrypted integration secret');
+  return {
+    id: row.id,
+    provider: row.provider,
+    secretKind: row.secret_kind,
+    fingerprint: row.fingerprint,
+    createdAt: row.created_at,
+    rotatedAt: row.rotated_at,
+    revokedAt: row.revoked_at,
+  };
+}
+
+/** Internal credential-provider API. Never serialize this return value. */
+export async function getIntegrationSecret(
+  id: string,
+  expectedKind: IntegrationSecretKind,
+): Promise<string | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  const row = await queryOne<IntegrationSecretRow>(
+    `SELECT * FROM integration_vault_secrets
+      WHERE id = $1 AND provider = 'github_app' AND secret_kind = $2 AND revoked_at IS NULL`,
+    [id, expectedKind],
+  );
+  if (!row) return null;
+  try {
+    return decrypt(row.encrypted_value);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Store an OAuth token (or API key / webhook secret) for a workspace+provider.

@@ -86,3 +86,17 @@ test('forward migration makes cancellation terminal and never manages pg-boss ta
   assert.match(migration, /terminal governed retry attempt evidence is immutable/);
   assert.doesNotMatch(migration, /(?:CREATE|ALTER|DROP|DELETE FROM|UPDATE)\s+(?:TABLE\s+)?pgboss\./i);
 });
+
+test('terminalizer migration permits cancellation and manual-review convergence without managing pg-boss', () => {
+  const root = fs.existsSync(path.resolve(process.cwd(), 'backend', 'src'))
+    ? path.resolve(process.cwd(), 'backend', 'src')
+    : path.resolve(process.cwd(), 'src');
+  const migration = fs.readFileSync(
+    path.join(root, 'db', 'pg-migrations', '20260720148000_governed_retry_terminalization.sql'),
+    'utf8',
+  );
+  assert.match(migration, /WHEN 'claimed' THEN NEW\.state IN \('executing', 'failed', 'cancelled'\)/);
+  assert.match(migration, /WHEN 'executing' THEN NEW\.state IN \('committed', 'failed', 'cancelled'\)/);
+  assert.match(migration, /WHEN 'committed' THEN NEW\.state IN \('integrating', 'failed', 'manual_review_required'\)/);
+  assert.doesNotMatch(migration, /(?:CREATE|ALTER|DROP|DELETE FROM|UPDATE)\s+(?:TABLE\s+)?pgboss\./i);
+});

@@ -38,6 +38,8 @@ interface WorkspaceCiConfig {
  * @swagger
  * /api/workspaces/{workspaceId}/ci-autofix:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [CI Autofix]
  *     summary: Get CI autofix config and recent runs
  *     operationId: getCiAutofixConfig
@@ -124,6 +126,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/ci-autofix:
  *   patch:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [CI Autofix]
  *     summary: Update CI autofix configuration
  *     operationId: updateCiAutofixConfig

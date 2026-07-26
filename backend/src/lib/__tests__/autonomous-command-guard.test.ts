@@ -54,7 +54,10 @@ describe('autonomous-command-guard', () => {
       DATABASE_URL: 'postgres://prod-secret',
       PGPASSWORD: 'db-secret',
       JWT_SECRET: 'jwt-secret',
+      VAULT_KEY: 'vault-secret',
       GITHUB_TOKEN: 'github-secret',
+      RORCA_OPERATOR_CAPABILITY: 'operator-secret',
+      RORCA_OPERATOR_CAPABILITY_SHA256: 'digest-not-for-children',
       ANTHROPIC_API_KEY: 'provider-key-required-by-selected-cli',
     })).toEqual({
       PATH: '/usr/bin',
@@ -85,7 +88,8 @@ describe('autonomous-command-guard', () => {
         env: {
           ...process.env,
           DATABASE_URL: 'postgres://rorca:rorca@127.0.0.1:5433/rorca',
-          DATABASE_URL_TEST: '',
+          DATABASE_URL_TEST: 'postgres://guard:guard@127.0.0.1:1/guard_test',
+          RORCA_TEST_DATABASE_URL: 'postgres://guard:guard@127.0.0.1:1/guard_test',
         } as Record<string, string>,
       });
 
@@ -96,7 +100,7 @@ describe('autonomous-command-guard', () => {
       });
 
       expect(routed.status).toBe(0);
-      const expectedTestUrl = new URL(process.env.RORCA_TEST_DATABASE_URL!);
+      const expectedTestUrl = new URL('postgres://guard:guard@127.0.0.1:1/guard_test');
       expect(routed.stdout).toContain(`PGUSER=${expectedTestUrl.username}`);
       expect(routed.stdout).toContain(`PGDATABASE=${expectedTestUrl.pathname.slice(1)}`);
       expect(routed.stdout).toContain('NODE_ENV=test');
@@ -110,12 +114,58 @@ describe('autonomous-command-guard', () => {
     }
   });
 
-  test('conflict-resolution profile blocks agent-owned network and remote git operations', () => {
+  test('absolute interpreters bypass PATH wrappers but receive no host/provider capability', () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-absolute-guard-ws-'));
+    const guarded = createAutonomousCommandGuard({
+      cwd: workspace,
+      env: {
+        ...process.env,
+        VAULT_KEY: 'vault-secret',
+        GITHUB_TOKEN: 'github-secret',
+        RORCA_OPERATOR_CAPABILITY: 'operator-secret',
+        RORCA_OPERATOR_CAPABILITY_SHA256: 'operator-digest',
+      } as Record<string, string>,
+    });
+    try {
+      const absoluteNode = process.execPath;
+      const result = spawnSync(absoluteNode, ['-e', 'process.stdout.write(JSON.stringify({vault:process.env.VAULT_KEY,github:process.env.GITHUB_TOKEN,operator:process.env.RORCA_OPERATOR_CAPABILITY,digest:process.env.RORCA_OPERATOR_CAPABILITY_SHA256}))'], {
+        cwd: workspace, env: guarded.env, encoding: 'utf8',
+      });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({});
+      // This explicitly proves wrappers are not treated as the capability
+      // boundary: the absolute interpreter executed successfully.
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      fs.rmSync(guarded.guardBinDir, { recursive: true, force: true });
+    }
+  });
+
+  test('caller-added TaskManifest command restrictions are enforced by the runtime wrapper', () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-manifest-command-guard-'));
+    const guarded = createAutonomousCommandGuard({
+      cwd: workspace,
+      env: process.env as Record<string, string>,
+      commandDenylist: ['git commit', 'node --eval forbidden-side-effect'],
+    });
+    try {
+      const git = spawnSync('git', ['commit', '--allow-empty', '-m', 'must-not-run'], {
+        cwd: workspace, env: guarded.env, encoding: 'utf8',
+      });
+      expect(git.status).toBe(126);
+      expect(git.stderr).toMatch(/manifest command denylist/i);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      fs.rmSync(guarded.guardBinDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['general', 'conflict-resolution'] as const)('%s profile blocks network, gh, and remote git operations as defense in depth', (profile) => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-conflict-guard-ws-'));
     const guarded = createAutonomousCommandGuard({
       cwd: workspace,
       env: process.env as Record<string, string>,
-      profile: 'conflict-resolution',
+      profile,
     });
     try {
       for (const [command, args] of [
@@ -146,10 +196,19 @@ describe('autonomous-command-guard', () => {
     delete untrustedEnv.RORCA_TEST_DATABASE_URL;
     delete untrustedEnv.DATABASE_URL_TEST;
 
-    const guarded = createAutonomousCommandGuard({
-      cwd: workspace,
-      env: untrustedEnv,
-    });
+    // Build against a deterministic host command path: npm is available, but
+    // Jest is intentionally absent outside the generated guard directory.
+    const realBin = path.join(workspace, 'real-bin');
+    fs.mkdirSync(realBin, { recursive: true });
+    fs.writeFileSync(path.join(realBin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${realBin}:/usr/bin:/bin`;
+    let guarded: ReturnType<typeof createAutonomousCommandGuard>;
+    try {
+      guarded = createAutonomousCommandGuard({ cwd: workspace, env: { ...untrustedEnv, PATH: process.env.PATH } });
+    } finally {
+      process.env.PATH = originalPath;
+    }
 
     try {
       const blocked = spawnSync('jest', ['--version'], {
@@ -169,7 +228,7 @@ describe('autonomous-command-guard', () => {
 
       expect(safe.status).toBe(0);
 
-      const explicitlyAllowed = spawnSync('jest', ['--version'], {
+      const explicitlyAllowedButUnavailable = spawnSync('jest', ['--version'], {
         cwd: backend,
         env: {
           ...guarded.env,
@@ -179,7 +238,10 @@ describe('autonomous-command-guard', () => {
         encoding: 'utf8',
       });
 
-      expect(explicitlyAllowed.status).toBe(0);
+      // Authorization must not fall back to the wrapper name on its own PATH:
+      // that recursively execs the guard forever when no real Jest exists.
+      expect(explicitlyAllowedButUnavailable.status).toBe(127);
+      expect(explicitlyAllowedButUnavailable.stderr).toMatch(/unavailable outside the guard PATH/i);
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
       fs.rmSync(guarded.guardBinDir, { recursive: true, force: true });

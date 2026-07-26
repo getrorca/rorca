@@ -165,7 +165,7 @@ const options: swaggerJsdoc.Options = {
             spec_path: { type: 'string' },
             status: {
               type: 'string',
-              enum: ['running', 'passed', 'failed', 'paused', 'cancelled'],
+              enum: ['queued', 'running', 'release_pending', 'done', 'failed', 'partial_failure', 'paused', 'cancelled', 'pi_native'],
             },
             pid: { type: 'integer', nullable: true },
             started_at: { type: 'string', format: 'date-time' },
@@ -175,12 +175,16 @@ const options: swaggerJsdoc.Options = {
               nullable: true,
             },
             branch_name: { type: 'string', nullable: true },
-            worktree_path: { type: 'string', nullable: true },
+            worktree_path: { type: 'string', nullable: true, description: 'Immutable execution checkout identity; cleanup is reported separately.' },
+            execution_workspace_path: { type: 'string', nullable: true, description: 'Host-frozen canonical workspace realpath.' },
+            execution_worktree_path: { type: 'string', nullable: true, description: 'Host-frozen execution checkout realpath.' },
+            terminal_checkout_sha: { type: 'string', pattern: '^[0-9a-f]{40}$', nullable: true },
+            worktree_cleanup_status: { type: 'string', enum: ['not_started', 'pending', 'completed', 'failed'] },
             // Canonical normalized metadata. Snake_case database fields remain
             // available during the API compatibility window.
             agentType: { type: 'string', enum: ['claude', 'opencode', 'codex', 'pi', 'unknown'] },
             agentModel: { type: 'string', nullable: true },
-            terminalMode: { type: 'string', enum: ['ansi-html', 'pty'] },
+            terminalMode: { type: 'string', enum: ['ansi-html', 'pty', 'native-pty'] },
             lifecycleStatus: {
               type: 'string',
               enum: ['queued', 'starting', 'pty_attached', 'running', 'validating', 'finished', 'failed', 'cancelled'],

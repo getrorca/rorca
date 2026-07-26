@@ -42,6 +42,7 @@ import {
   upsertContextCaptureControlState,
 } from '../lib/context-capture-controls';
 import { getBoss } from '../lib/pg-boss';
+import { getPgBossTableSql } from '../lib/pg-boss-schema';
 import {
   applyMemoryCandidateReviewAction,
   approveMemoryCandidate,
@@ -466,6 +467,18 @@ router.post('/bootstrap/verify', async (req, res) => {
  *     summary: Submit a policy-gated context event
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Always-on telemetry submission is an operator-controlled write gated by explicit local policy and pause state."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, source, occurredAt, payload]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               source: { type: string }
+ *               occurredAt: { type: string, format: date-time }
+ *               payload: { type: object }
  *     responses:
  *       200: { description: Event accepted or safely suppressed }
  *       503: { description: Queue unavailable; caller retains its redacted local copy }
@@ -538,6 +551,11 @@ router.get('/capability', (_req, res) => res.json({ captureCapability: captureCa
  *     summary: Get always-on capture control status
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Includes operator-only queue, audit, ignore, and redaction policy state."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Capture status }
  */
@@ -562,6 +580,11 @@ function readDaemonStatus(workspacePath: string): Record<string, unknown> {
  *     summary: Get aggregate always-on capture monitoring
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Aggregated queue, distillation, audit, daemon, and worker health is operator-only diagnostics."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Monitoring signals }
  */
@@ -591,6 +614,11 @@ router.get('/:workspaceId/monitoring', async (req, res) => {
  *     summary: Stream capture status updates
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Streams operator-only local capture state through the shared SSE hub."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Capture SSE stream }
  */
@@ -611,6 +639,11 @@ router.get('/:workspaceId/stream', async (req, res) => {
  *     summary: Update explicit capture policy
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Changing telemetry policy or integrations is operator-only configuration."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Policy updated }
  */
@@ -625,37 +658,53 @@ router.patch('/:workspaceId/policy', async (req, res) => {
   res.json({ ok: true, status });
 });
 
-for (const action of ['pause', 'resume'] as const) {
-  /**
-   * @swagger
-   * /api/context-capture/{workspaceId}/pause:
-   *   post:
-   *     tags: [Context Capture]
-   *     summary: Pause always-on capture
-   *     x-rorca-tier: admin
-   *     x-rorca-rationale: "Pause is an operator-only privacy control."
-   *     responses:
-   *       200: { description: Capture paused }
-   */
-  /**
-   * @swagger
-   * /api/context-capture/{workspaceId}/resume:
-   *   post:
-   *     tags: [Context Capture]
-   *     summary: Resume always-on capture
-   *     x-rorca-tier: admin
-   *     x-rorca-rationale: "Resume re-enables operator-configured telemetry under explicit policy."
-   *     responses:
-   *       200: { description: Capture resumed }
-   */
-  router.post(`/:workspaceId/${action}`, async (req, res) => {
-    const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
-    const status = await upsertContextCaptureControlState({ workspaceId: workspace.id, paused: action === 'pause' });
-    await appendContextCaptureAudit({ workspaceId: workspace.id, eventType: action, integrationId: 'operator' });
-    publish(workspace.id, { type: action, paused: action === 'pause' });
-    res.json({ ok: true, status });
-  });
-}
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/pause:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Pause always-on capture
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Pause is an operator-only privacy control."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture paused }
+ */
+router.post('/:workspaceId/pause', async (req, res) => {
+  const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
+  const status = await upsertContextCaptureControlState({ workspaceId: workspace.id, paused: true });
+  await appendContextCaptureAudit({ workspaceId: workspace.id, eventType: 'pause', integrationId: 'operator' });
+  publish(workspace.id, { type: 'pause', paused: true });
+  res.json({ ok: true, status });
+});
+
+/**
+ * @swagger
+ * /api/context-capture/{workspaceId}/resume:
+ *   post:
+ *     tags: [Context Capture]
+ *     summary: Resume always-on capture
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Resume re-enables operator-configured telemetry under explicit policy."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Capture resumed }
+ */
+router.post('/:workspaceId/resume', async (req, res) => {
+  const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
+  const status = await upsertContextCaptureControlState({ workspaceId: workspace.id, paused: false });
+  await appendContextCaptureAudit({ workspaceId: workspace.id, eventType: 'resume', integrationId: 'operator' });
+  publish(workspace.id, { type: 'resume', paused: false });
+  res.json({ ok: true, status });
+});
 
 /**
  * @swagger
@@ -665,12 +714,17 @@ for (const action of ['pause', 'resume'] as const) {
  *     summary: Disable capture and cancel pending capture jobs
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Uninstall is an operator-only privacy action that disables integrations and cancels queued telemetry through pg-boss APIs."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Capture disabled }
  */
 router.post('/:workspaceId/uninstall', async (req, res) => {
   const workspace = await loadWorkspace(requiredString(req.params.workspaceId, 'workspaceId'));
-  const jobs = await query<{ id: string }>("SELECT id::text FROM pgboss.job WHERE name = 'context:capture' AND COALESCE(data->>'workspaceId', data->'data'->>'workspaceId') = $1 AND state IN ('created', 'retry')", [workspace.id]).catch(() => []);
+  const jobs = await query<{ id: string }>(`SELECT id::text FROM ${getPgBossTableSql('job')} WHERE name = 'context:capture' AND COALESCE(data->>'workspaceId', data->'data'->>'workspaceId') = $1 AND state IN ('created', 'retry')`, [workspace.id]).catch(() => []);
   let cancelled = 0;
   const boss = getBoss();
   for (const job of jobs) {
@@ -691,6 +745,11 @@ router.post('/:workspaceId/uninstall', async (req, res) => {
  *     summary: Import external memory exports as pending candidates
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Bulk local imports create review candidates and can expose code context, so they are operator-only."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Import preview or staged candidates }
  */
@@ -720,6 +779,11 @@ router.post('/imports/:workspaceId', async (req, res) => {
  *     summary: Get distillation settings
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Distillation and auto-approval settings are operator-only automation controls."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Distillation settings }
  */
@@ -735,6 +799,11 @@ router.get('/distillation/:workspaceId/config', async (req, res) => {
  *     summary: Update distillation settings
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Changing candidate automation or auto-approval is operator-only configuration."
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Updated distillation settings }
  */

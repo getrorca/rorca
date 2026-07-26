@@ -124,6 +124,7 @@ describe('memory-router execution budgeting', () => {
         source: null,
         pinned: false,
         created_at: '2026-05-28T00:22:52.442Z',
+        updated_at: '2026-05-28T00:22:52.442Z',
         source_story_id: 'IMP-004',
         source_spec_id: 'import-categorization-precision-hardening',
         source_run_id: 20260316000325,
@@ -131,7 +132,7 @@ describe('memory-router execution budgeting', () => {
     ]);
   });
 
-  test('retrieval-only budgeting preserves memory selection even when direction layers exceed the local token budget', async () => {
+  test('memory selection resumes when the caller supplies a budget above mandatory direction layers', async () => {
     const { retrieveContext } = require('../memory-router');
     const storyText = 'Ensure confirmation learning keys history and aliases by workspace and prevents leakage.';
 
@@ -142,8 +143,8 @@ describe('memory-router execution budgeting', () => {
     expect(starved.meta.selectedCandidateIds).toEqual([]);
 
     const retrieved = await retrieveContext('cashflow', storyText, {
-      maxTokens: 1000,
-      budgetMode: 'retrieval-only',
+      maxTokens: 8000,
+      explain: true,
     });
 
     expect(retrieved.memory).toHaveLength(1);
@@ -155,7 +156,7 @@ describe('memory-router execution budgeting', () => {
       reasons: [],
     });
     expect(retrieved.meta.selectedCandidateIds).toEqual(['1845']);
-    expect(retrieved.meta.totalTokens).toBeLessThanOrEqual(1000);
+    expect(retrieved.meta.totalTokens).toBeLessThanOrEqual(8000);
   });
 
   test('keeps retrieval working when ontology lookup falls back because AGE is unavailable or the lookup errors', async () => {
@@ -165,8 +166,8 @@ describe('memory-router execution budgeting', () => {
     mockLookupMemoryOntologyAdjustments.mockRejectedValueOnce(new Error('AGE unavailable'));
 
     const retrieved = await retrieveContext('cashflow', storyText, {
-      maxTokens: 1000,
-      budgetMode: 'retrieval-only',
+      maxTokens: 8000,
+      explain: true,
     });
 
     expect(retrieved.memory).toHaveLength(1);

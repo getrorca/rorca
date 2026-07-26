@@ -65,6 +65,8 @@ async function getSpecTags(specId: string, workspaceId: string): Promise<string[
  * @swagger
  * /api/stories/search:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Stories]
  *     summary: Search stories across all specs
  *     operationId: searchStoriesAcrossSpecs

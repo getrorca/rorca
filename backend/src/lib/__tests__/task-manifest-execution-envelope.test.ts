@@ -49,6 +49,7 @@ describe('task manifest execution envelope adapter', () => {
 
   test('generates one story per manifest task and preserves task dependencies', () => {
     const payload = cloneFixture();
+    payload.boundedScope.allowedPaths.push('backend/src/lib/__tests__/task-manifest-execution-envelope.test.ts');
     payload.tasks.push({
       taskId: 'TMB-001-tests',
       title: 'Add task manifest tests',

@@ -1,6 +1,6 @@
 {
-  "contractVersion": "11.0.0",
-  "generatedAt": "2026-07-19T20:41:16.959Z",
+  "contractVersion": "19.0.0",
+  "generatedAt": "2026-07-24T18:22:08.747Z",
   "routes": [
     {
       "method": "GET",
@@ -3893,51 +3893,6 @@
       "hash": "sha256:d69339acbddc4e82ede5e2cde4ba9a002cf60e7335f2f4a67485786df96014f3"
     },
     {
-      "method": "POST",
-      "path": "/api/pipeline/runs/{runId}/input",
-      "parameters": [
-        {
-          "name": "body",
-          "in": "body",
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "dataBase64": {
-                    "description": "Base64-encoded UTF-8 terminal input bytes from xterm.onData.",
-                    "type": "string"
-                  },
-                  "generationToken": {
-                    "description": "Exact active PTY generation token",
-                    "format": "uuid",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "generationToken",
-                  "dataBase64"
-                ],
-                "type": "object"
-              }
-            }
-          }
-        },
-        {
-          "name": "runId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "integer"
-          }
-        }
-      ],
-      "responseSchema": {
-        "200": {}
-      },
-      "hash": "sha256:2cf1e9e87e4fdf6f14a9e3d6514befe40dc24f4ffd24c392059d2d2d1a2bd5db"
-    },
-    {
       "method": "GET",
       "path": "/api/pipeline/runs/{runId}/liveness",
       "parameters": [
@@ -4074,87 +4029,6 @@
     },
     {
       "method": "GET",
-      "path": "/api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}",
-      "parameters": [
-        {
-          "name": "checkpointId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "format": "uuid",
-            "type": "string"
-          }
-        },
-        {
-          "name": "runId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "integer"
-          }
-        }
-      ],
-      "responseSchema": {
-        "200": {},
-        "404": {},
-        "422": {}
-      },
-      "hash": "sha256:7deaa77d1849fdbe288e5d37c9dbe3fea024b59844e7bfb011e6be5ee5e7b457"
-    },
-    {
-      "method": "POST",
-      "path": "/api/pipeline/runs/{runId}/pty/resize",
-      "parameters": [
-        {
-          "name": "body",
-          "in": "body",
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "cols": {
-                    "maximum": 500,
-                    "minimum": 1,
-                    "type": "integer"
-                  },
-                  "generationToken": {
-                    "description": "Exact active PTY generation token",
-                    "format": "uuid",
-                    "type": "string"
-                  },
-                  "rows": {
-                    "maximum": 200,
-                    "minimum": 1,
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "generationToken",
-                  "cols",
-                  "rows"
-                ],
-                "type": "object"
-              }
-            }
-          }
-        },
-        {
-          "name": "runId",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "integer"
-          }
-        }
-      ],
-      "responseSchema": {
-        "200": {}
-      },
-      "hash": "sha256:90761864a665a7e02c8a8f6a440549b94847e23996030593a68528a05e4276c0"
-    },
-    {
-      "method": "GET",
       "path": "/api/pipeline/runs/{runId}/retrieval-telemetry/{telemetryId}",
       "parameters": [
         {
@@ -4254,8 +4128,8 @@
             "application/json": {
               "schema": {
                 "properties": {
-                  "approvalToken": {
-                    "description": "Existing explicit operator approval token required when the preview marks requiresApproval",
+                  "approvalReceipt": {
+                    "description": "One-time expiring Rorca-issued human approval receipt required when the preview marks requiresApproval",
                     "type": "string"
                   },
                   "approvedPreview": {
@@ -4332,7 +4206,7 @@
         "404": {},
         "409": {}
       },
-      "hash": "sha256:38dd330b5ff3389c07cd6bf257b9965dbcd1f1ecd5b70e6525d5e5381af17d8b"
+      "hash": "sha256:2c8e9e0cc134d11e7385673bdfeb50804700fe8a3dc88538218b51219f6be59d"
     },
     {
       "method": "POST",
@@ -4358,10 +4232,17 @@
                   "autoMerge": {
                     "default": false,
                     "description": "Must be false; task manifests never auto-merge",
+                    "enum": [
+                      false
+                    ],
                     "type": "boolean"
                   },
                   "autoWorktree": {
                     "default": true,
+                    "description": "Must be true; Rorca creates the isolated branch and worktree",
+                    "enum": [
+                      true
+                    ],
                     "type": "boolean"
                   },
                   "dryRun": {
@@ -4386,6 +4267,25 @@
                     "description": "Optional execution-environment identifier when supported.",
                     "type": "string"
                   },
+                  "humanApproval": {
+                    "description": "Exact signed provider-human command event required when an internal service such as Hermes relays non-dry execution authority",
+                    "required": [
+                      "schemaVersion",
+                      "issuerId",
+                      "keyId",
+                      "provider",
+                      "providerTenantId",
+                      "actorId",
+                      "conversationId",
+                      "threadId",
+                      "messageId",
+                      "occurredAt",
+                      "normalizedCommandHash",
+                      "ingressIdempotencyKey",
+                      "signature"
+                    ],
+                    "type": "object"
+                  },
                   "idempotencyKey": {
                     "description": "Hermes-issued idempotency key; must match manifest.idempotencyKey",
                     "format": "uuid",
@@ -4397,10 +4297,10 @@
                   },
                   "mergeStrategy": {
                     "default": "draft-pr",
+                    "description": "Must exactly match manifest.execution.mergeStrategy; branch-only is unsupported",
                     "enum": [
                       "pr",
-                      "draft-pr",
-                      "branch-only"
+                      "draft-pr"
                     ],
                     "type": "string"
                   },
@@ -4446,10 +4346,12 @@
         "201": {},
         "202": {},
         "400": {},
+        "401": {},
+        "403": {},
         "409": {},
         "422": {}
       },
-      "hash": "sha256:8beff74c282556146184c8baf891822626022fecfb02d921d3caa877f56c1bab"
+      "hash": "sha256:1b9c02173e53d7b448170cc25b5b2cb06e7c3c4f1baa94f763ac81c5f7d478ba"
     },
     {
       "method": "GET",
@@ -4642,12 +4544,18 @@
                   },
                   "autoMerge": {
                     "default": false,
-                    "description": "Auto-merge worktree branch to main on successful run",
+                    "description": "Release-1 never auto-merges.",
+                    "enum": [
+                      false
+                    ],
                     "type": "boolean"
                   },
                   "autoWorktree": {
-                    "default": false,
-                    "description": "Create git worktree for isolated run",
+                    "default": true,
+                    "description": "Release-1 execution requires a host-created isolated worktree; dry-run previews may omit this field.",
+                    "enum": [
+                      true
+                    ],
                     "type": "boolean"
                   },
                   "dryRun": {
@@ -4667,10 +4575,9 @@
                   },
                   "executionEnvironment": {
                     "default": "remote-rorca",
-                    "description": "Where the implementation engine executes. local-user requires a configured local execution bridge and fails closed otherwise.",
+                    "description": "Release-1 executes on the Rorca host; the retired local-user bridge fails closed.",
                     "enum": [
-                      "remote-rorca",
-                      "local-user"
+                      "remote-rorca"
                     ],
                     "type": "string"
                   },
@@ -4689,13 +4596,12 @@
                     "type": "boolean"
                   },
                   "mergeStrategy": {
-                    "default": "direct",
-                    "description": "Post-run branch handling strategy when worktrees are enabled",
+                    "default": "branch-only",
+                    "description": "branch-only keeps output local and is the ordinary run default; PR/draft-PR external delivery requires an exact TaskManifest.",
                     "enum": [
-                      "direct",
+                      "branch-only",
                       "pr",
-                      "draft-pr",
-                      "branch-only"
+                      "draft-pr"
                     ],
                     "type": "string"
                   },
@@ -4710,19 +4616,22 @@
                   },
                   "orchestrationMode": {
                     "default": "sequential",
-                    "description": "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated.",
+                    "description": "Wave-parallel/high-risk autonomous execution is disabled in Release-1.",
                     "enum": [
-                      "sequential",
-                      "wave-parallel"
+                      "sequential"
                     ],
                     "type": "string"
                   },
                   "parallelism": {
                     "default": 1,
-                    "description": "Requested effective story parallelism. Values above 1 require the non-production experimental gate.",
-                    "maximum": 10,
+                    "description": "Release-1 execution is sequential.",
+                    "maximum": 1,
                     "minimum": 1,
                     "type": "integer"
+                  },
+                  "qualificationReceiptId": {
+                    "description": "Operator-selected immutable qualification receipt identity for governed wave qualification metadata",
+                    "type": "string"
                   },
                   "readinessOverride": {
                     "description": "Explicitly run despite readiness blockers; usage is logged to WAL for auditability.",
@@ -4731,6 +4640,10 @@
                   "rerunFromScratch": {
                     "description": "Reset passed story state and execute the spec from the first non-excluded story.",
                     "type": "boolean"
+                  },
+                  "rolloutCohort": {
+                    "description": "Explicit governed production rollout cohort metadata; it is validated with the immutable qualification and activation envelope.",
+                    "type": "string"
                   },
                   "specPath": {
                     "example": "forge/specs/approved/my-spec.json",
@@ -4761,9 +4674,9 @@
                   },
                   "triggerType": {
                     "default": "manual",
+                    "description": "Scheduled unattended execution is disabled in Release-1.",
                     "enum": [
-                      "manual",
-                      "scheduled"
+                      "manual"
                     ],
                     "type": "string"
                   },
@@ -4824,7 +4737,7 @@
         "404": {},
         "422": {}
       },
-      "hash": "sha256:08173cdf717250a248c5d3c595351e631d30e5181803ec2ef169f0faf263de1d"
+      "hash": "sha256:40961255e0cf271c245eb9d21bc0ac7e3cea128f14ce6a19fe5058a327333e14"
     },
     {
       "method": "GET",
@@ -6170,8 +6083,33 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "humanApproval": {
+                    "description": "Exact accepted authoring identity plus signed provider-human attestation for governed specs.",
+                    "properties": {
+                      "acceptedPlanHash": {
+                        "type": "string"
+                      },
+                      "acceptedPreflightHash": {
+                        "type": "string"
+                      },
+                      "attestation": {
+                        "type": "object"
+                      },
+                      "persistReceiptId": {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      "persistRequestHash": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "readinessOverride": {
-                    "description": "Explicitly approve despite readiness blockers; usage is logged to WAL for auditability.",
+                    "description": "Governed approval never permits readiness override.",
+                    "enum": [
+                      false
+                    ],
                     "type": "boolean"
                   },
                   "workspaceId": {
@@ -6201,11 +6139,24 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "approvedPath": {
+                    "type": "string"
+                  },
+                  "mutationReceipt": {
+                    "type": "object"
+                  },
                   "ok": {
                     "type": "boolean"
                   },
-                  "specPath": {
-                    "type": "string"
+                  "providerApproval": {
+                    "type": "object"
+                  },
+                  "readiness": {
+                    "type": "object"
+                  },
+                  "responseIdentity": {
+                    "description": "rorca.spec-approval-response-identity.v1 exact request/target/receipt binding",
+                    "type": "object"
                   }
                 },
                 "type": "object"
@@ -6215,7 +6166,7 @@
         },
         "404": {}
       },
-      "hash": "sha256:c1559e4cfceab749f9fe0fce76661f431c9f82c4d9ea17a4434b447d8503c4d4"
+      "hash": "sha256:52925baf6176170c234b70c940d045c94f947315e2f4298696a688745756086c"
     },
     {
       "method": "GET",
@@ -6243,6 +6194,14 @@
           "required": true,
           "schema": {
             "type": "integer"
+          }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
           }
         }
       ],
@@ -6301,7 +6260,7 @@
         "400": {},
         "404": {}
       },
-      "hash": "sha256:92319d3be10d5119838d2668e22c6deb569c4bd0b855d9e4d74caf717b772ff7"
+      "hash": "sha256:f392b8b7e14b568ae60a4162d81e6f76c7de77b5fdb22d8ef0c2cefb58692ee6"
     },
     {
       "method": "POST",
@@ -7111,6 +7070,14 @@
           "schema": {
             "type": "string"
           }
+        },
+        {
+          "name": "workspaceId",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "responseSchema": {
@@ -7156,7 +7123,7 @@
           }
         }
       },
-      "hash": "sha256:be92d4e232439f57f0d91499847c494c06ff60ce03c5e009b82a9cccd161d93c"
+      "hash": "sha256:abac4ad4caf9448a0840cb5645ef507c33c53849e9f6bbb2e68871b163c23aa6"
     },
     {
       "method": "GET",
@@ -7535,8 +7502,9 @@
                   "acceptedPreflightHash": {
                     "type": "string"
                   },
-                  "actor": {
+                  "attestation": {
                     "additionalProperties": false,
+                    "description": "Required when a service principal relays an authenticated provider-human event.",
                     "type": "object"
                   },
                   "confirmed": {
@@ -7553,8 +7521,7 @@
                   "workspaceId",
                   "acceptedPlanHash",
                   "acceptedPreflightHash",
-                  "confirmed",
-                  "actor"
+                  "confirmed"
                 ],
                 "type": "object"
               }
@@ -7566,7 +7533,7 @@
         "200": {},
         "404": {}
       },
-      "hash": "sha256:ffc941f078454dea65220aa6b01f308556764f584fad23277d8946a49b64ba5c"
+      "hash": "sha256:83a61ab794984742a0ef1e138a04483e412aab4b4626834ab39dffc892a7fe52"
     },
     {
       "method": "POST",
@@ -7904,22 +7871,12 @@
                     "example": "Add Stripe billing with monthly and annual plans",
                     "type": "string"
                   },
-                  "diagramTypes": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "domain": {
-                    "type": "string"
-                  },
                   "model": {
                     "description": "LLM model override (defaults to workspace L3 preferred_model)",
                     "example": "claude-sonnet-4-6",
                     "type": "string"
                   },
                   "multiPass": {
-                    "default": false,
                     "description": "Enable multi-pass spec generation for richer output",
                     "example": false,
                     "type": "boolean"
@@ -7954,11 +7911,7 @@
                     "description": "Alias for title",
                     "type": "string"
                   },
-                  "storyAnnotations": {
-                    "type": "string"
-                  },
                   "storyCount": {
-                    "default": 5,
                     "description": "Target number of user stories to generate (default 10)",
                     "example": 12,
                     "type": "integer"
@@ -7966,9 +7919,6 @@
                   "storyPrefix": {
                     "description": "Prefix for story IDs (default US)",
                     "example": "FEAT",
-                    "type": "string"
-                  },
-                  "templateId": {
                     "type": "string"
                   },
                   "title": {
@@ -7983,7 +7933,6 @@
                   }
                 },
                 "required": [
-                  "brief",
                   "brief"
                 ],
                 "type": "object"
@@ -7997,34 +7946,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Spec",
-                "properties": {
-                  "model": {
-                    "type": "string"
-                  },
-                  "provider": {
-                    "type": "string"
-                  },
-                  "slug": {
-                    "type": "string"
-                  },
-                  "specPath": {
-                    "type": "string"
-                  },
-                  "stories": {
-                    "items": {
-                      "$ref": "#/components/schemas/UserStory"
-                    },
-                    "type": "array"
-                  },
-                  "title": {
-                    "type": "string"
-                  },
-                  "usage": {
-                    "type": "object"
-                  }
-                },
-                "type": "object"
+                "$ref": "#/components/schemas/Spec"
               }
             }
           }
@@ -8057,7 +7979,79 @@
           }
         }
       },
-      "hash": "sha256:20faeb7bc10b77ff74cf47c4e234ceddc0847320c459f694932480f74e7d47b9"
+      "hash": "sha256:da702fa328545d430341eb159e4d5b360aa5f9bdfaba97d4422d27d401070842"
+    },
+    {
+      "method": "POST",
+      "path": "/api/specs/generate/batch",
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "briefs": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "briefs"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "responseSchema": {
+        "201": {},
+        "400": {}
+      },
+      "hash": "sha256:c7b86db1ffe112ee7635b78e333ba29b5e2c5bac5896048b5038f212a0fe9d9a"
+    },
+    {
+      "method": "GET",
+      "path": "/api/specs/generate/batch/{batchId}",
+      "parameters": [
+        {
+          "name": "batchId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {}
+      },
+      "hash": "sha256:59070fd34608b97607c80739a1ce99f9ae64f3e57a6524e4235cb3d5006338c2"
+    },
+    {
+      "method": "GET",
+      "path": "/api/specs/generate/batch/{batchId}/stream",
+      "parameters": [
+        {
+          "name": "batchId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responseSchema": {
+        "200": {},
+        "404": {}
+      },
+      "hash": "sha256:8c59447486fb4fe830653bfbff63d17482d2162c5de82b5841a2577912d332a3"
     },
     {
       "method": "POST",
@@ -8671,7 +8665,8 @@
                 "required": [
                   "workspaceId",
                   "authoringPreflight",
-                  "drafts"
+                  "drafts",
+                  "idempotencyKey"
                 ],
                 "type": "object"
               }
@@ -8685,7 +8680,7 @@
         "400": {},
         "422": {}
       },
-      "hash": "sha256:cdb431274ab573ce09178cf2192b46556f30efd69dcda224958ade2e58beb27b"
+      "hash": "sha256:be51439516e3ab5a2c85fe70a7b4f5d90e40a23cefdd6fc4b45b968c6c8a6e8d"
     },
     {
       "method": "GET",
@@ -8936,11 +8931,23 @@
                           "endpoint": {
                             "type": "string"
                           },
+                          "humanAuthorityVersion": {
+                            "enum": [
+                              "provider-human-event.v1"
+                            ],
+                            "type": "string"
+                          },
                           "idempotency": {
                             "enum": [
                               "stable-uuid"
                             ],
                             "type": "string"
+                          },
+                          "serviceRelayRequiresProviderHuman": {
+                            "enum": [
+                              true
+                            ],
+                            "type": "boolean"
                           }
                         },
                         "required": [
@@ -8998,7 +9005,7 @@
           }
         }
       },
-      "hash": "sha256:4ace065af3de1d868abffc084748b8bcbd6abab61e1b36c85a56c90d70b92527"
+      "hash": "sha256:72a0aa64ef3a271d53455d40ce47bcc1314fbed093b28ae653c493a0460b1186"
     },
     {
       "method": "GET",
@@ -9045,12 +9052,6 @@
                   "total": {
                     "example": 3,
                     "type": "integer"
-                  },
-                  "workspaces": {
-                    "items": {
-                      "$ref": "#/components/schemas/Workspace"
-                    },
-                    "type": "array"
                   }
                 },
                 "type": "object"
@@ -9068,7 +9069,7 @@
           }
         }
       },
-      "hash": "sha256:17b8dea2ff89bb1d8c7acb63659fe62b73747dbc118c3047bf30ce80e029ef69"
+      "hash": "sha256:36b714a951707ea8427910f3d15a69beb3868a16e4f37a8726a566d240a87269"
     },
     {
       "method": "GET",

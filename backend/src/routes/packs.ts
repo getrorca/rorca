@@ -31,6 +31,8 @@ const router = Router();
  * @swagger
  * /api/packs/install:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Packs]
  *     summary: Install a convention pack into a workspace
  *     operationId: installPack
@@ -169,6 +171,8 @@ router.post('/install', async (req: Request, res: Response) => {
  * @swagger
  * /api/packs/fork:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Packs]
  *     summary: Fork an installed pack for workspace-local customization
  *     operationId: forkPack
@@ -277,6 +281,8 @@ router.post('/fork', async (req: Request, res: Response) => {
  * @swagger
  * /api/packs:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Packs]
  *     summary: List installed packs for a workspace
  *     operationId: listInstalledPacks
@@ -352,6 +358,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/packs/catalog:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Packs]
  *     summary: List available convention packs from built-in catalog
  *     operationId: listPackCatalog
@@ -446,6 +454,8 @@ router.get('/catalog', async (req: Request, res: Response) => {
  * @swagger
  * /api/packs/detail:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Packs]
  *     summary: Get detailed contents of a pack
  *     operationId: getPackDetail
@@ -568,6 +578,8 @@ router.get('/detail', (req: Request, res: Response) => {
  * @swagger
  * /api/packs/{name}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Packs]
  *     summary: Uninstall a convention pack from a workspace
  *     operationId: uninstallPack

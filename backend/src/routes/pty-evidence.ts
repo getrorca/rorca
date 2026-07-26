@@ -10,6 +10,7 @@ import { Router, type Request, type Response } from 'express';
 import { queryOne } from '../db/index';
 import { handleRouteError } from '../lib/async-handler';
 import { isSuperUser } from '../lib/auth-utils';
+import { hashContent } from '../lib/context-safety';
 import {
   AppError,
   ForbiddenError,
@@ -268,12 +269,22 @@ router.get(
         }
         const localStart = Math.max(0, responseStart - segmentStart);
         const localEnd = Math.min(segment.compressedSize - 1, responseEnd - segmentStart);
-        for await (const chunk of fs.createReadStream(segmentPath, { start: localStart, end: localEnd })) {
-          if (res.destroyed || res.writableEnded || !res.socket?.writable) return;
-          if (!res.write(chunk)) {
-            const drained = await waitForDrainOrClose(res);
-            if (!drained) return;
+        const fd = fs.openSync(segmentPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+        try {
+          const stat = fs.fstatSync(fd);
+          if (!stat.isFile() || stat.size !== segment.compressedSize
+            || hashContent(fs.readFileSync(fd)) !== segment.sha256) {
+            throw new RawArchiveIntegrityError('Raw archive segment changed before descriptor-bound streaming', { segmentIndex: segment.segmentIndex });
           }
+          for await (const chunk of fs.createReadStream(segmentPath, { fd, autoClose: false, start: localStart, end: localEnd })) {
+            if (res.destroyed || res.writableEnded || !res.socket?.writable) return;
+            if (!res.write(chunk)) {
+              const drained = await waitForDrainOrClose(res);
+              if (!drained) return;
+            }
+          }
+        } finally {
+          fs.closeSync(fd);
         }
       }
       if (!res.destroyed && !res.writableEnded && res.socket?.writable) res.end();

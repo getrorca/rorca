@@ -10,41 +10,85 @@ import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
+import type { Server } from 'http';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 
 const mockBossSend = jest.fn();
+const mockLoadHostRunCloseoutEvidence = jest.fn();
 jest.mock('../../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
   ensureQueues: jest.fn().mockResolvedValue(undefined),
   getBoss: () => ({ createQueue: jest.fn().mockResolvedValue(undefined), send: mockBossSend }),
 }));
+jest.mock('../../lib/run-closeout-authority', () => ({
+  ...jest.requireActual('../../lib/run-closeout-authority'),
+  loadHostRunCloseoutEvidence: (...args: unknown[]) => mockLoadHostRunCloseoutEvidence(...args),
+}));
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 let fixtureWorkspaceId: string;
+let fixtureHead = '';
+let fixtureBranch = '';
 let fixtureSequence = 0;
+const fixtureEmail = `retry-suite-${randomUUID()}@example.com`;
 
-beforeEach(async () => {
-  mockBossSend.mockReset().mockImplementation(async () => randomUUID());
-  fixtureWorkspaceId = `ws-retry-${Date.now()}-${++fixtureSequence}`;
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-retry-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-  const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+beforeAll(async () => {
+  const expressApp = require('../../server').default;
+  authToken = await getAuthToken(expressApp, { email: fixtureEmail, role: 'admin' });
+  app = expressApp.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    app.once('listening', resolve);
+    app.once('error', reject);
+  });
 });
 
+beforeEach(() => {
+  mockBossSend.mockReset().mockImplementation(async () => randomUUID());
+  mockLoadHostRunCloseoutEvidence.mockReset().mockImplementation(async (runIds: number[]) => runIds.map((runId) => ({
+    runId: Number(runId),
+    status: 'failed',
+    integratedRevision: fixtureHead,
+    integrationAncestry: [fixtureHead],
+    acceptedStoryIds: [],
+    evidenceIdentity: `separately-certified-closeout:${runId}:${fixtureHead}`,
+  })));
+  fixtureWorkspaceId = `ws-retry-${Date.now()}-${++fixtureSequence}`;
+  fixtureHead = '';
+  fixtureBranch = '';
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-retry-test-'));
+});
+
+async function cleanupFixture(): Promise<void> {
+  await execute('DELETE FROM governed_retry_story_attempts WHERE workspace_id = $1', [fixtureWorkspaceId]);
+  await execute('DELETE FROM governed_retry_dispatches WHERE workspace_id = $1', [fixtureWorkspaceId]);
+  await execute('DELETE FROM pipeline_retry_previews WHERE workspace_id = $1', [fixtureWorkspaceId]);
+  await execute(`DELETE FROM story_results WHERE run_id IN (
+    SELECT id FROM pipeline_runs WHERE workspace_id = $1
+  )`, [fixtureWorkspaceId]);
+  await execute(`DELETE FROM token_usage WHERE run_id IN (
+    SELECT id FROM pipeline_runs WHERE workspace_id = $1
+  )`, [fixtureWorkspaceId]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [fixtureWorkspaceId]);
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1 AND retried_from_run_id IS NOT NULL', [fixtureWorkspaceId]);
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [fixtureWorkspaceId]);
+  await execute('DELETE FROM workspaces WHERE id = $1', [fixtureWorkspaceId]);
+}
+
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  await cleanupFixture();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  app.closeAllConnections?.();
+  await new Promise<void>((resolve, reject) => {
+    app.close((error) => error ? reject(error) : resolve());
+  });
+  await execute('DELETE FROM users WHERE email = $1', [fixtureEmail]);
 });
 
 async function createWorkspace(id = fixtureWorkspaceId) {
@@ -67,6 +111,8 @@ async function createWorkspace(id = fixtureWorkspaceId) {
   execFileSync('git', ['config', 'user.name', 'Rorca Retry Test'], { cwd: tmpDir });
   execFileSync('git', ['add', 'forge/specs/approved/test-spec.json'], { cwd: tmpDir });
   execFileSync('git', ['commit', '--quiet', '-m', 'retry fixture'], { cwd: tmpDir });
+  fixtureHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, encoding: 'utf8' }).trim();
+  fixtureBranch = execFileSync('git', ['branch', '--show-current'], { cwd: tmpDir, encoding: 'utf8' }).trim();
 
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [id, 'Retry Test Workspace', tmpDir]);
 }
@@ -95,7 +141,7 @@ async function dispatchRetry(runId: number, body: Record<string, unknown> = {}) 
 }
 
 async function createRunWithStories(workspaceId = fixtureWorkspaceId) {
-  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at) VALUES ($1, $2, 'failed', NOW()) RETURNING id`, ['forge/specs/approved/test-spec.json', workspaceId]);
+  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at, branch_name) VALUES ($1, $2, 'failed', NOW(), $3) RETURNING id`, ['forge/specs/approved/test-spec.json', workspaceId, fixtureBranch]);
   const runId = result!.id;
 
   // US-001 passed, US-002 failed, US-003 failed
@@ -120,7 +166,7 @@ test('POST /api/pipeline/runs/:runId/retry creates new run and retries all faile
   expect(res.body.runId).not.toBe(originalRunId); // New run created
   expect(res.body.retriedStories).toHaveLength(2);
   expect(res.body.retriedStories.map((s: any) => s.storyId).sort()).toEqual(['US-002', 'US-003']);
-  expect(res.body.retriedStories[0].attempt).toBe(1);
+  expect(res.body.retriedStories[0].attempt).toBe(2);
   expect(res.body.copiedStories).toEqual([]); // Passed evidence is not projected into the retry run
   expect(res.body.effectiveOptions).toMatchObject({
     merge: { strategy: 'branch-only', autoMerge: false },
@@ -138,6 +184,37 @@ test('POST /api/pipeline/runs/:runId/retry creates new run and retries all faile
   expect(originalRun.status).toBe('failed');
 });
 
+test('TaskManifest retry fails closed when the synthetic run lacks immutable lineage authority', async () => {
+  await createWorkspace();
+  const manifestId = randomUUID();
+  const syntheticPath = `forge/task-manifests/${manifestId}/hermes-task-manifest-${manifestId}.json`;
+  const absolute = path.join(tmpDir, syntheticPath);
+  fs.mkdirSync(path.dirname(absolute), { recursive: true });
+  fs.writeFileSync(absolute, JSON.stringify({
+    title: 'Synthetic task manifest',
+    userStories: [{ id: 'TM-001', title: 'Manifest task', description: 'Execute bounded work', acceptanceCriteria: [], dependsOn: [], passes: false }],
+  }));
+  const run = await queryOne<{ id: number }>(`
+    INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at, task_manifest_id, branch_name)
+    VALUES ($1, $2, 'failed', NOW(), $3, $4) RETURNING id
+  `, [syntheticPath, fixtureWorkspaceId, manifestId, fixtureBranch]);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at)
+    VALUES ($1, 'TM-001', 'fail', 0, NOW())`, [run!.id]);
+
+  const preview = await request(app)
+    .post(`/api/pipeline/runs/${run!.id}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({ storyIds: ['TM-001'], safeMode: true, forceSequential: true });
+
+  expect(preview.status).toBe(409);
+  expect(preview.body.error).toContain('TaskManifest run lacks immutable lineage authority');
+  expect(await query(
+    'SELECT id FROM pipeline_runs WHERE retried_from_run_id = $1',
+    [run!.id],
+  )).toHaveLength(0);
+  expect(mockBossSend).not.toHaveBeenCalled();
+});
+
 // ─── Test 2: Retry specific stories via storyIds ─────────────────────────────
 
 test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', async () => {
@@ -149,7 +226,7 @@ test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', asy
   expect(res.status).toBe(201);
   expect(res.body.retriedStories).toHaveLength(1);
   expect(res.body.retriedStories[0].storyId).toBe('US-002');
-  expect(res.body.retriedStories[0].attempt).toBe(1);
+  expect(res.body.retriedStories[0].attempt).toBe(2);
 });
 
 // ─── Test 3: New run gets copied pass results + retry placeholders ────────────
@@ -212,7 +289,7 @@ test('Retry emits story_retried WAL events referencing the new run', async () =>
   const payloads = events.map((e: any) => payload(e.payload));
   expect(payloads[0].run_id).toBe(newRunId);
   expect(payloads[0].original_run_id).toBe(Number(originalRunId));
-  expect(payloads[0].attempt).toBe(1);
+  expect(payloads[0].attempt).toBe(2);
   expect(payloads.map((p: any) => p.story_id).sort()).toEqual(['US-002', 'US-003']);
 });
 
@@ -299,7 +376,7 @@ test('story_retried events are broadcast to SSE subscribers', async () => {
   expect(retryEvents[0].story_id).toBe('US-002');
 
   const eventPayload = payload(retryEvents[0].payload);
-  expect(eventPayload.attempt).toBe(1);
+  expect(eventPayload.attempt).toBe(2);
   expect(eventPayload.run_id).toBe(newRunId);
 
   unsubscribe();

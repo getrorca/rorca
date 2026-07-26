@@ -13,6 +13,7 @@
  * (b) memories table entries with source='git_hydration' ARE retrievable via memory-router.ts
  */
 
+import { clearAll as clearContextCache } from '../context-cache';
 import { synthesize, synthesizeDirectionStack } from '../direction-stack';
 
 // ─── Mock DB + search ────────────────────────────────────────────────────────
@@ -94,6 +95,7 @@ describe('US-010: git_memory column removal — synthesize() sync path', () => {
 describe('US-010: git_memory column removal — synthesizeDirectionStack() async path', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    clearContextCache();
     setupMinimalDb();
   });
 
@@ -133,6 +135,7 @@ describe('US-010: git_memory column removal — synthesizeDirectionStack() async
 describe('US-010: git_hydration memories retrievable via memories table', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    clearContextCache();
   });
 
   it('memories with source=git_hydration appear in synthesized context', async () => {

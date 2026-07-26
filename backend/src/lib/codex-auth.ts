@@ -8,9 +8,8 @@
 /**
  * OC-026: Codex CLI (ChatGPT) Auth Detection
  *
- * Detects Codex CLI authentication state by:
- * 1. Reading ~/.codex/auth.json — JWT tokens with email, plan type, account info
- * 2. Fallback: running `codex login status` to check auth state
+ * Detects Codex CLI authentication state by reading ~/.codex/auth.json and
+ * checking binary availability without executing the model CLI.
  *
  * Provides login/logout by delegating to `codex login` / `codex logout`.
  * Polls for credential file changes after triggering login, fires SSE event when authenticated.
@@ -22,7 +21,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { spawn, execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 import { broadcastAll } from './sse-hub';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -53,28 +52,20 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-// ─── CLI detection (reuses codex-detector but we cache locally too) ──────────
-
-let cachedCliVersion: string | null = null;
+// ─── Process-free CLI availability detection ────────────────────────────────
 
 function detectCodexCli(): { installed: boolean; version?: string } {
-  if (cachedCliVersion) return { installed: true, version: cachedCliVersion };
-
-  const binPath = process.env.CODEX_BIN?.trim();
-  const cmd = binPath || 'codex';
-
-  try {
-    const output = execFileSync(cmd, ['--version'], {
-      encoding: 'utf8',
-      timeout: 5000,
-    }).trim();
-    const match = output.match(/(\d+\.\d+\.\d+(?:-[\w.]+)?)/);
-    const version = match ? match[1] : output.split(/\s/)[0] || output;
-    cachedCliVersion = version;
-    return { installed: true, version };
-  } catch {
-    return { installed: false };
+  const configured = process.env.CODEX_BIN?.trim();
+  const candidates = configured
+    ? [configured]
+    : (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, 'codex'));
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return { installed: true };
+    } catch { /* continue */ }
   }
+  return { installed: false };
 }
 
 // ─── Read auth.json ──────────────────────────────────────────────────────────
@@ -165,25 +156,6 @@ export function getCodexAuthState(): CodexAuthState {
         cliVersion: cli.version,
       };
     }
-  }
-
-  // Strategy 2: Run `codex login status` as fallback
-  if (cli.installed) {
-    try {
-      const binPath = process.env.CODEX_BIN?.trim() || 'codex';
-      const output = execFileSync(binPath, ['login', 'status'], {
-        encoding: 'utf8',
-        timeout: 5000,
-      }).trim();
-      // Output: "Logged in using ChatGPT" or similar when connected
-      if (output.toLowerCase().includes('logged in')) {
-        return {
-          connected: true,
-          cliInstalled: true,
-          cliVersion: cli.version,
-        };
-      }
-    } catch { /* status check failed — treat as disconnected */ }
   }
 
   return {
@@ -292,8 +264,6 @@ export async function triggerCodexLogout(): Promise<{ success: boolean; error?: 
     child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
 
     child.on('close', (code) => {
-      cachedCliVersion = null;
-
       if (code === 0) {
         broadcastAll({
           id: 0,

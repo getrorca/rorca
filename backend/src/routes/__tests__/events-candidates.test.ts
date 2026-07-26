@@ -17,45 +17,78 @@
  */
 
 import * as crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import request from 'supertest';
 import type { Express } from 'express';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
 
-let app: Express;
+let app: Server;
 let authToken: string;
-const testWorkspaceId = 'ws-ci-us032';
+let fixtureUserId: string;
+let workspaceSequence = 0;
+let testWorkspaceId = '';
 
-beforeEach(async () => {
-  jest.resetModules();
-  jest.clearAllMocks();
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
-
-  // Ensure test workspace exists
-  const { execute } = require('../../db/index');
+async function cleanFixtureState(): Promise<void> {
+  const { execute } = require('../../db/index') as typeof import('../../db/index');
+  const workspacePattern = `ws-ci-us032-${process.pid}-%`;
+  const workspacePredicate = `(workspace_id LIKE $1 OR workspace_id = 'ws-ci-us033-other')`;
+  await execute(`DELETE FROM memory_candidates WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM memory_relations WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM memories WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM context_events WHERE ${workspacePredicate}`, [workspacePattern]);
+  await execute(`DELETE FROM wal_events WHERE ${workspacePredicate}`, [workspacePattern]);
   await execute(
-    `INSERT INTO workspaces (id, label, path)
-     VALUES ($1, 'CI US-032', '/tmp/ws-ci-us032')
-     ON CONFLICT (id) DO NOTHING`,
-    [testWorkspaceId],
+    `DELETE FROM workspaces WHERE id LIKE $1 OR id = 'ws-ci-us033-other'`,
+    [workspacePattern],
   );
+}
 
-  // Isolate the shared CI workspace: clear rows accumulated by earlier tests
-  // or prior runs (the jest DB teardown is intentionally skipped, so the
-  // candidates/events/memories tables persist across files). Each test creates
-  // the data it needs, so starting from an empty workspace is the contract.
-  await execute(`DELETE FROM memory_candidates WHERE workspace_id = $1`, [testWorkspaceId]);
-  await execute(`DELETE FROM context_events WHERE workspace_id = $1`, [testWorkspaceId]);
-  await execute(`DELETE FROM memories WHERE workspace_id = $1`, [testWorkspaceId]);
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  const authId = crypto.randomUUID();
+  const fixtureUser = await ensureTestUser({
+    email: `events-candidates-${authId}@test.rorca.local`,
+    authId,
+    role: 'admin',
+    plan: 'pro',
+  });
+  fixtureUserId = fixtureUser.id;
+
+  const expressApp = require('../../server').default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: fixtureUser.email,
+    authId,
+    role: 'admin',
+    displayName: 'Events Candidates Test Admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-afterEach(async () => {
-  try {
-    const { closePool } = require('../../db/index');
-    await closePool();
-  } catch {}
+beforeEach(async () => {
+  jest.clearAllMocks();
+  await cleanFixtureState();
+  workspaceSequence += 1;
+  testWorkspaceId = `ws-ci-us032-${process.pid}-${workspaceSequence}`;
+
+  const { execute } = require('../../db/index') as typeof import('../../db/index');
+  await execute(
+    `INSERT INTO workspaces (id, label, path)
+     VALUES ($1, 'CI US-032', $2)`,
+    [testWorkspaceId, `/tmp/${testWorkspaceId}`],
+  );
+});
+
+afterEach(cleanFixtureState);
+
+afterAll(async () => {
+  await cleanFixtureState();
+  const { execute } = require('../../db/index') as typeof import('../../db/index');
+  await execute('DELETE FROM users WHERE id = $1', [fixtureUserId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
 });
 
 // ═══════════════════════════════════════════════════════════════════════════=
@@ -63,7 +96,7 @@ afterEach(async () => {
 // ═══════════════════════════════════════════════════════════════════════════=
 
 describe('POST /api/events', () => {
-  const validEvent = {
+  const validEvent = () => ({
     workspace_id: testWorkspaceId,
     source_system: 'rorca-capture',
     event_type: 'commit',
@@ -73,13 +106,13 @@ describe('POST /api/events', () => {
     actor: 'test-user',
     source_ref: 'abc123def456',
     idempotency_key: `ce-${crypto.randomUUID()}`,
-  };
+  });
 
   test('creates a new event and returns 201', async () => {
     const res = await request(app)
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
-      .send(validEvent);
+      .send(validEvent());
 
     expect(res.status).toBe(201);
     expect(res.body.workspace_id).toBe(testWorkspaceId);
@@ -92,7 +125,7 @@ describe('POST /api/events', () => {
 
   test('idempotency: duplicate submission returns 200 with existing record', async () => {
     const key = `ce-dup-${crypto.randomUUID()}`;
-    const body = { ...validEvent, idempotency_key: key };
+    const body = { ...validEvent(), idempotency_key: key };
 
     const first = await request(app)
       .post('/api/events')
@@ -126,7 +159,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         idempotency_key: `ce-fmt-${crypto.randomUUID()}`,
         occurred_at: 'not-a-date',
       });
@@ -139,7 +172,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         workspace_id: 'non-existent-ws',
         idempotency_key: `ce-nows-${crypto.randomUUID()}`,
       });
@@ -151,7 +184,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         source_system: '   ',
         idempotency_key: `ce-blank-${crypto.randomUUID()}`,
       });
@@ -164,7 +197,7 @@ describe('POST /api/events', () => {
       .post('/api/events')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validEvent,
+        ...validEvent(),
         idempotency_key: key,
         payload: {
           note: 'API key: sk-ant-api03-abcdefghijklmnop',
@@ -206,7 +239,7 @@ describe('POST /api/events', () => {
 // ═══════════════════════════════════════════════════════════════════════════=
 
 describe('POST /api/candidates', () => {
-  const validCandidate = {
+  const validCandidate = () => ({
     workspace_id: testWorkspaceId,
     source_system: 'rorca-capture',
     category: 'Pattern',
@@ -215,13 +248,13 @@ describe('POST /api/candidates', () => {
     context: 'Prevents connection exhaustion under load',
     related_files: ['src/db/pool.ts'],
     idempotency_key: `mc-${crypto.randomUUID()}`,
-  };
+  });
 
   test('creates a new candidate and returns 201', async () => {
     const res = await request(app)
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
-      .send(validCandidate);
+      .send(validCandidate());
 
     expect(res.status).toBe(201);
     expect(res.body.workspace_id).toBe(testWorkspaceId);
@@ -234,7 +267,7 @@ describe('POST /api/candidates', () => {
 
   test('idempotency: duplicate submission returns 200 with existing record', async () => {
     const key = `mc-dup-${crypto.randomUUID()}`;
-    const body = { ...validCandidate, idempotency_key: key };
+    const body = { ...validCandidate(), idempotency_key: key };
 
     const first = await request(app)
       .post('/api/candidates')
@@ -268,7 +301,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: `mc-conf-${crypto.randomUUID()}`,
         confidence: 'ultra',
       });
@@ -280,7 +313,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: `mc-trust-${crypto.randomUUID()}`,
         trust_tier: 'godlike',
       });
@@ -292,7 +325,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         workspace_id: 'non-existent-ws',
         idempotency_key: `mc-nows-${crypto.randomUUID()}`,
       });
@@ -304,7 +337,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: `mc-bad-ev-${crypto.randomUUID()}`,
         context_event_id: 99999999,
       });
@@ -331,7 +364,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: candidateKey,
         context_event_id: parseInt(ev.body.id, 10),
       });
@@ -346,7 +379,7 @@ describe('POST /api/candidates', () => {
       .post('/api/candidates')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        ...validCandidate,
+        ...validCandidate(),
         idempotency_key: key,
         rule: 'Set DATABASE_URL=postgres://user:secret123@host/db and use it',
         context: 'Password is hunter2 and key is sk-ant-api03-abcdefgh',

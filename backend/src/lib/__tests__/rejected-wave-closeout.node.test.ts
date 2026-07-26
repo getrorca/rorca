@@ -364,12 +364,14 @@ test('production engine routes wave passes through the guarded ledger and argv-s
   assert.match(source, /exitCode: 1/);
   assert.match(source, /child\.kill\('SIGKILL'\)/);
   const route = fs.readFileSync(path.resolve(process.cwd(), 'backend', 'src', 'routes', 'pipeline.ts'), 'utf8');
-  assert.match(route, /Wave integration ledger is not validated for this exact pass projection/);
-  assert.match(route, /SET state = 'finalized', finalization_identity/);
-  assert.match(route, /transaction\(async client/);
+  assert.match(route, /integrationFinalization is accepted only by the host execution boundary/);
+  const persistence = fs.readFileSync(path.resolve(process.cwd(), 'backend', 'src', 'lib', 'story-result-persistence.ts'), 'utf8');
+  assert.match(persistence, /SET state = 'finalized', finalization_identity/);
+  assert.match(persistence, /transaction\(async \(client\)/);
   const worker = fs.readFileSync(path.resolve(process.cwd(), 'backend', 'src', 'worker.ts'), 'utf8');
   assert.doesNotMatch(worker, /gh pr (?:list|create)/);
-  assert.match(worker, /execFileSync\('gh', \[/);
+  assert.doesNotMatch(worker, /execFileSync\('gh', \[/);
+  assert.match(worker, /reconcileRunReleaseIntent/);
   const commit = source.slice(source.indexOf('function gitCommitStory'), source.indexOf('// ─── Validation Gate'));
   assert.match(commit, /execFileSync\('git', \[/);
   assert.doesNotMatch(commit, /execSync\(`git (?:reset|commit)/);

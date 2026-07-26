@@ -30,51 +30,39 @@ jest.mock('../../lib/llm-client', () => ({
 let app: Express;
 let tmpDir: string;
 let authToken: string;
-let authId: string;
+const authId = crypto.randomUUID();
+const email = `env-vars+${authId}@example.com`;
+const WORKSPACE_ID = `ws-env-${crypto.randomUUID()}`;
 
-const WORKSPACE_ID = 'ws-env-test';
-
-beforeEach(async () => {
-  jest.resetModules();
-
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockImplementation((m: string) =>
-      ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
-    ),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
-  }));
-
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-envvars-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
   const serverMod = require('../../server');
   app = serverMod.default;
-// Seed a workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WORKSPACE_ID, tmpDir]);
-  await execute(`DELETE FROM workspace_env_vars WHERE workspace_id = $1`, [WORKSPACE_ID]);
-
-  authId = crypto.randomUUID();
-  const email = `testauth+${authId}@example.com`;
   authToken = await getAuthToken(app, { authId, email });
+
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2)`,
+    [WORKSPACE_ID, tmpDir],
+  );
   await execute(
     `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
-     VALUES ($1, $2::uuid, 'admin')
-     ON CONFLICT (workspace_id, user_auth_id) DO UPDATE SET role = EXCLUDED.role`,
+     VALUES ($1, $2::uuid, 'admin')`,
     [WORKSPACE_ID, authId],
   );
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  await execute(`DELETE FROM workspace_env_vars WHERE workspace_id = $1`, [WORKSPACE_ID]);
+});
+
+afterAll(async () => {
+  await execute(`DELETE FROM workspace_env_vars WHERE workspace_id = $1`, [WORKSPACE_ID]);
+  await execute(`DELETE FROM workspace_members WHERE workspace_id = $1`, [WORKSPACE_ID]);
+  await execute(`DELETE FROM workspaces WHERE id = $1`, [WORKSPACE_ID]);
+  await execute(`DELETE FROM users WHERE auth_id = $1::uuid`, [authId]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/workspaces/:id/env-vars ──────────────────────────────────────
@@ -166,14 +154,14 @@ describe('POST /api/workspaces/:id/env-vars', () => {
     expect(res.body.error).toContain('Invalid key format');
   });
 
-  test('non-member access to nonexistent workspace is forbidden before route lookup', async () => {
+  test('nonexistent workspace is not disclosed', async () => {
     const res = await request(app)
       .post('/api/workspaces/nonexistent/env-vars')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ key: 'MY_VAR', value: 'val' });
 
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe('Forbidden');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('Workspace not found');
   });
 });
 
@@ -217,13 +205,13 @@ describe('GET /api/workspaces/:id/env-vars', () => {
     expect(appMode.isSecret).toBe(false);
   });
 
-  test('non-member access to nonexistent workspace is forbidden before route lookup', async () => {
+  test('nonexistent workspace is not disclosed', async () => {
     const res = await request(app)
       .get('/api/workspaces/nonexistent/env-vars')
       .set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe('Forbidden');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('Workspace not found');
   });
 });
 

@@ -21,6 +21,14 @@ jest.mock('../pi-detector', () => ({
   detectPi: jest.fn(() => ({ piInstalled: true })),
   listPiModels: jest.fn(() => [{ provider: 'openai-codex', model: 'gpt-5.6-sol' }]),
 }));
+jest.mock('../autonomous-model-egress', () => ({
+  ensureAutonomousModelEgress: jest.fn().mockResolvedValue('/test/model-egress.sock'),
+}));
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousSandboxLaunch: jest.fn((options: any) => ({
+    command: options.command, args: [...options.args], cwd: options.cwd, env: options.env, isolated: true,
+  })),
+}));
 
 import {
   buildCleanResolverEnv,

@@ -13,8 +13,11 @@
  * installed, we mock isGraphAvailable() to simulate the unavailable case.
  * The pipeline trigger tests verify includeGraph flag persistence.
  */
+import crypto from 'crypto';
 import { execFileSync } from 'child_process';
+import { once } from 'events';
 import * as fs from 'fs';
+import type { Server } from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
@@ -48,59 +51,71 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
-let app: Express;
+const authEmail = `graph-degrade-${crypto.randomUUID()}@test.rorca.local`;
+let app: Server;
 let tmpDir: string;
 let workspacePath: string;
 let authToken: string;
 
-// Load the server ONCE per test file — avoids creating N pools
+async function cleanGraphFixture(): Promise<void> {
+  await execute("DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-graph-test')");
+  await execute("DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-graph-test')");
+  await execute("DELETE FROM pipeline_dispatch_publications WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-graph-test')");
+  await execute("DELETE FROM pipeline_runs WHERE workspace_id = 'ws-graph-test'");
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-graph-test'");
+}
+
+// Load one explicit server for the entire suite.
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-graph-degrade-'));
 
-  const serverMod = require('../../server');
-  app = serverMod.default;
-
-  // Create filesystem directories for specs
   workspacePath = path.join(tmpDir, 'test-project');
   fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'pending'), { recursive: true });
-  fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
-  fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
   execFileSync('git', ['init', '-q', workspacePath]);
   execFileSync('git', ['-C', workspacePath, '-c', 'user.name=Rorca Tests', '-c', 'user.email=tests@rorca.local', 'commit', '--allow-empty', '-qm', 'test baseline']);
-});
 
-// Re-seed data after each global truncation (jest.pool-cleanup.ts truncates tables beforeEach)
-beforeEach(async () => {
+  const serverMod = require('../../server');
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: authEmail,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+  await execute("DELETE FROM workspaces WHERE id = 'ws-graph-test'");
   await execute(
-    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`,
     ['ws-graph-test', 'Graph Test Workspace', workspacePath],
   );
-  authToken = await getAuthToken(app);
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
 });
 
-afterAll(async () => {
-  try {
-    const { closePool } = require('../../db/index');
-    await closePool();
-  } catch {}
-  if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.NODE_ENV;
+beforeEach(async () => {
+  jest.clearAllMocks();
+  await cleanGraphFixture();
 });
 
 afterEach(() => {
   jest.restoreAllMocks();
 });
 
+afterAll(async () => {
+  await cleanGraphFixture();
+  await execute("DELETE FROM workspaces WHERE id = 'ws-graph-test'");
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  await execute('DELETE FROM users WHERE email = $1', [authEmail]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
+});
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 function writeSpec(slug: string, spec: object, status: 'pending' | 'approved' = 'approved') {
   const forgeDir = path.join(workspacePath, 'forge', 'specs', status);
-  const oldDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', status);
   fs.writeFileSync(path.join(forgeDir, `${slug}.json`), JSON.stringify(spec));
-  fs.writeFileSync(path.join(oldDir, `${slug}.json`), JSON.stringify(spec));
 }
 
 function mockAgeUnavailable() {
@@ -157,7 +172,7 @@ describe('GET /api/graph/stats (AGE unavailable)', () => {
       vertexCount: 0,
       edgeCount: 0,
     });
-    expect(res.body.graphName).toBe('rorca');
+    expect(res.body.graphName).toBe('rorca_v2');
     expect(res.body.lastPopulatedAt).toBeNull();
   });
 
@@ -177,7 +192,7 @@ describe('GET /api/graph/stats (AGE unavailable)', () => {
 // ─── 2. POST /api/pipeline/trigger — includeGraph flag ───────────────────
 
 describe('POST /api/pipeline/trigger with includeGraph', () => {
-  test('persists include_graph=true in pipeline_runs and includes it in pg-boss job payload', async () => {
+  test('includeGraph=true cannot bypass Release-1 TaskManifest execution authority', async () => {
     writeSpec('graph-trigger-spec', {
       title: 'Graph Trigger Test',
       userStories: [
@@ -199,36 +214,18 @@ describe('POST /api/pipeline/trigger with includeGraph', () => {
         workspaceId: 'ws-graph-test',
         includeGraph: true,
         readinessOverride: true,
+        autoWorktree: true,
+        autoMerge: false,
+        mergeStrategy: 'draft-pr',
       });
 
-    expect(res.status).toBe(201);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.runId).toBeDefined();
-
-    const runId = res.body.runId;
-
-    // Verify the pipeline_runs row has include_graph=true
-    const run = await queryOne<{ include_graph: boolean }>(
-      `SELECT include_graph FROM pipeline_runs WHERE id = $1`,
-      [runId],
-    );
-    expect(run).toBeDefined();
-    expect(run!.include_graph).toBe(true);
-
-    // Verify pg-boss mock was called with includeGraph in the payload
-    const { getBoss } = require('../../lib/pg-boss');
-    const boss = getBoss();
-    const sendCalls = boss.send.mock.calls;
-    const pipelineRunCall = sendCalls.find(
-      (call: any[]) => call[0] === 'pipeline:run',
-    );
-    expect(pipelineRunCall).toBeDefined();
-    const jobPayload = pipelineRunCall![1];
-    expect(jobPayload.includeGraph).toBe(true);
-    expect(jobPayload.runId).toBe(runId);
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/TaskManifest/i);
+    expect(await queryOne("SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-graph-test' LIMIT 1")).toBeUndefined();
+    expect(require('../../lib/pg-boss').getBoss().send).not.toHaveBeenCalled();
   });
 
-  test('defaults includeGraph to false when not provided', async () => {
+  test('omitting includeGraph also cannot revive manifestless execution', async () => {
     writeSpec('no-graph-spec', {
       title: 'No Graph Test',
       userStories: [
@@ -249,16 +246,15 @@ describe('POST /api/pipeline/trigger with includeGraph', () => {
         specPath: 'forge/specs/approved/no-graph-spec.json',
         workspaceId: 'ws-graph-test',
         readinessOverride: true,
+        autoWorktree: true,
+        autoMerge: false,
+        mergeStrategy: 'draft-pr',
       });
 
-    expect(res.status).toBe(201);
-
-    const run = await queryOne<{ include_graph: boolean }>(
-      `SELECT include_graph FROM pipeline_runs WHERE id = $1`,
-      [res.body.runId],
-    );
-    expect(run).toBeDefined();
-    expect(run!.include_graph).toBe(false);
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/TaskManifest/i);
+    expect(await queryOne("SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-graph-test' LIMIT 1")).toBeUndefined();
+    expect(require('../../lib/pg-boss').getBoss().send).not.toHaveBeenCalled();
   });
 });
 

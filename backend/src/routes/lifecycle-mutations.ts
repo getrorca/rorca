@@ -57,7 +57,7 @@ const RetryDispatchSchema = z.object({
     expiresAt: z.string().datetime(),
     signature: PreviewHash,
   }).strict(),
-  approvalToken: z.string().trim().min(8).max(512).optional(),
+  approvalReceipt: z.string().trim().min(64).max(4096).optional(),
 }).strict();
 
 function parseBody<T>(schema: ZodType<T>, req: Request): T {
@@ -223,6 +223,11 @@ router.post('/recompile', async (req, res, next) => {
  *     operationId: previewLifecycleRetry
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Retry scope and run policy are sensitive workspace metadata; authenticated preview is read-only and cannot enqueue work."
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer, minimum: 1 }
  *     responses:
  *       200: { description: Exact self-verifying retry packet and unexpired identity }
  *       401: { description: Authentication required }
@@ -256,6 +261,10 @@ router.post('/runs/:runId/retry-preview', async (req, res, next) => {
  *     x-rorca-tier: auth
  *     x-rorca-rationale: "Dispatch creates a workspace-owned retry run only after exact packet, expiry, policy, and replay validation."
  *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer, minimum: 1 }
  *       - in: header
  *         name: Idempotency-Key
  *         required: true
@@ -279,7 +288,7 @@ router.post('/runs/:runId/retry-dispatch', async (req, res, next) => {
       previewHash: body.previewHash,
       approvedPreview: body.approvedPreview,
       previewIdentity: body.previewIdentity,
-      approvalToken: body.approvalToken,
+      approvalReceipt: body.approvalReceipt,
       safeMode: true,
     };
     await retryPipelineRunHandler(req, res);

@@ -20,7 +20,6 @@
  */
 
 import { z } from 'zod';
-import { TRUST_TIERS } from '../../../shared/contracts/trust';
 import {
   PipelineRunJobPayload,
   type PipelineRunJobPayloadType,
@@ -28,6 +27,8 @@ import {
   type PipelineRetryJobPayloadType,
   PipelineCancelJobPayload,
   type PipelineCancelJobPayloadType,
+} from '../lib/pg-boss-schemas';
+import {
   ShellCommandContextEventPayload,
   AgentCliSessionContextEventPayload,
   IdeSessionContextEventPayload,
@@ -40,7 +41,7 @@ import {
   CONTEXT_EVENT_PAYLOAD_SCHEMA_VERSION,
   TrustTierEnum,
   deriveContextEventIdempotencyKey,
-} from '../lib/pg-boss-schemas';
+} from '../lib/context-capture-contracts';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -49,6 +50,7 @@ import {
 const validRunPayload = {
   runId: 42,
   specPath: 'forge/specs/approved/my-spec.json',
+  runSpecPath: '/home/user/project/.rorca/run-specs/run-42.json',
   workspacePath: '/home/user/project',
   agent: 'claude' as const,
   model: null,
@@ -69,7 +71,8 @@ const validRetryPayload = {
   dispatchIdentity: { schemaVersion: 'rorca.governed-retry-dispatch.v1', identityHash: `sha256:${'d'.repeat(64)}` },
   workspacePath: '/home/user/project',
   specPath: 'forge/specs/approved/my-spec.json',
-  retrySpecPath: '/tmp/retry-my-spec.json',
+  runSpecPath: '/home/user/project/.rorca/run-specs/retry-43.json',
+  retrySpecPath: '/home/user/project/.rorca/run-specs/retry-43.json',
   agent: 'opencode' as const,
   model: 'openai/gpt-4o',
   worktreePath: null,
@@ -101,6 +104,7 @@ describe('PipelineRunJobPayload', () => {
     const withoutOptionals = {
       runId: 1,
       specPath: 'forge/specs/approved/x.json',
+      runSpecPath: '/tmp/ws/.rorca/run-specs/run-1.json',
       workspacePath: '/tmp/ws',
       agent: 'codex' as const,
       model: null,
@@ -148,16 +152,9 @@ describe('PipelineRunJobPayload', () => {
     }
   });
 
-  test('runId as string (not number) is rejected', () => {
-    const withStringRunId = { ...validRunPayload, runId: '42' };
-    expect(() => PipelineRunJobPayload.parse(withStringRunId)).toThrow(z.ZodError);
-    try {
-      PipelineRunJobPayload.parse(withStringRunId);
-    } catch (err) {
-      expect(err).toBeInstanceOf(z.ZodError);
-      const zodErr = err as z.ZodError;
-      expect(zodErr.message).toContain('runId');
-    }
+  test('runId accepts a numeric queue representation but rejects non-numeric input', () => {
+    expect(PipelineRunJobPayload.parse({ ...validRunPayload, runId: '42' }).runId).toBe(42);
+    expect(() => PipelineRunJobPayload.parse({ ...validRunPayload, runId: 'not-a-run' })).toThrow(z.ZodError);
   });
 
   test('runId as 0 (not positive) is rejected', () => {
@@ -212,6 +209,7 @@ describe('PipelineRunJobPayload', () => {
     const triggerPayload = {
       runId,
       specPath,
+      runSpecPath: '/home/user/project/.rorca/run-specs/run-42.json',
       workspacePath,
       agent: resolvedAgentType,
       model: resolvedAgentModel ?? null,
@@ -335,8 +333,9 @@ describe('PipelineCancelJobPayload', () => {
     }
   });
 
-  test('runId as string is rejected', () => {
-    expect(() => PipelineCancelJobPayload.parse({ runId: '42' })).toThrow(z.ZodError);
+  test('runId accepts a numeric queue representation but rejects non-numeric input', () => {
+    expect(PipelineCancelJobPayload.parse({ runId: '42' }).runId).toBe(42);
+    expect(() => PipelineCancelJobPayload.parse({ runId: 'not-a-run' })).toThrow(z.ZodError);
   });
 
   test('TypeScript: z.infer type is assignable', () => {
@@ -381,8 +380,8 @@ describe('Worker handler payload validation — invalid payload throws before sp
     expect(() => simulateWorkerHandler(withExtra)).toThrow('Invalid pipeline:run payload');
   });
 
-  test('invalid payload (wrong runId type) throws and prevents spawn', () => {
-    const withStringRunId = { ...validRunPayload, runId: '42' };
+  test('invalid payload (non-numeric runId) throws and prevents spawn', () => {
+    const withStringRunId = { ...validRunPayload, runId: 'not-a-run' };
     expect(() => simulateWorkerHandler(withStringRunId)).toThrow('Invalid pipeline:run payload');
   });
 
@@ -425,7 +424,7 @@ describe('Context capture event schemas', () => {
     git_branch: 'main',
     git_sha: 'b'.repeat(40),
     related_files: [{ path: 'src/index.ts', role: 'mentioned' as const, hash: null }],
-    capture_policy: { policy_version: '2026-07-ucc-007', mode: 'command-summary' as const, raw_content: 'summary' as const },
+    capture_policy: { policy_version: '2026-07-ucc-007', mode: 'metadata-only' as const, raw_content: 'summary' as const },
     trust_tier: 'local' as const,
     provenance: { capture_source: 'shellIntegration' as const, source_event_id: 'event-1', adapter_version: null, emitted_at: '2026-07-05T00:00:00.000Z', received_at: null, local_only: true },
   };
@@ -434,7 +433,7 @@ describe('Context capture event schemas', () => {
     ...common,
     idempotency_key: deriveContextEventIdempotencyKey({ eventType: 'shell_command', source_system: 'shell', session_id: 'session-1', workspace_id: 'rorca', occurred_at: '2026-07-05T00:00:00.000Z', phase: 'end', command_hash: 'a'.repeat(64), exit_code: 0 }),
     phase: 'end' as const,
-    policyMode: 'command-summary' as const,
+    policyMode: 'metadata-only' as const,
     command_summary: 'claude --print [REDACTED]',
     command_hash: 'a'.repeat(64),
     cwd: '/workspace',
@@ -549,8 +548,8 @@ describe('Context capture event schemas', () => {
     }).pr_number).toBe('12');
   });
 
-  test('trust tier vocabulary matches shared contract', () => {
-    expect(TrustTierEnum.options).toEqual(TRUST_TIERS);
+  test('capture-event trust vocabulary remains provenance-only and cannot imply approved memory authority', () => {
+    expect(TrustTierEnum.options).toEqual(['untrusted', 'local', 'verified', 'privileged']);
   });
 
   test('every UCC-007 event type has deterministic idempotency guidance', () => {

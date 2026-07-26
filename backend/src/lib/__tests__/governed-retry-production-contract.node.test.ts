@@ -30,7 +30,7 @@ test('route derives wave retry authority from all three durable evidence sources
   const source = retryRoute();
   const completion = source.indexOf('FROM story_closeout_decisions');
   const ledger = source.indexOf('FROM story_integration_ledger');
-  const closeout = source.indexOf("event_type = 'run_closeout'");
+  const closeout = source.indexOf('loadHostRunCloseoutEvidence');
   const derivation = source.indexOf('deriveAuthoritativeRetryScope');
   const preview = source.indexOf('createRetryPreview');
   assert.ok(completion > 0 && ledger > 0 && closeout > 0);
@@ -95,18 +95,20 @@ test('worker finalization is optimistic and prior evidence is never updated or d
   assert.match(source, /failure finalization lost its fence/);
   assert.match(source, /dispatch finalization lost optimistic concurrency/);
   assert.match(source, /FROM story_integration_ledger/);
-  assert.match(source, /emitWalEvent\('run_closeout'/);
+  assert.match(source, /persistHostRunCloseout/);
   assert.doesNotMatch(source, /UPDATE\s+(?:wal_events|story_closeout_decisions|story_integration_ledger|story_commits)\b/i);
   assert.match(migration, /BEFORE UPDATE OR DELETE ON governed_retry_carry_forward/);
   assert.match(migration, /BEFORE UPDATE OR DELETE ON governed_retry_attempt_events/);
 });
 
-test('worker replays queued wave finalization through the canonical endpoint before deriving terminal status', () => {
+test('worker replays queued wave finalization through its host-only canonical persistence seam before deriving terminal status', () => {
   const source = worker;
   assert.match(source, /replayWorkerFallbackResults/);
-  assert.match(source, /\/api\/pipeline\/story-result/);
+  assert.match(source, /persistCanonicalStoryResult/);
+  assert.match(source, /WORKER_RESULT_AUTHORITY/);
   assert.match(source, /fallbackReplay\.atomicFinalizations > 0/);
   assert.match(source, /expectedRetryStoryIds\.every\(storyId => latest\.get\(storyId\) === 'pass'\)/);
+  assert.doesNotMatch(source, /\/api\/pipeline\/story-result/);
   assert.doesNotMatch(source, /INSERT INTO story_results[\s\S]{0,400}integrationFinalization/);
 });
 

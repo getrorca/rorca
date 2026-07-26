@@ -65,6 +65,8 @@ Describe the role and expertise of this persona.
  * @swagger
  * /api/personas:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List all discovered personas for a workspace, grouped by category
  *     operationId: listPersonas
  *     description: Scans the workspace .rorca/personas/ directory and returns all discovered personas grouped by category with enabled/disabled status.
@@ -152,6 +154,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/personas/read:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Read a persona file's content
  *     operationId: readPersonaFile
  *     description: Returns the raw markdown content of a specific persona file by its relative path within the workspace.
@@ -198,6 +202,8 @@ router.get('/read', async (req: Request, res: Response) => {
  * @swagger
  * /api/personas/write:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Write/update a persona file's content
  *     operationId: writePersonaFile
  *     description: Writes or overwrites the markdown content of a persona file at the specified relative path.
@@ -242,6 +248,8 @@ router.put('/write', async (req: Request, res: Response) => {
  * @swagger
  * /api/personas/create:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Create a new persona from template
  *     operationId: createPersona
  *     description: Creates a new persona markdown file from the default template in the appropriate category directory.
@@ -297,6 +305,8 @@ router.post('/create', async (req: Request, res: Response) => {
  * @swagger
  * /api/personas/toggle:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Enable or disable a persona
  *     operationId: togglePersona
  *     description: Toggles a persona's enabled/disabled state by updating the .rorca/config.json personas.disabled array.

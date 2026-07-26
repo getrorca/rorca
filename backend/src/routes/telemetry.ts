@@ -17,6 +17,8 @@ const router = Router();
  * @swagger
  * /api/telemetry/status:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Telemetry]
  *     summary: Get telemetry status
  *     operationId: getTelemetryStatus

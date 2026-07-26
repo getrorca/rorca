@@ -10,6 +10,26 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { detectPi } from '../pi-detector';
 
+jest.mock('../autonomous-cli-probe', () => {
+  const childProcess = jest.requireActual<typeof import('node:child_process')>('node:child_process');
+  const probe = (command: string, args: readonly string[], options: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}) => {
+    const result = childProcess.spawnSync(command, [...args], {
+      encoding: 'utf8', timeout: options.timeoutMs, env: options.env ?? process.env,
+    });
+    return {
+      status: result.status,
+      signal: result.signal,
+      stdout: String(result.stdout ?? ''),
+      stderr: String(result.stderr ?? ''),
+      ...(result.error ? { error: result.error } : {}),
+    };
+  };
+  return {
+    probeAutonomousCliSync: probe,
+    probeAutonomousCli: async (...args: Parameters<typeof probe>) => probe(...args),
+  };
+});
+
 const fixturePath = path.join(__dirname, '..', '..', '__tests__', 'fixtures', 'pi', 'pi-parity.jsonl');
 const replayScriptPath = path.join(__dirname, '..', '..', '__tests__', 'fixtures', 'pi', 'mock-pi-replay.sh');
 
@@ -31,11 +51,13 @@ describe('Pi parity fixture', () => {
     expect(meta.type).toBe('fixture_meta');
     expect(meta.fixture).toBe('pi-parity');
     expect(meta.agentType).toBe('pi');
-    expect(meta.piVersion).toBe('pi 0.67.0');
+    expect(meta.piVersion).toBe('pi 0.80.6');
+    expect(meta.evidenceClass).toBe('non-release-fixture-replay');
+    expect(meta.actualProviderCapture).toBe(false);
     expect(meta.provider).toBe('openai-codex');
     expect(meta.model).toBe('gpt-5.4');
-    expect(meta.providerState).toBe('pinned openai-codex/gpt-5.4');
-    expect(String(meta.captureCommand)).toContain('pi run --jsonl');
+    expect(meta.providerState).toBe('fixture metadata only; no provider authority');
+    expect(String(meta.captureCommand)).toContain('mock-pi-replay.sh --mode json');
     expect(String(meta.captureCommand)).toContain('--provider openai-codex');
     expect(String(meta.captureCommand)).toContain('--model gpt-5.4');
     expect(String(meta.captureCommand)).toContain('COLUMNS=80');
@@ -44,17 +66,21 @@ describe('Pi parity fixture', () => {
     expect(meta.prompt).toBe('Explain the replay semantics of this fixed Pi terminal parity fixture.');
   });
 
-  test('replays the captured JSONL fixture through a PI_BIN override script without touching a real Pi install', () => {
+  test('replays the JSONL fixture through the shipped Pi CLI shape without touching a real provider', () => {
     process.env.PI_BIN = replayScriptPath;
 
     const status = detectPi();
     expect(status).toEqual({
       piInstalled: true,
-      piVersion: '0.67.0',
+      piVersion: '0.80.6',
       piBinPath: replayScriptPath,
     });
 
-    const result = spawnSync(process.env.PI_BIN!, ['run', '--jsonl', '--skill', 'fixtures/pi-parity-skill.md'], {
+    const result = spawnSync(process.env.PI_BIN!, [
+      '--mode', 'json', '--no-session',
+      '--provider', 'openai-codex', '--model', 'gpt-5.4',
+      'Explain the replay semantics of this fixed Pi terminal parity fixture.',
+    ], {
       encoding: 'buffer',
       cwd: path.dirname(replayScriptPath),
     });

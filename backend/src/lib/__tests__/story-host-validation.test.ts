@@ -11,6 +11,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { MAX_CLOSEOUT_OUTPUT_EXCERPT_BYTES } from '../story-closeout';
+
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousSandboxLaunch: jest.fn((options: any) => ({
+    command: options.command, args: [...options.args], cwd: options.cwd, env: options.env, isolated: true,
+  })),
+}));
 import { createStoryExecutionManifest } from '../story-execution-packet';
 import { runHostValidationRequirement } from '../story-host-validation';
 

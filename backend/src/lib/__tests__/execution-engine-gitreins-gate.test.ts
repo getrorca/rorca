@@ -40,8 +40,8 @@ describe('canonical execution-engine GitReins gate', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'execution-engine.ts'), 'utf8');
     const successSection = source.indexOf('// CA-011: Adversarial review passes');
     const gate = source.indexOf('// GitReins blocking gate:', successSection);
-    const localPass = source.indexOf('// All checks passed — mark story as done only after the GitReins gate.', gate);
-    const canonicalPass = source.indexOf("emitWalEvent(config.port, 'story_passed'", gate);
+    const localPass = source.indexOf('// LFC-031: one common closeout seam for every mode and provider.', gate);
+    const canonicalPass = source.indexOf('await finalizeIntegratedStoryPass(config, workspaceId, pendingPass)', gate);
     expect(successSection).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(successSection);
     expect(localPass).toBeGreaterThan(gate);
@@ -52,7 +52,7 @@ describe('canonical execution-engine GitReins gate', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'execution-engine.ts'), 'utf8');
     const callMatches = source.match(/await runGitReinsJudge\(\{/g) ?? [];
     expect(callMatches).toHaveLength(1);
-    const agentResolution = source.indexOf('let effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);');
+    const agentResolution = source.indexOf('let effectiveAgent: AgentType = executionManifest?.execution.agent');
     expect(agentResolution).toBeGreaterThan(-1);
     expect(source.indexOf('await runGitReinsJudge({')).toBeGreaterThan(agentResolution);
   });
@@ -62,7 +62,7 @@ describe('canonical execution-engine GitReins gate', () => {
     expect(source).toContain('cwd: effectiveCwd');
     expect(source).toContain('worktree: gitReinsResult.worktree');
     expect(source.indexOf('await runGitReinsJudge({')).toBeLessThan(
-      source.indexOf('// All checks passed — mark story as done only after the GitReins gate.'),
+      source.indexOf('// LFC-031: one common closeout seam for every mode and provider.'),
     );
   });
 });

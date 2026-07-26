@@ -5,36 +5,44 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import { randomUUID } from 'crypto';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { execute, queryOne } from '../../db/index';
 
-let app: Express;
-let tmpDir: string;
+let app: Server;
 let authToken: string;
 
-beforeEach(async () => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-wal-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  process.env.AUTH_REQUIRED = 'true';
   const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: `wal-${process.pid}-${randomUUID()}@rorca.test`,
+    authId: randomUUID(),
+  });
+  app = await new Promise<Server>((resolve, reject) => {
+    const listener = expressApp.listen(0, '127.0.0.1', () => resolve(listener));
+    listener.once('error', reject);
+  });
+});
 
-  // Clear WAL events from user registration so tests start with a clean slate
-  await execute(`DELETE FROM wal_events`);
+beforeEach(async () => {
+  await execute('DELETE FROM wal_events');
 });
 
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  await execute('DELETE FROM wal_events');
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
+  delete process.env.AUTH_REQUIRED;
 });
 
 async function insertWalEvent(eventType: string, workspaceId?: string) {
@@ -101,8 +109,8 @@ test('POST idempotency key prevents a retry after response loss from duplicating
     payload: { run_id: 42, cumulative_input: 100, cumulative_output: 20 },
   };
 
-  const first = await request(app).post('/api/wal').send(body);
-  const retry = await request(app).post('/api/wal').send(body);
+  const first = await request(app).post('/api/wal').set('Authorization', `Bearer ${authToken}`).send(body);
+  const retry = await request(app).post('/api/wal').set('Authorization', `Bearer ${authToken}`).send(body);
   const count = await queryOne<{ count: number }>(
     'SELECT COUNT(*)::int AS count FROM wal_events WHERE ingest_key = $1',
     [body.idempotency_key],

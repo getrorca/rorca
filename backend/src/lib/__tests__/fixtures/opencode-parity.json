@@ -1,13 +1,15 @@
 {
   "fixture": "opencode-parity",
-  "opencodeVersion": "opencode 0.1.0",
-  "captureCommand": "cd fixtures/opencode-parity-workspace && COLUMNS=80 printf %s \"Explain the replay semantics of this fixed OpenCode terminal parity fixture.\" | opencode run --format json --attach /tmp/rorca-opencode-parity.sock --model openai/gpt-4o",
+  "opencodeVersion": "opencode 1.17.10",
+  "evidenceClass": "non-release-fixture-replay",
+  "actualProviderCapture": false,
+  "captureCommand": "cd fixtures/opencode-parity-workspace && COLUMNS=80 LINES=24 opencode run --format json --model openai/gpt-4o \"Explain the replay semantics of this fixed OpenCode terminal parity fixture.\"",
   "terminalWidth": 80,
   "workspace": "fixtures/opencode-parity-workspace",
   "prompt": "Explain the replay semantics of this fixed OpenCode terminal parity fixture.",
   "captureNotes": [
-    "Pinned against OpenCode 0.1.0 JSONL output for a fixed prompt and workspace.",
-    "Final completion event intentionally omits a trailing newline to guard live attach replay flush behavior."
+    "Deterministic replay fixture pinned to the shipped OpenCode 1.17.10 contract; it is not a real provider capture or release proof.",
+    "Final completion event intentionally omits a trailing newline to guard replay flush behavior."
   ],
   "chunks": [
     {

@@ -5,28 +5,45 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
+import { execute } from '../../db/index';
 
-let app: Express;
+let app: Server;
 let authToken: string;
+let userId: string;
 
-beforeEach(async () => {
-  jest.resetModules();
+beforeAll(async () => {
   process.env.NODE_ENV = 'test';
-  const serverMod = require('../../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
+  const authId = crypto.randomUUID();
+  const email = `settings-contract-${crypto.randomUUID()}@test.rorca.local`;
+  const user = await ensureTestUser({ email, authId, role: 'admin', plan: 'pro' });
+  userId = user.id;
+  const serverModule = require('../../server');
+  const expressApp = serverModule.default as Express;
+  authToken = await getAuthToken(expressApp, { email, authId, role: 'admin' });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-describe('PUT /api/settings/profile', () => {
-  it('returns 400 for empty body', async () => {
+afterAll(async () => {
+  await execute('DELETE FROM user_settings WHERE user_id = $1', [userId]);
+  await execute('DELETE FROM users WHERE id = $1', [userId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
+});
+
+describe('settings validation and retired password contract', () => {
+  it('returns 400 for empty profile body', async () => {
     const res = await request(app)
       .put('/api/settings/profile')
       .set('Authorization', `Bearer ${authToken}`)
       .send({});
-    console.log('=== empty body status:', res.status, 'body:', JSON.stringify(res.body), '===');
     expect(res.status).toBe(400);
   });
 
@@ -35,25 +52,25 @@ describe('PUT /api/settings/profile', () => {
       .put('/api/settings/profile')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ displayName: '' });
-    console.log('=== empty displayName status:', res.status, 'body:', JSON.stringify(res.body), '===');
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
   });
 
-  it('returns 403 for wrong password', async () => {
+  it('keeps password mutation unregistered and redacts submitted credentials', async () => {
+    const currentPassword = 'definitelywrongpassword';
     const res = await request(app)
       .put('/api/settings/password')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ currentPassword: 'definitelywrongpassword', newPassword: 'newpassword456' });
-    console.log('=== wrong password status:', res.status, 'body:', JSON.stringify(res.body), '===');
-    expect(res.status).toBe(403);
+      .send({ currentPassword, newPassword: 'newpassword456' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+    expect(JSON.stringify(res.body)).not.toContain(currentPassword);
   });
 
   it('returns defaults for display settings', async () => {
     const res = await request(app)
       .get('/api/settings/display')
       .set('Authorization', `Bearer ${authToken}`);
-    console.log('=== display settings status:', res.status, 'body:', JSON.stringify(res.body), '===');
     expect(res.status).toBe(200);
   });
 });

@@ -59,8 +59,11 @@ async function emitWalEvent(eventType: string, workspaceId: string, payload: Rec
  *   branch refs/heads/main
  *   <blank line>
  */
-function isExistingGitWorktree(wtPath: string): boolean {
-  return fs.existsSync(path.join(wtPath, '.git'));
+function isExistingGitWorktree(wtPath: string, isBare = false): boolean {
+  if (fs.existsSync(path.join(wtPath, '.git'))) return true;
+  return isBare
+    && fs.existsSync(path.join(wtPath, 'HEAD'))
+    && fs.existsSync(path.join(wtPath, 'objects'));
 }
 
 function parsePorcelain(output: string): GitWorktree[] {
@@ -105,6 +108,8 @@ function parsePorcelain(output: string): GitWorktree[] {
  * @swagger
  * /api/worktrees:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: List git worktrees for a workspace
  *     operationId: listWorktrees
@@ -126,35 +131,6 @@ function parsePorcelain(output: string): GitWorktree[] {
  *                   type: array
  *                   items: { $ref: '#/components/schemas/GitWorktree' }
  *       404: { description: "Workspace not found" }
- *   post:
- *     tags: [Worktrees]
- *     summary: Create a new git worktree
- *     operationId: createWorktree
- *     description: Creates a new git worktree with a new branch in the workspace repository.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId, branchName]
- *             properties:
- *               workspaceId: { type: string }
- *               branchName: { type: string }
- *               baseBranch: { type: string }
- *               worktreePath: { type: string }
- *     responses:
- *       201:
- *         description: Worktree created
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok: { type: boolean }
- *                 worktreePath: { type: string }
- *                 branchName: { type: string }
- *       409: { description: "Branch already exists" }
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
@@ -177,7 +153,7 @@ router.get('/', async (req: Request, res: Response) => {
       // Non-fatal: list can still be parsed and stale paths filtered below.
     }
     const output = await git.raw(['worktree', 'list', '--porcelain']);
-    const worktrees = parsePorcelain(output).filter((wt) => isExistingGitWorktree(wt.path));
+    const worktrees = parsePorcelain(output).filter((wt) => isExistingGitWorktree(wt.path, wt.isBare));
 
     res.json({ worktrees });
   } catch (error: any) {
@@ -196,6 +172,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/worktrees:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Create a new git worktree
  *     operationId: createWorktree
@@ -310,6 +288,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/worktrees/{encodedPath}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Remove a git worktree
  *     operationId: removeWorktree
@@ -369,62 +349,16 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
   }
 });
 
-// ─── Conflict parsing helper ────────────────────────────────────────────────
-
-interface ConflictFile {
-  path: string;
-  markers: string;
-}
-
-/**
- * Parse conflict markers from files in the working directory after a failed merge.
- * Reads each conflicting file and extracts the sections between <<<<<<< and >>>>>>>
- */
-async function extractConflictMarkers(git: ReturnType<typeof simpleGit>, repoPath: string, conflictPaths: string[]): Promise<ConflictFile[]> {
-  const fs = await import('fs/promises');
-  const results: ConflictFile[] = [];
-
-  for (const filePath of conflictPaths) {
-    const absPath = path.join(repoPath, filePath);
-    try {
-      const content = await fs.readFile(absPath, 'utf-8');
-      // Extract conflict sections (everything between <<<<<<< and >>>>>>>)
-      const markers: string[] = [];
-      const lines = content.split('\n');
-      let inConflict = false;
-      let section: string[] = [];
-
-      for (const line of lines) {
-        if (line.startsWith('<<<<<<<')) {
-          inConflict = true;
-          section = [line];
-        } else if (line.startsWith('>>>>>>>') && inConflict) {
-          section.push(line);
-          markers.push(section.join('\n'));
-          inConflict = false;
-          section = [];
-        } else if (inConflict) {
-          section.push(line);
-        }
-      }
-
-      results.push({ path: filePath, markers: markers.join('\n\n---\n\n') || '(conflict markers not found)' });
-    } catch {
-      results.push({ path: filePath, markers: '(unable to read file)' });
-    }
-  }
-
-  return results;
-}
-
 /**
  * @swagger
  * /api/worktrees/merge/preview:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
- *     summary: Dry-run merge to detect conflicts
+ *     summary: Retired canonical-workspace merge preview
  *     operationId: previewWorktreeMerge
- *     description: Performs a dry-run merge attempt to detect conflicts before actually merging a worktree branch.
+ *     description: Retired. Exact release integration previews/merges only in the immutable isolated release checkout.
  *     requestBody:
  *       required: true
  *       content:
@@ -436,106 +370,25 @@ async function extractConflictMarkers(git: ReturnType<typeof simpleGit>, repoPat
  *               workspaceId: { type: string }
  *               branchName: { type: string }
  *     responses:
- *       200:
- *         description: Merge preview result
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 canMerge: { type: boolean }
- *                 hasConflicts: { type: boolean }
- *                 conflictFiles: { type: array, items: { type: object, properties: { path: { type: string }, markers: { type: string } } } }
- *                 filesChanged: { type: number }
+ *       409: { description: Canonical release intent is required }
  */
-router.post('/merge/preview', async (req: Request, res: Response) => {
-  try {
-    const { workspaceId, branchName } = req.body;
-
-    if (!workspaceId || !branchName) {
-      throw new ValidationError('Missing required fields: workspaceId, branchName');
-      return;
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
-    const git = simpleGit(workspace.path);
-
-    // Auto-stash dirty working tree so dry-run merge can proceed
-    let stashed = false;
-    const statusResult = await git.status();
-    if (statusResult.files.length > 0) {
-      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-preview-${branchName}`]);
-      stashed = true;
-    }
-
-    // Get diff stats to show what would change
-    let filesChanged = 0;
-    try {
-      const diffOutput = await git.raw(['diff', '--stat', `HEAD...${branchName}`]);
-      const statLine = diffOutput.trim().split('\n').pop() || '';
-      const match = statLine.match(/(\d+)\s+files?\s+changed/);
-      filesChanged = match ? parseInt(match[1], 10) : 0;
-    } catch {
-      // If diff fails (e.g., branch doesn't exist), we'll catch it in the merge attempt below
-    }
-
-    // Attempt a dry-run merge using --no-commit --no-ff, then abort
-    try {
-      await git.merge([branchName, '--no-commit', '--no-ff']);
-      // If merge succeeds without conflicts, abort it (dry-run)
-      await git.merge(['--abort']);
-      if (stashed) { try { await git.stash(['pop']); } catch { /* ignore */ } }
-      res.json({ canMerge: true, hasConflicts: false, conflictFiles: [], filesChanged });
-    } catch (mergeError: any) {
-      if (mergeError.message?.includes('CONFLICT') || mergeError.message?.includes('Automatic merge failed')) {
-        // Merge failed with conflicts — extract conflict info before aborting
-        let conflictFiles: ConflictFile[] = [];
-        try {
-          // Get list of unmerged files
-          const statusOutput = await git.raw(['diff', '--name-only', '--diff-filter=U']);
-          const conflictPaths = statusOutput.trim().split('\n').filter(Boolean);
-          conflictFiles = await extractConflictMarkers(git, workspace.path, conflictPaths);
-        } catch {
-          // Fallback: parse conflict file list from error message
-          const conflictMatch = mergeError.message.match(/CONFLICT \([^)]+\): Merge conflict in (.+)/g);
-          if (conflictMatch) {
-            conflictFiles = conflictMatch.map((line: string) => {
-              const fileMatch = line.match(/Merge conflict in (.+)/);
-              return { path: fileMatch?.[1] || 'unknown', markers: '' };
-            });
-          }
-        }
-
-        // Always abort the failed merge to restore clean state
-        try { await git.merge(['--abort']); } catch { /* already aborted */ }
-        if (stashed) { try { await git.stash(['pop']); } catch { /* ignore */ } }
-
-        res.json({ canMerge: false, hasConflicts: true, conflictFiles, filesChanged });
-      } else {
-        // Non-conflict error — try to abort and propagate
-        try { await git.merge(['--abort']); } catch { /* nothing to abort */ }
-        if (stashed) { try { await git.stash(['pop']); } catch { /* ignore */ } }
-        throw mergeError;
-      }
-    }
-  } catch (error: any) {
-    handleRouteError(res, error, '[Worktrees] Merge preview');
-  }
+router.post('/merge/preview', (_req: Request, res: Response) => {
+  res.status(409).json({
+    error: 'RELEASE_INTENT_REQUIRED',
+    message: 'Canonical-workspace merge preview is retired; release integration uses an isolated exact-intent checkout.',
+  });
 });
 
 /**
  * @swagger
  * /api/worktrees/merge:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
- *     summary: Merge a worktree branch to main
+ *     summary: Retired arbitrary worktree merge actuator
  *     operationId: mergeWorktree
- *     description: Merges a worktree branch into the current branch using --no-ff, with optional force resolution using --theirs strategy.
+ *     description: Retired. Final base integration requires an immutable run release intent and the canonical release reconciler.
  *     requestBody:
  *       required: true
  *       content:
@@ -548,116 +401,21 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
  *               branchName: { type: string }
  *               force: { type: boolean, description: "Accept target branch version for all conflicts" }
  *     responses:
- *       200:
- *         description: Merged
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok: { type: boolean }
- *                 mergeCommitSha: { type: string }
- *       409:
- *         description: Merge conflict
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 conflict: { type: boolean }
- *                 details: { type: string }
- *                 conflictFiles: { type: array, items: { type: object } }
+ *       409: { description: Canonical release intent is required }
  */
-router.post('/merge', async (req: Request, res: Response) => {
-  try {
-    const { workspaceId, branchName, force } = req.body;
-
-    if (!workspaceId || !branchName) {
-      throw new ValidationError('Missing required fields: workspaceId, branchName');
-      return;
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
-    const git = simpleGit(workspace.path);
-
-    // Auto-stash any uncommitted local changes so the merge can proceed cleanly
-    let stashed = false;
-    const statusResult = await git.status();
-    const hasDirtyWorkingTree = statusResult.files.length > 0;
-    if (hasDirtyWorkingTree) {
-      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
-      stashed = true;
-    }
-
-    try {
-      if (force) {
-        // Force merge: use -X theirs to auto-resolve conflicts in favor of the incoming branch
-        try {
-          await git.merge([branchName, '--no-ff', '-X', 'theirs']);
-        } catch (mergeError: any) {
-          // Even -X theirs can fail on delete/modify conflicts; handle those
-          if (mergeError.message?.includes('CONFLICT')) {
-            try { await git.merge(['--abort']); } catch { /* already clean */ }
-            // NOTE: intentional raw res.status — carries { conflict: true, conflictFiles } for client UI; ConflictError lacks this shape.
-            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles: [] }); // intentional: merge-conflict structured response
-            return;
-          }
-          throw mergeError;
-        }
-      } else {
-        try {
-          await git.merge([branchName, '--no-ff']);
-        } catch (mergeError: any) {
-          if (mergeError.message?.includes('CONFLICT') || mergeError.message?.includes('Automatic merge failed')) {
-            // Extract conflict file list before aborting
-            let conflictFiles: ConflictFile[] = [];
-            try {
-              const statusOutput = await git.raw(['diff', '--name-only', '--diff-filter=U']);
-              const conflictPaths = statusOutput.trim().split('\n').filter(Boolean);
-              conflictFiles = await extractConflictMarkers(git, workspace.path, conflictPaths);
-            } catch { /* fallback without conflict details */ }
-
-            try { await git.merge(['--abort']); } catch { /* already aborted */ }
-
-            // NOTE: intentional raw res.status — carries { conflict: true, conflictFiles } for client UI; ConflictError lacks this shape.
-            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles }); // intentional: merge-conflict structured response
-            return;
-          }
-          throw mergeError;
-        }
-      }
-    } finally {
-      // Always restore stashed changes after merge attempt (success or failure)
-      if (stashed) {
-        try {
-          await git.stash(['pop']);
-        } catch {
-          // Stash pop can conflict with merged files — not fatal, user can resolve
-        }
-      }
-    }
-
-    // Get the merge commit SHA
-    const logOutput = await git.raw(['rev-parse', 'HEAD']);
-    const mergeCommitSha = logOutput.trim();
-
-    await emitWalEvent('worktree_merged', workspaceId, { branchName, mergeCommitSha });
-
-    res.json({ ok: true, mergeCommitSha, stashedAndRestored: stashed });
-  } catch (error: any) {
-    handleRouteError(res, error, '[Worktrees] Merge');
-  }
+router.post('/merge', (_req: Request, res: Response) => {
+  res.status(409).json({
+    error: 'RELEASE_INTENT_REQUIRED',
+    message: 'Arbitrary worktree merge is retired; use the canonical run release reconciler.',
+  });
 });
 
 /**
  * @swagger
  * /api/worktrees/status:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Worktrees]
  *     summary: Get worktree branch status
  *     operationId: getWorktreeStatus

@@ -22,6 +22,8 @@ const router = Router();
  * @swagger
  * /api/run-queue:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: List pending run queue entries for a workspace
  *     operationId: listRunQueue
@@ -79,6 +81,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/run-queue/status:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get run queue status summary
  *     operationId: getRunQueueStatus
@@ -243,6 +247,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/run-queue/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Remove an entry from the run queue
  *     operationId: dequeueRun
@@ -295,6 +301,8 @@ router.delete('/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/run-queue/reorder:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Reorder run queue entries
  *     operationId: reorderRunQueue

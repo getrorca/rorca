@@ -5,11 +5,23 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { observeGithubPrDeliveryEvidence } from '../github-pr-delivery-evidence';
+jest.mock('../../db/index', () => ({
+  withPgAdvisoryLock: async (_key: string, operation: () => Promise<unknown>) => operation(),
+}));
+
+import { normalizedSha, observeGithubPrDeliveryEvidence } from '../github-pr-delivery-evidence';
 
 const headSha = 'a'.repeat(40);
 const baseSha = 'b'.repeat(40);
 const now = new Date('2026-07-16T12:00:00.000Z');
+const providerReleaseRef = `rorca/release/run-20260316000001-${headSha.slice(0, 12)}`;
+
+test('exact SHA normalization trims whitespace but rejects every overlong identity', () => {
+  expect(normalizedSha(`  ${'a'.repeat(40)}\n`, 'sha')).toBe('a'.repeat(40));
+  expect(() => normalizedSha('B'.repeat(64), 'sha')).toThrow('full Git commit SHA');
+  expect(() => normalizedSha('a'.repeat(41), 'sha')).toThrow('full Git commit SHA');
+  expect(() => normalizedSha('a'.repeat(65), 'sha')).toThrow('full Git commit SHA');
+});
 
 const activePolicy = {
   id: '10000000-0000-4000-8000-000000000001',
@@ -51,7 +63,15 @@ function runRow(overrides: Record<string, unknown> = {}) {
     pr_number: 42,
     repo_owner: 'getrorca',
     repo_name: 'rorca',
-    auto_pr_target_branch: 'main',
+    release_base_branch: 'main',
+    release_base_sha: baseSha,
+    release_head_ref: providerReleaseRef,
+    release_authorized_sha: headSha,
+    repository_authority_source: 'pat-oauth-fallback',
+    repository_binding_id: null,
+    repository_installation_id: null,
+    repository_id: null,
+    release_merge_strategy: 'pr',
     ...overrides,
   };
 }
@@ -67,7 +87,7 @@ function pull(overrides: Record<string, unknown> = {}) {
     mergeable_state: 'clean',
     merge_commit_sha: null,
     updated_at: now.toISOString(),
-    head: { ref: 'run/safe-delivery', sha: headSha, repo: { full_name: 'getrorca/rorca' } },
+    head: { ref: providerReleaseRef, sha: headSha, repo: { full_name: 'getrorca/rorca' } },
     base: { ref: 'main', sha: baseSha, repo: { full_name: 'getrorca/rorca' } },
     ...overrides,
   };
@@ -92,6 +112,7 @@ function harness(options: {
   finalPull?: Record<string, unknown>;
   reviews?: unknown[];
   checkRuns?: unknown[];
+  statuses?: unknown[];
   policy?: typeof activePolicy | null;
 } = {}) {
   const urls: string[] = [];
@@ -126,7 +147,7 @@ function harness(options: {
       }];
       return { total_count: checkRuns.length, check_runs: checkRuns };
     }
-    if (url.includes(`/commits/${headSha}/statuses?`)) return [];
+    if (url.includes(`/commits/${headSha}/statuses?`)) return options.statuses ?? [];
     if (url.includes('/pulls/42/reviews')) {
       return options.reviews ?? [{
         id: 601, state: 'APPROVED', commit_id: headSha, submitted_at: now.toISOString(),
@@ -139,6 +160,9 @@ function harness(options: {
   return {
     urls, inserted, wal, fetchJson, client,
     overrides: {
+      resolveAuthority: jest.fn(async () => ({
+        owner: 'getrorca', name: 'rorca', status: 'active', source: 'pat-oauth-fallback',
+      })),
       queryOne: jest.fn(async () => runRow()),
       resolveToken: jest.fn(async () => ({ token: 'opaque-test-token', source: 'workspace-pat' })),
       getActivePolicy: jest.fn(async () => options.policy === undefined ? activePolicy : options.policy),
@@ -165,7 +189,7 @@ describe('exact-SHA GitHub PR delivery evidence', () => {
       runId: 20260316000001,
       policy: { id: activePolicy.id, digest: activePolicy.policyDigest },
       repository: { owner: 'getrorca', name: 'rorca' },
-      pullRequest: { number: 42, headRef: 'run/safe-delivery', baseRef: 'main', headSha, baseSha },
+      pullRequest: { number: 42, headRef: providerReleaseRef, baseRef: 'main', headSha, baseSha },
       freshness: { comparisonStatus: 'ahead', behindBy: 0, branchFresh: true },
       checkSummary: { allRequiredPassed: true, policyScopeMatches: true },
       reviewSummary: { reviewSatisfied: true, currentApprovals: 1, policyScopeMatches: true },
@@ -179,13 +203,27 @@ describe('exact-SHA GitHub PR delivery evidence', () => {
   });
 
   test('fails closed before persistence when the provider head SHA changed', async () => {
-    const test = harness({ pull: { head: { ref: 'run/safe-delivery', sha: 'd'.repeat(40), repo: { full_name: 'getrorca/rorca' } } } });
+    const test = harness({ pull: { head: { ref: providerReleaseRef, sha: 'd'.repeat(40), repo: { full_name: 'getrorca/rorca' } } } });
     await expect(observeGithubPrDeliveryEvidence({
       workspaceId: 'ws-1', runId: 20260316000001, expectedHeadSha: headSha,
       principal: { principalId: 'operator', displayLabel: 'operator@example.test' },
     }, test.overrides as any)).rejects.toThrow('head SHA changed');
     expect(test.inserted).toHaveLength(0);
     expect(test.urls).toHaveLength(1);
+  });
+
+  test('manual operator status can never satisfy a required autonomous delivery check', async () => {
+    const manualPolicy = { ...activePolicy, requiredChecks: ['rorca/manual-spec-compliance'] } as unknown as typeof activePolicy;
+    const test = harness({ policy: manualPolicy, statuses: [{
+      id: 900, context: 'rorca/manual-spec-compliance', state: 'success', updated_at: now.toISOString(),
+      creator: { login: 'release-owner' },
+    }] });
+    const result = await observeGithubPrDeliveryEvidence({
+      workspaceId: 'ws-1', runId: 20260316000001, expectedHeadSha: headSha,
+      principal: { principalId: 'operator', displayLabel: 'operator@example.test' },
+    }, test.overrides as any);
+    expect(result.evidence.checks.map((check) => check.name)).not.toContain('rorca/manual-spec-compliance');
+    expect(result.evidence.checkSummary).toMatchObject({ allRequiredPassed: false, missing: ['rorca/manual-spec-compliance'] });
   });
 
   test('does not accept stale approvals or a mismatched policy base branch', async () => {
@@ -211,7 +249,7 @@ describe('exact-SHA GitHub PR delivery evidence', () => {
 
   test('fails closed when the PR changes during the observation window', async () => {
     const test = harness({ finalPull: {
-      head: { ref: 'run/safe-delivery', sha: 'd'.repeat(40), repo: { full_name: 'getrorca/rorca' } },
+      head: { ref: providerReleaseRef, sha: 'd'.repeat(40), repo: { full_name: 'getrorca/rorca' } },
     } });
     await expect(observeGithubPrDeliveryEvidence({
       workspaceId: 'ws-1', runId: 20260316000001, expectedHeadSha: headSha,

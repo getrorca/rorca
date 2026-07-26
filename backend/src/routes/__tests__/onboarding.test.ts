@@ -8,29 +8,69 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { Server } from 'http';
+import { once } from 'events';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { execute } from '../../db/index';
+import { execute, queryOne } from '../../db/index';
 
-let app: Express;
+interface OnboardingStateRow {
+  current_step: number;
+  workspace_id: string | null;
+  direction_done: boolean;
+  completed: boolean;
+}
+
+let app: Server;
 let tmpDir: string;
 let authToken: string;
+let originalState: OnboardingStateRow | undefined;
 
-beforeEach(async () => {
-  jest.resetModules();
+beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-onboarding-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+  process.env.NODE_ENV = 'test';
+  originalState = await queryOne<OnboardingStateRow>(
+    'SELECT current_step, workspace_id, direction_done, completed FROM onboarding_state WHERE id = 1',
+  );
 
   const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  await execute(
+    `INSERT INTO onboarding_state (id, current_step, workspace_id, direction_done, completed)
+     VALUES (1, 0, NULL, false, false)
+     ON CONFLICT (id) DO UPDATE SET
+       current_step = EXCLUDED.current_step,
+       workspace_id = EXCLUDED.workspace_id,
+       direction_done = EXCLUDED.direction_done,
+       completed = EXCLUDED.completed`,
+  );
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  if (originalState) {
+    await execute(
+      `INSERT INTO onboarding_state (id, current_step, workspace_id, direction_done, completed)
+       VALUES (1, $1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE SET
+         current_step = EXCLUDED.current_step,
+         workspace_id = EXCLUDED.workspace_id,
+         direction_done = EXCLUDED.direction_done,
+         completed = EXCLUDED.completed`,
+      [originalState.current_step, originalState.workspace_id, originalState.direction_done, originalState.completed],
+    );
+  } else {
+    await execute('DELETE FROM onboarding_state WHERE id = 1');
+  }
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 describe('GET /api/onboarding', () => {
@@ -47,7 +87,11 @@ describe('GET /api/onboarding', () => {
   });
 
   it('returns existing state if row exists', async () => {
-    await execute(`INSERT INTO onboarding_state (id, current_step, workspace_id, direction_done, completed) VALUES (1, 3, 'ws-123', 1, 0) ON CONFLICT (id) DO NOTHING`);
+    await execute(
+      `UPDATE onboarding_state
+       SET current_step = 3, workspace_id = 'ws-123', direction_done = true, completed = false
+       WHERE id = 1`,
+    );
 
     const res = await request(app)
       .get('/api/onboarding')

@@ -8,6 +8,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
+import { ensureAutonomousModelEgress } from './autonomous-model-egress';
 
 export const GITREINS_EVIDENCE_SCHEMA = 'https://gitreins.dev/schemas/evidence/v1.json';
 export const GITREINS_EVIDENCE_VERSION = '1.0';
@@ -209,16 +212,37 @@ export async function runGitReinsJudge(input: GitReinsJudgeInput): Promise<GitRe
     '--json',
   ];
 
+  const egressSocket = await ensureAutonomousModelEgress();
+  if (!egressSocket) return resultFor(input, startedAt, 'error', 'missing_config');
+  const guard = createAutonomousCommandGuard({
+    cwd: input.cwd,
+    env: { ...process.env, RORCA_AUTONOMOUS_EGRESS_SOCKET: egressSocket } as Record<string, string>,
+  });
+  const cleanupGuard = () => fs.rmSync(guard.guardBinDir, { recursive: true, force: true });
+  let launch: ReturnType<typeof prepareAutonomousSandboxLaunch>;
+  try {
+    launch = prepareAutonomousSandboxLaunch({
+      command: binary,
+      args,
+      cwd: input.cwd,
+      env: guard.env,
+      modelCredentials: true,
+    });
+  } catch {
+    cleanupGuard();
+    return resultFor(input, startedAt, 'error', 'missing_binary');
+  }
   return await new Promise(resolve => {
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(binary, args, {
-        cwd: input.cwd,
-        env: { ...process.env },
+      child = spawn(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch {
+      cleanupGuard();
       resolve(resultFor(input, startedAt, 'error', 'missing_binary'));
       return;
     }
@@ -233,6 +257,7 @@ export async function runGitReinsJudge(input: GitReinsJudgeInput): Promise<GitRe
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      cleanupGuard();
       resolve(value);
     };
 

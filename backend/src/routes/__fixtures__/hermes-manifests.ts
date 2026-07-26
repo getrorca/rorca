@@ -110,6 +110,7 @@ export const hermesHrcTaskManifestWithExecutionEnvironment = {
       issueUrl: 'https://linear.example/hermes/issue/HRC-008',
     },
     slack: {
+      teamId: 'T0HERMESHRC',
       channelId: 'C0HERMESHRC',
       threadTs: '1770000000.000800',
       messageTs: '1770000001.000800',
@@ -230,7 +231,7 @@ export const hermesHrcTaskManifestWithoutExecutionEnvironment = {
     modelOverride: 'claude-sonnet-4-5-20250929',
     effortLevel: 'high',
     terminalMode: 'ansi-html',
-    mergeStrategy: 'branch-only',
+    mergeStrategy: 'draft-pr',
   },
 } as const;
 

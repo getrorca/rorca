@@ -14,8 +14,8 @@
  *   3. spawnClaude() includes --thinking-budget <n> flag when thinkingBudget is provided
  *   4. spawnOpenCode() sets OPENCODE_REASONING_EFFORT env var for effort-levels models
  *   5. spawnOpenCode() sets OPENCODE_THINKING_BUDGET env var for anthropic-thinking models
- *   6. worker.ts passes reasoningEffort from job payload to execution-engine.ts as --reasoning-effort arg
- *   7. Backward compat: existing --thinking-enabled and --thinking-budget args still work
+ *   6. The separately-certified worker payload schema preserves reasoning controls
+ *   7. Release-1 manifestless requests cannot use legacy reasoning fields to dispatch work
  */
 
 // ─── Unit tests for buildOpenCodeReasoningEnv ─────────────────────────────────
@@ -168,7 +168,6 @@ describe('QRW-012 AC2: spawnClaude reasoning flag construction', () => {
     effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   ): string[] {
     return [
-      '--dangerously-skip-permissions',
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
@@ -255,17 +254,16 @@ describe('QRW-012 AC2: spawnClaude reasoning flag construction', () => {
   });
 });
 
-// ─── worker.ts reasoning arg pass-through ─────────────────────────────────────
-// Verify that when worker.ts processes a pipeline:run job, it correctly converts
-// reasoningEffort in the payload to --reasoning-effort arg for execution-engine.
+// ─── validated worker payload and Release-1 dispatch boundary ─────────────────
+// The schema seam is independently consumed by worker.ts; route coverage below
+// proves legacy manifestless fields cannot mint dispatch authority.
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import type { Express } from 'express';
+import * as crypto from 'crypto';
+import type { Server } from 'http';
 import request from 'supertest';
 import { getAuthToken } from '../routes/__tests__/helpers/auth-helper';
-import { execute } from '../db/index';
+import { execute, queryOne } from '../db/index';
+import { PipelineRunJobPayload, type PipelineRunJobPayloadType } from '../lib/pg-boss-schemas';
 
 jest.setTimeout(90_000);
 
@@ -288,92 +286,32 @@ jest.mock('../lib/pg-boss', () => ({
   }),
 }));
 
-let app: Express;
-let tmpDir: string;
-let wsDir: string;
-let authToken: string;
-
-beforeAll(async () => {
-  process.env.NODE_ENV = 'test';
-  const serverMod = require('../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
-
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
-  await execute(
-    `INSERT INTO users (id, email, display_name, password_hash, plan)
-     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
-     ON CONFLICT (id) DO UPDATE SET plan = 'pro'`
-  );
-  await execute(
-    `INSERT INTO model_pricing (model_id, input_cost_per_1k, output_cost_per_1k, input_cost_per_1m, output_cost_per_1m)
-     VALUES ('claude-sonnet-4-5-20250929', 0.003, 0.015, 3.0, 15.0)
-     ON CONFLICT (model_id) DO NOTHING`
-  );
-});
-
-beforeEach(async () => {
-  jest.clearAllMocks();
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-qrw012-'));
-  wsDir = path.join(tmpDir, 'workspace');
-  fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
-  fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'pending'), { recursive: true });
-
-  // Clean DB state
-  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-qrw012')`);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-qrw012')`);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-qrw012'`);
-  await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-qrw012'`);
-  await execute(`DELETE FROM agent_config WHERE id = 'default'`).catch(() => {});
-  await execute(`DELETE FROM workflow_configs WHERE workflow_id = 'pipeline_execution'`).catch(() => {});
-
-  await execute(
-    `INSERT INTO users (id, email, display_name, password_hash, plan)
-     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
-     ON CONFLICT (id) DO UPDATE SET plan = 'pro', email = EXCLUDED.email`
-  );
-  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
-  await execute(
-    `INSERT INTO model_pricing (model_id, input_cost_per_1k, output_cost_per_1k, input_cost_per_1m, output_cost_per_1m)
-     VALUES ('claude-sonnet-4-5-20250929', 0.003, 0.015, 3.0, 15.0)
-     ON CONFLICT (model_id) DO NOTHING`
-  );
-  await execute(
-    `INSERT INTO workspaces (id, label, path) VALUES ('ws-qrw012', 'QRW012 WS', $1)
-     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
-    [wsDir]
-  );
-});
-
-afterEach(async () => {
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 300));
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-
-  delete process.env.RORCA_AGENT;
-  delete process.env.RORCA_MODEL;
-});
-
-afterAll(async () => {
-  delete process.env.NODE_ENV;
-});
-
-function seedSpec(slug: string, overrides: Record<string, unknown> = {}) {
-  const spec = {
-    title: slug.replace(/-/g, ' '),
-    userStories: [
-      { id: 'US-001', title: 'Story one', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [], passes: false },
-    ],
-    generatedAt: '2026-02-20T12:00:00.000Z',
+function validatedReasoningJobPayload(
+  overrides: Partial<PipelineRunJobPayloadType> = {},
+): PipelineRunJobPayloadType {
+  const parsed = PipelineRunJobPayload.safeParse({
+    runId: 1,
+    workspaceId: 'ws-qrw012-payload',
+    specPath: 'forge/specs/approved/reasoning.json',
+    runSpecPath: 'forge/runs/1/spec.json',
+    workspacePath: '/tmp/rorca-qrw012-workspace',
+    agent: 'claude',
+    model: 'claude-opus-4-6',
+    worktreePath: '/tmp/rorca-qrw012-worktree',
+    branchName: 'rorca/qrw012',
+    terminalMode: 'ansi-html',
+    executionEnvironment: 'remote-rorca',
+    autoWorktree: true,
+    autoMerge: false,
+    mergeStrategy: 'draft-pr',
+    safetyOptions: { deploy: false, externalSend: true, policyLocked: true },
+    triggeredVia: 'run_now',
     ...overrides,
-  };
-  fs.writeFileSync(
-    path.join(wsDir, 'forge', 'specs', 'approved', `${slug}.json`),
-    JSON.stringify(spec, null, 2),
-    'utf8',
-  );
-  return spec;
+  });
+  if (!parsed.success) {
+    throw new Error(`Reasoning payload fixture failed validation: ${parsed.error.message}`);
+  }
+  return parsed.data;
 }
 
 function getMockSend(): jest.Mock {
@@ -381,152 +319,46 @@ function getMockSend(): jest.Mock {
   return pgBossMock.getBoss().send as jest.Mock;
 }
 
-// ─── AC6: worker passes reasoningEffort from job payload to execution-engine ──
+// ─── AC6: validated reasoning controls survive the worker payload schema ──────
 
-describe('QRW-012 AC6: pipeline trigger passes reasoning params to pg-boss job payload', () => {
-  it('thinkingEnabled in trigger body is included in pg-boss job payload', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('reasoning-thinking-enabled');
-
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/reasoning-thinking-enabled.json',
-        workspaceId: 'ws-qrw012',
-        thinkingEnabled: true,
-      });
-
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    expect(jobPayload.thinkingEnabled).toBe(true);
+describe('QRW-012 AC6: worker payload schema preserves validated reasoning controls', () => {
+  it('preserves thinkingEnabled in a validated worker payload', () => {
+    expect(validatedReasoningJobPayload({ thinkingEnabled: true }).thinkingEnabled).toBe(true);
   });
 
-  it('thinkingBudget in trigger body is included in pg-boss job payload', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('reasoning-thinking-budget');
-
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/reasoning-thinking-budget.json',
-        workspaceId: 'ws-qrw012',
-        thinkingEnabled: true,
-        thinkingBudget: 8000,
-      });
-
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    expect(jobPayload.thinkingBudget).toBe(8000);
+  it('preserves thinkingBudget in a validated worker payload', () => {
+    expect(validatedReasoningJobPayload({ thinkingEnabled: true, thinkingBudget: 8000 }).thinkingBudget).toBe(8000);
   });
 
-  it('effortLevel in trigger body is included in pg-boss job payload', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('reasoning-effort-level');
-
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/reasoning-effort-level.json',
-        workspaceId: 'ws-qrw012',
-        effortLevel: 'high',
-      });
-
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    expect(jobPayload.effortLevel).toBe('high');
+  it('preserves the canonical TaskManifest effortLevel in a validated worker payload', () => {
+    expect(validatedReasoningJobPayload({ effortLevel: 'high' }).effortLevel).toBe('high');
   });
 
-  it('reasoningEffort in trigger body is included in pg-boss job payload', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('reasoning-effort-string');
-
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/reasoning-effort-string.json',
-        workspaceId: 'ws-qrw012',
-        reasoningEffort: 'medium',
-      });
-
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    expect(jobPayload.reasoningEffort).toBe('medium');
+  it('preserves the backward-compatible reasoningEffort field in a validated worker payload', () => {
+    expect(validatedReasoningJobPayload({ reasoningEffort: 'medium' }).reasoningEffort).toBe('medium');
   });
 
-  it('all reasoning params together are included in pg-boss job payload', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('reasoning-all-params');
-
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    // Note: the pipeline trigger Zod schema accepts effortLevel up to 'high' (not 'max');
-    // 'max' is a Claude-only value that routes through reasoningEffort (string) instead.
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/reasoning-all-params.json',
-        workspaceId: 'ws-qrw012',
-        thinkingEnabled: true,
-        thinkingBudget: 16000,
-        effortLevel: 'high',
-        reasoningEffort: 'high',
-      });
-
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    expect(jobPayload.thinkingEnabled).toBe(true);
-    expect(jobPayload.thinkingBudget).toBe(16000);
-    expect(jobPayload.effortLevel).toBe('high');
-    expect(jobPayload.reasoningEffort).toBe('high');
+  it('preserves all validated reasoning fields together', () => {
+    const payload = validatedReasoningJobPayload({
+      thinkingEnabled: true,
+      thinkingBudget: 16000,
+      effortLevel: 'high',
+      reasoningEffort: 'high',
+    });
+    expect(payload).toMatchObject({
+      thinkingEnabled: true,
+      thinkingBudget: 16000,
+      effortLevel: 'high',
+      reasoningEffort: 'high',
+    });
   });
 
-  it('reasoning params are absent from job payload when not sent in trigger body', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('no-reasoning-params');
-
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/no-reasoning-params.json',
-        workspaceId: 'ws-qrw012',
-        // No reasoning params
-      });
-
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    // The fields should be absent or undefined — not set to null/false by default
-    expect(jobPayload.thinkingEnabled).toBeUndefined();
-    expect(jobPayload.thinkingBudget).toBeUndefined();
-    expect(jobPayload.effortLevel).toBeUndefined();
-    expect(jobPayload.reasoningEffort).toBeUndefined();
+  it('does not synthesize reasoning fields when the dispatch payload omits them', () => {
+    const payload = validatedReasoningJobPayload();
+    expect(payload.thinkingEnabled).toBeUndefined();
+    expect(payload.thinkingBudget).toBeUndefined();
+    expect(payload.effortLevel).toBeUndefined();
+    expect(payload.reasoningEffort).toBeUndefined();
   });
 });
 
@@ -575,80 +407,80 @@ describe('QRW-012 AC5: backward compat — --thinking-enabled and --thinking-bud
     expect(env1).toHaveProperty('OPENCODE_REASONING_EFFORT', 'high');
   });
 
-  it('job payload thinkingEnabled passes validation for boolean true', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('compat-thinking-enabled-true');
+  describe('Release-1 manifestless compatibility boundary', () => {
+    let server: Server;
+    let authToken: string;
+    const workspaceId = `ws-qrw012-${crypto.randomUUID()}`;
+    const email = `qrw012-${crypto.randomUUID()}@example.com`;
 
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/compat-thinking-enabled-true.json',
-        workspaceId: 'ws-qrw012',
-        thinkingEnabled: true,
-        thinkingBudget: 4096,
+    beforeAll(async () => {
+      const app = require('../server').default;
+      authToken = await getAuthToken(app, { email, role: 'admin' });
+      server = app.listen(0, '127.0.0.1');
+      await new Promise<void>((resolve, reject) => {
+        server.once('listening', resolve);
+        server.once('error', reject);
       });
+    });
 
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    // Both fields must survive the Zod validation in pg-boss-schemas
-    expect(jobPayload.thinkingEnabled).toBe(true);
-    expect(jobPayload.thinkingBudget).toBe(4096);
-  });
+    afterAll(async () => {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+      await execute('DELETE FROM users WHERE email = $1', [email]);
+    });
 
-  it('job payload effortLevel passes Zod enum validation for low/medium/high', async () => {
-    process.env.RORCA_AGENT = 'claude';
-    // The pipeline trigger route accepts 'low'|'medium'|'high' for effortLevel.
-    // 'max' is Claude Opus-only and must be passed via reasoningEffort (string) instead.
-    const validLevels = ['low', 'medium', 'high'] as const;
-
-    for (const level of validLevels) {
-      seedSpec(`compat-effort-${level}`);
-
+    async function expectManifestlessNoEffect(reasoning: Record<string, unknown>): Promise<void> {
       const mockSend = getMockSend();
       mockSend.mockClear();
+      const before = Number((await queryOne<{ count: string }>(
+        'SELECT COUNT(*) AS count FROM pipeline_runs WHERE workspace_id = $1',
+        [workspaceId],
+      ))?.count ?? '0');
 
-      const res = await request(app)
+      const res = await request(server)
         .post('/api/pipeline/trigger')
         .set('Authorization', `Bearer ${authToken}`)
         .send({
-          specPath: `forge/specs/approved/compat-effort-${level}.json`,
-          workspaceId: 'ws-qrw012',
-          effortLevel: level,
+          specPath: 'forge/specs/approved/must-not-be-read.json',
+          workspaceId,
+          autoWorktree: true,
+          autoMerge: false,
+          mergeStrategy: 'draft-pr',
+          ...reasoning,
         });
 
-      expect(res.status).toBe(201);
-      expect(mockSend).toHaveBeenCalled();
-      const jobPayload = mockSend.mock.calls[0][1];
-      expect(jobPayload.effortLevel).toBe(level);
-    }
-  });
-
-  it('reasoningEffort string field passes validation and carries max effort for Claude Opus', async () => {
-    // For 'max' effort (Claude Opus-only), use reasoningEffort (unrestricted string)
-    // rather than effortLevel (which is restricted to low|medium|high at the API layer).
-    process.env.RORCA_AGENT = 'claude';
-    seedSpec('compat-effort-max');
-
-    const mockSend = getMockSend();
-    mockSend.mockClear();
-
-    const res = await request(app)
-      .post('/api/pipeline/trigger')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        specPath: 'forge/specs/approved/compat-effort-max.json',
-        workspaceId: 'ws-qrw012',
-        reasoningEffort: 'max',
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({
+        code: 'RELEASE_ONE_TASK_MANIFEST_REQUIRED',
+        details: {
+          profileId: 'release-1-supervised-core',
+          capabilityId: 'bounded_task_manifest',
+          endpoint: '/api/pipeline/task-manifests/trigger',
+        },
       });
+      expect(mockSend).not.toHaveBeenCalled();
+      const after = Number((await queryOne<{ count: string }>(
+        'SELECT COUNT(*) AS count FROM pipeline_runs WHERE workspace_id = $1',
+        [workspaceId],
+      ))?.count ?? '0');
+      expect(after).toBe(before);
+    }
 
-    expect(res.status).toBe(201);
-    expect(mockSend).toHaveBeenCalled();
-    const jobPayload = mockSend.mock.calls[0][1];
-    expect(jobPayload.reasoningEffort).toBe('max');
+    it('legacy thinking flags cannot dispatch a manifestless run', async () => {
+      await expectManifestlessNoEffect({ thinkingEnabled: true, thinkingBudget: 4096 });
+    });
+
+    it.each(['low', 'medium', 'high'] as const)(
+      'legacy effortLevel=%s cannot dispatch a manifestless run',
+      async (effortLevel) => {
+        await expectManifestlessNoEffect({ effortLevel });
+      },
+    );
+
+    it('legacy reasoningEffort cannot dispatch a manifestless run', async () => {
+      await expectManifestlessNoEffect({ reasoningEffort: 'max' });
+    });
   });
 });

@@ -22,6 +22,7 @@
       "issueUrl": "https://linear.example/rorca/issue/ROR-123"
     },
     "slack": {
+      "teamId": "T123RORCA",
       "channelId": "C123RORCA",
       "threadTs": "1710547480.000100",
       "messageTs": "1710547480.000100",
@@ -51,7 +52,8 @@
       "backend/src/lib/task-manifest.ts",
       "backend/src/lib/context-safety.ts",
       "backend/src/lib/__tests__/task-manifest.test.ts",
-      "packages/rorca-public-contract/src/index.ts"
+      "packages/rorca-public-contract/src/index.ts",
+      "forge/specs/approved/rorca-task-manifest-execution-bridge-for-hermes.json"
     ],
     "forbiddenPaths": [
       "backend/src/lib/spec-types.ts"

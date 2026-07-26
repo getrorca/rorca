@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -25,8 +26,8 @@ jest.mock('../../db/index', () => ({
 import { hashContent } from '../context-safety';
 import { ForbiddenError, RawArchiveIntegrityError } from '../errors';
 import {
-  PTY_RAW_ARCHIVE_ROOT,
   RawPtyArchiveWriter,
+  openRawPtyArchive,
   pruneExpiredRawPtyArchives,
   reconcileInterruptedRawPtyArchives,
   resolveRawArchiveSegmentPath,
@@ -39,9 +40,16 @@ function tempWorkspace(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'pty-raw-archive-'));
 }
 
+let serviceRoot = '';
+function archiveRoot(workspaceId = 'ws-1'): string {
+  return path.join(serviceRoot, createHash('sha256').update(workspaceId).digest('hex'));
+}
+
 describe('raw PTY archive', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    serviceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-service-archive-'));
+    process.env.RORCA_PTY_ARCHIVE_ROOT = serviceRoot;
     executeMock.mockResolvedValue({ rowCount: 1 });
     queryMock.mockResolvedValue([]);
     queryOneMock.mockResolvedValue(undefined);
@@ -53,19 +61,31 @@ describe('raw PTY archive', () => {
   it('rejects traversal and symlink escapes from the workspace archive root', () => {
     const workspace = tempWorkspace();
     try {
-      fs.mkdirSync(path.join(workspace, PTY_RAW_ARCHIVE_ROOT), { recursive: true });
-      expect(() => resolveRawArchiveSegmentPath(workspace, PTY_RAW_ARCHIVE_ROOT, '../../secret', false))
+      fs.mkdirSync(archiveRoot(), { recursive: true });
+      expect(() => resolveRawArchiveSegmentPath(workspace, archiveRoot(), '../../secret', false))
         .toThrow(ForbiddenError);
 
       if (process.platform !== 'win32') {
         const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-outside-'));
         fs.writeFileSync(path.join(outside, 'segment.gz'), 'secret');
-        fs.symlinkSync(outside, path.join(workspace, PTY_RAW_ARCHIVE_ROOT, 'escaped'));
+        fs.symlinkSync(outside, path.join(archiveRoot(), 'escaped'));
         expect(() => resolveRawArchiveSegmentPath(
           workspace,
-          PTY_RAW_ARCHIVE_ROOT,
+          archiveRoot(),
           'escaped/segment.gz',
         )).toThrow(ForbiddenError);
+        expect(() => resolveRawArchiveSegmentPath(
+          workspace,
+          archiveRoot(),
+          'escaped/new-segment.gz',
+          false,
+        )).toThrow(ForbiddenError);
+        expect(fs.existsSync(path.join(outside, 'new-segment.gz'))).toBe(false);
+        fs.rmSync(path.join(archiveRoot(), 'escaped'), { force: true });
+        fs.rmSync(archiveRoot(), { recursive: true, force: true });
+        fs.symlinkSync(outside, archiveRoot());
+        expect(() => resolveRawArchiveSegmentPath(workspace, archiveRoot(), 'segment.gz')).toThrow(ForbiddenError);
+        fs.rmSync(archiveRoot(), { force: true });
         fs.rmSync(outside, { recursive: true, force: true });
       }
     } finally {
@@ -75,7 +95,7 @@ describe('raw PTY archive', () => {
 
   it('rotates ordered gzip segments without changing any raw PTY byte', async () => {
     const workspace = tempWorkspace();
-    const generationDir = path.join(workspace, PTY_RAW_ARCHIVE_ROOT, GENERATION_ID);
+    const generationDir = path.join(archiveRoot(), GENERATION_ID);
     fs.mkdirSync(generationDir, { recursive: true });
     const manifest = {
       id: '223e4567-e89b-42d3-a456-426614174000',
@@ -83,7 +103,9 @@ describe('raw PTY archive', () => {
       run_id: 77,
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
-      archive_root_relative: PTY_RAW_ARCHIVE_ROOT,
+      archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 0,
       completion_state: 'writing',
@@ -119,9 +141,32 @@ describe('raw PTY archive', () => {
     }
   });
 
+  it('retains the created descriptor and rejects segment-path replacement before persistence', async () => {
+    const workspace = tempWorkspace();
+    const generationDir = path.join(archiveRoot(), GENERATION_ID);
+    fs.mkdirSync(generationDir, { recursive: true });
+    const manifest = {
+      id: '223e4567-e89b-42d3-a456-426614174001', generation_id: GENERATION_ID, run_id: 77,
+      workspace_id: 'ws-1', story_id: 'PTY-RACE', archive_root_relative: archiveRoot(),
+      raw_archive_expected: true, raw_archive_storage_scope: 'service-owned',
+      segment_max_raw_bytes: 4096, next_raw_offset: 0, completion_state: 'writing', retention_days: 30,
+      retention_expires_at: new Date(Date.now() + 86_400_000).toISOString(), gaps: [], started_at: new Date().toISOString(),
+      completed_at: null, failure_code: null, failure_message: null, workspace_path: workspace,
+    };
+    const Writer = RawPtyArchiveWriter as unknown as new (row: unknown, index: number, offset: number) => RawPtyArchiveWriter;
+    const writer = new Writer(manifest, 0, 0);
+    writer.append(Buffer.from('first'));
+    const segmentPath = path.join(generationDir, 'segment-000000.gz');
+    fs.renameSync(segmentPath, `${segmentPath}.replaced`);
+    fs.writeFileSync(segmentPath, gzipSync(Buffer.from('attacker')));
+    writer.append(Buffer.from('second'));
+    await expect(writer.drain()).rejects.toThrow(/no longer identifies its retained descriptor/);
+    expect(gunzipSync(fs.readFileSync(segmentPath)).toString()).toBe('attacker');
+  });
+
   it('reconciles an interrupted missing segment without renumbering valid later ranges', async () => {
     const workspace = tempWorkspace();
-    const archiveDir = path.join(workspace, PTY_RAW_ARCHIVE_ROOT, GENERATION_ID);
+    const archiveDir = path.join(archiveRoot(), GENERATION_ID);
     fs.mkdirSync(archiveDir, { recursive: true });
     const laterCompressed = gzipSync(Buffer.from('bbbb'));
     fs.writeFileSync(path.join(archiveDir, 'segment-000001.gz'), laterCompressed);
@@ -131,7 +176,9 @@ describe('raw PTY archive', () => {
       run_id: 77,
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
-      archive_root_relative: PTY_RAW_ARCHIVE_ROOT,
+      archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 8,
       completion_state: 'writing',
@@ -192,7 +239,7 @@ describe('raw PTY archive', () => {
 
   it('prunes only the expired contained generation directory and records retention state', async () => {
     const workspace = tempWorkspace();
-    const generationDir = path.join(workspace, PTY_RAW_ARCHIVE_ROOT, GENERATION_ID);
+    const generationDir = path.join(archiveRoot(), GENERATION_ID);
     fs.mkdirSync(generationDir, { recursive: true });
     fs.writeFileSync(path.join(generationDir, 'segment-000000.gz'), gzipSync(Buffer.from('old')));
     queryMock.mockResolvedValue([{
@@ -201,7 +248,9 @@ describe('raw PTY archive', () => {
       run_id: 77,
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
-      archive_root_relative: PTY_RAW_ARCHIVE_ROOT,
+      archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 3,
       completion_state: 'complete',
@@ -224,10 +273,77 @@ describe('raw PTY archive', () => {
     }
   });
 
+  it('relocates a parent-format workspace archive before read and safely resumes from retained service bytes', async () => {
+    const workspace = tempWorkspace();
+    const legacyRoot = path.join(workspace, '.rorca', 'pty-archives');
+    const relativePath = `${GENERATION_ID}/segment-000000.gz`;
+    const legacyPath = path.join(legacyRoot, relativePath);
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    const compressed = gzipSync(Buffer.from('legacy retained'));
+    fs.writeFileSync(legacyPath, compressed, { mode: 0o600 });
+    const manifest = {
+      id: '223e4567-e89b-42d3-a456-426614174099', generation_id: GENERATION_ID, run_id: 77,
+      workspace_id: 'ws-legacy', story_id: 'PTY-LEGACY', archive_root_relative: '.rorca/pty-archives',
+      segment_max_raw_bytes: 4096, next_raw_offset: 15, completion_state: 'complete', retention_days: 30,
+      retention_expires_at: new Date(Date.now() + 86_400_000).toISOString(), gaps: [], started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(), failure_code: null, failure_message: null,
+      workspace_path: workspace, generation_active: false, generation_status: 'exited',
+    };
+    const segment = {
+      id: '323e4567-e89b-42d3-a456-426614174099', manifest_id: manifest.id, generation_id: GENERATION_ID,
+      segment_index: 0, relative_path: relativePath, raw_start: 0, raw_end: 15, raw_size: 15,
+      compressed_size: compressed.length, sha256: hashContent(compressed), completion_state: 'complete',
+      first_byte_at: new Date().toISOString(), completed_at: new Date().toISOString(), verified_at: null,
+    };
+    const legacyServiceRoot = path.join(serviceRoot, createHash('sha256').update('ws-legacy').digest('hex'));
+    const serviceManifest = { ...manifest, archive_root_relative: legacyServiceRoot };
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('INSERT INTO pty_raw_archive_manifests')) return [manifest];
+      if (sql.includes('FROM pty_raw_archive_segments')) return [segment];
+      return [];
+    });
+    queryOneMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM pty_raw_archive_manifests m')) return manifest;
+      if (sql.includes('SELECT g.workspace_id')) return { workspace_id: 'ws-legacy', story_id: 'PTY-LEGACY', workspace_path: workspace, is_active: true };
+      if (sql.includes('SELECT completion_state')) return { completion_state: 'writing', gaps: [] };
+      return undefined;
+    });
+    const relocationQuery = jest.fn().mockImplementation(async (sql: string) => (
+      sql.includes('UPDATE pty_raw_archive_manifests')
+        ? { rows: [serviceManifest] }
+        : { rows: [], rowCount: 1 }
+    ));
+    transactionMock.mockImplementation(async (callback: (client: { query: jest.Mock }) => Promise<unknown>) => (
+      callback({ query: relocationQuery })
+    ));
+
+    try {
+      const verified = await verifyRawPtyArchive(77, GENERATION_ID);
+      expect(verified.archiveRoot).toBe(legacyServiceRoot);
+      expect(verified.verifiedPaths).toHaveLength(1);
+      expect(gunzipSync(fs.readFileSync(verified.verifiedPaths[0]!)).toString()).toBe('legacy retained');
+      expect(fs.readFileSync(legacyPath).equals(compressed)).toBe(true);
+      expect(relocationQuery).toHaveBeenCalledWith(expect.stringContaining('archive_root_relative = $2'),
+        [manifest.id, legacyServiceRoot, '.rorca/pty-archives']);
+      expect(relocationQuery).toHaveBeenCalledWith(
+        expect.stringContaining('raw_archive_expected = TRUE'),
+        [GENERATION_ID, 'ws-legacy', 77],
+      );
+
+      const writer = await openRawPtyArchive({ generationId: GENERATION_ID, runId: 77, generationToken: 'legacy-token' });
+      writer.append(Buffer.from(' resumed'));
+      await writer.drain();
+      expect(fs.existsSync(path.join(legacyServiceRoot, GENERATION_ID, 'segment-000001.gz'))).toBe(true);
+      expect(fs.existsSync(legacyPath)).toBe(true);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('verifies every segment hash and reports later corruption without hiding earlier evidence', async () => {
     const workspace = tempWorkspace();
     const relativePath = `${GENERATION_ID}/segment-000000.gz`;
-    const absolutePath = path.join(workspace, PTY_RAW_ARCHIVE_ROOT, relativePath);
+    const absolutePath = path.join(archiveRoot(), relativePath);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
     const compressed = gzipSync(Buffer.from('exact raw bytes'));
     fs.writeFileSync(absolutePath, compressed);
@@ -237,7 +353,9 @@ describe('raw PTY archive', () => {
       run_id: 77,
       workspace_id: 'ws-1',
       story_id: 'PTY-003',
-      archive_root_relative: PTY_RAW_ARCHIVE_ROOT,
+      archive_root_relative: archiveRoot(),
+      raw_archive_expected: true,
+      raw_archive_storage_scope: 'service-owned',
       segment_max_raw_bytes: 4096,
       next_raw_offset: 15,
       completion_state: 'complete',

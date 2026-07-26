@@ -23,7 +23,7 @@ interface BudgetConfigRow {
   alert_threshold_usd: number | null;
   hard_cap_usd: number | null;
   period: 'daily' | 'weekly' | 'monthly';
-  notify_emails: string;
+  notify_emails: unknown;
   created_at: string;
   updated_at: string;
 }
@@ -43,6 +43,21 @@ function periodStart(period: 'daily' | 'weekly' | 'monthly'): string {
   }
   // monthly
   return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+}
+
+/** Decode driver-native JSONB arrays and legacy JSON strings without reflecting malformed values. */
+function decodeNotifyEmails(value: unknown): string[] {
+  let decoded = value;
+  if (typeof decoded === 'string') {
+    try {
+      decoded = JSON.parse(decoded) as unknown;
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(decoded)
+    ? decoded.filter((email): email is string => typeof email === 'string')
+    : [];
 }
 
 /** Calculate total spending for a workspace since a given date */
@@ -96,7 +111,7 @@ export async function checkBudgetThresholds(workspaceId: string): Promise<{
     );
 
     if (!existingAlert) {
-      const emails = JSON.parse(config.notify_emails) as string[];
+      const emails = decodeNotifyEmails(config.notify_emails);
       const walResult = await queryOne<{ id: number }>(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('budget_alert', $1, $2) RETURNING id`,
         [workspaceId, JSON.stringify({
@@ -130,6 +145,8 @@ export async function checkBudgetThresholds(workspaceId: string): Promise<{
  * @swagger
  * /api/workspaces/{workspaceId}/budget:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Budget]
  *     summary: Create or update budget configuration
  *     operationId: upsertBudgetConfig
@@ -199,7 +216,14 @@ router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) =>
       return;
     }
 
-    const emailsJson = JSON.stringify(notify_emails || []);
+    if (notify_emails !== undefined && (
+      !Array.isArray(notify_emails)
+      || notify_emails.some(email => typeof email !== 'string')
+    )) {
+      throw new ValidationError('notify_emails must be an array of strings');
+    }
+    const notifyEmails = notify_emails ?? [];
+    const emailsJson = JSON.stringify(notifyEmails);
 
     // Upsert
     await withUserClient(req, async (client) => {
@@ -226,7 +250,7 @@ router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) =>
         alert_threshold_usd: alert_threshold_usd ?? null,
         hard_cap_usd: hard_cap_usd ?? null,
         period: budgetPeriod,
-        notify_emails: notify_emails || [],
+        notify_emails: notifyEmails,
       })]
     );
     if (walResult) {
@@ -248,7 +272,7 @@ router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) =>
     res.json({
       config: config ? {
         ...config,
-        notify_emails: JSON.parse(config.notify_emails),
+        notify_emails: decodeNotifyEmails(config.notify_emails),
       } : null,
       spending_usd: Math.round(budgetStatus.spending * 1_000_000) / 1_000_000,
       alert_triggered: budgetStatus.alertTriggered,
@@ -263,6 +287,8 @@ router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) =>
  * @swagger
  * /api/workspaces/{workspaceId}/budget:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Budget]
  *     summary: Get budget configuration and current spending
  *     operationId: getBudgetConfig
@@ -326,7 +352,7 @@ router.get('/', requireWorkspaceMember(), async (req: Request, res: Response) =>
     res.json({
       config: {
         ...config,
-        notify_emails: JSON.parse(config.notify_emails),
+        notify_emails: decodeNotifyEmails(config.notify_emails),
       },
       spending_usd: Math.round(spending * 1_000_000) / 1_000_000,
       remaining_usd: remaining != null ? Math.round(remaining * 1_000_000) / 1_000_000 : null,
@@ -343,6 +369,8 @@ router.get('/', requireWorkspaceMember(), async (req: Request, res: Response) =>
  * @swagger
  * /api/workspaces/{workspaceId}/budget:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Budget]
  *     summary: Remove budget configuration
  *     operationId: deleteBudgetConfig

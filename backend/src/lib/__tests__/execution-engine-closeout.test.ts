@@ -7,9 +7,15 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { createStoryExecutionManifest, type StoryExecutionManifestInput } from '../story-execution-packet';
+import {
+  deriveIntegratedPassStoryResultIdempotencyKey,
+  resolveIntegratedRunHead,
+} from '../execution-engine';
 import {
   createStoryAttemptResult,
   evaluateStoryCloseout,
@@ -21,10 +27,16 @@ import {
 
 const ENGINE_PATH = path.resolve(__dirname, '..', 'execution-engine.ts');
 const PIPELINE_PATH = path.resolve(__dirname, '..', '..', 'routes', 'pipeline.ts');
+const STORY_RESULT_PERSISTENCE_PATH = path.resolve(__dirname, '..', 'story-result-persistence.ts');
+const WAL_LISTENER_PATH = path.resolve(__dirname, '..', 'wal-listener.ts');
 const WORKER_PATH = path.resolve(__dirname, '..', '..', 'worker.ts');
+const RELEASE_AUTHORITY_PATH = path.resolve(__dirname, '..', 'release-authority.ts');
 const ENGINE_SOURCE = fs.readFileSync(ENGINE_PATH, 'utf8');
 const PIPELINE_SOURCE = fs.readFileSync(PIPELINE_PATH, 'utf8');
+const STORY_RESULT_PERSISTENCE_SOURCE = fs.readFileSync(STORY_RESULT_PERSISTENCE_PATH, 'utf8');
+const WAL_LISTENER_SOURCE = fs.readFileSync(WAL_LISTENER_PATH, 'utf8');
 const WORKER_SOURCE = fs.readFileSync(WORKER_PATH, 'utf8');
+const RELEASE_AUTHORITY_SOURCE = fs.readFileSync(RELEASE_AUTHORITY_PATH, 'utf8');
 const SHA = 'a'.repeat(40);
 const BASE_SHA = 'b'.repeat(40);
 const CWD = '/tmp/rorca-closeout-story';
@@ -144,9 +156,120 @@ describe('execution-engine closeout architecture', () => {
     const finalizerStart = ENGINE_SOURCE.indexOf('async function finalizeIntegratedStoryPass(');
     const finalizerEnd = ENGINE_SOURCE.indexOf('async function recordStoryMergeConflict(', finalizerStart);
     const finalizer = ENGINE_SOURCE.slice(finalizerStart, finalizerEnd);
-    expect(finalizer.indexOf('await markStoryPassed(')).toBeLessThan(finalizer.indexOf("'story_passed'"));
-    expect(finalizer.indexOf('if (!transitioned)')).toBeLessThan(finalizer.indexOf("'story_passed'"));
-    expect(finalizer.indexOf("'story_passed'")).toBeLessThan(finalizer.indexOf("status: 'pass'"));
+    expect(finalizer.indexOf('resolveIntegratedRunHead(config)')).toBeLessThan(finalizer.indexOf('deriveIntegratedPassStoryResultIdempotencyKey({'));
+    expect(finalizer.indexOf('deriveIntegratedPassStoryResultIdempotencyKey({')).toBeLessThan(finalizer.indexOf('await postStoryResult('));
+    expect(finalizer.indexOf('resultIdempotencyKey')).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
+    expect(finalizer.indexOf("status: 'pass'")).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
+    expect(finalizer.indexOf('await postStoryResult(')).toBeLessThan(finalizer.indexOf('await markStoryPassed('));
+    expect(finalizer.indexOf('await markStoryPassed(')).toBeLessThan(finalizer.indexOf('relayOrJournalTrustedWal'));
+    expect(finalizer.indexOf('relayOrJournalTrustedWal')).toBeLessThan(finalizer.indexOf('if (!lifecycle.changed)'));
+    expect(finalizer).toContain('commitSha: integratedHead.sha');
+    expect(finalizer).toContain('commit_sha: integratedHead.sha');
+    expect(finalizer).toContain('origin_commit_sha: pending.originCommitSha');
+    expect(finalizer).toContain('trustedPassOutbox: { payload: passPayload }');
+    expect(PIPELINE_SOURCE).toContain('await persistCanonicalStoryResult({');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('return transaction(async (client) => {');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_results')).toBeLessThan(
+      STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_commits'),
+    );
+    expect(STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO story_commits')).toBeLessThan(
+      STORY_RESULT_PERSISTENCE_SOURCE.indexOf('INSERT INTO token_usage'),
+    );
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('assertSameResultPayload(existing, input, projection, specId, commit, accounting, authority)');
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain("result_provenance, result_source");
+    expect(ENGINE_SOURCE.indexOf("await postStoryResult(config.port, {\n            runId: config.runId,\n            storyId: story.id,\n            status: 'fail'")).toBeGreaterThan(-1);
+    expect(STORY_RESULT_PERSISTENCE_SOURCE).toContain('WHERE story_result_id = $1');
+    expect(WAL_LISTENER_SOURCE).toContain('await persistLegacyStoryResultAccounting({');
+    const fallbackSync = PIPELINE_SOURCE.slice(
+      PIPELINE_SOURCE.indexOf('export async function syncFallbackResults('),
+      PIPELINE_SOURCE.indexOf('function assertReusableWorktreeFresh(', PIPELINE_SOURCE.indexOf('export async function syncFallbackResults(')),
+    );
+    expect(fallbackSync).toContain('await replayFallbackResults(cwd, workspaceId)');
+    expect(fallbackSync).not.toContain('INSERT INTO story_results');
+    expect(ENGINE_SOURCE).toContain('await deliverEngineStoryResult(context, {');
+    expect(ENGINE_SOURCE).not.toContain("engineApiEndpoint(port, '/api/pipeline/story-result')");
+  });
+
+  test('reuses one bounded integrated-pass key across crash replay and scopes every immutable authority field', () => {
+    const authority = {
+      workspaceId: 'ws-closeout',
+      runId: 31,
+      storyId: 'LFC-031',
+      integratedSha: SHA,
+    };
+    const first = deriveIntegratedPassStoryResultIdempotencyKey(authority);
+    const replay = deriveIntegratedPassStoryResultIdempotencyKey({ ...authority });
+
+    expect(replay).toBe(first);
+    expect(first).toMatch(/^story-result:integrated-pass-v1:[0-9a-f]{64}$/);
+    expect(first.length).toBeLessThanOrEqual(128);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, workspaceId: 'ws-other' })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, runId: 32 })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, storyId: 'LFC-032' })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({ ...authority, integratedSha: BASE_SHA })).not.toBe(first);
+    expect(deriveIntegratedPassStoryResultIdempotencyKey({
+      ...authority,
+      workspaceId: 'w'.repeat(10_000),
+      storyId: 's'.repeat(10_000),
+    }).length).toBeLessThanOrEqual(128);
+  });
+
+  test('proves the immutable integrated branch head and rejects an unfinished no-ff merge before pass', () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-integrated-head-'));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    try {
+      git('init', '-q');
+      git('config', 'user.email', 'test@rorca.invalid');
+      git('config', 'user.name', 'Rorca Test');
+      fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+      git('add', 'base.txt');
+      git('commit', '-q', '-m', 'base');
+      const mainBranch = git('branch', '--show-current');
+      git('checkout', '-q', '-b', 'story/test');
+      fs.writeFileSync(path.join(repo, 'story.txt'), 'story\n');
+      git('add', 'story.txt');
+      git('commit', '-q', '-m', 'story');
+      const originSha = git('rev-parse', 'HEAD');
+      git('checkout', '-q', mainBranch);
+      git('merge', '--no-ff', '--no-commit', 'story/test');
+      expect(() => resolveIntegratedRunHead({ cwd: repo, workspacePath: repo, branchName: mainBranch })).toThrow('unfinished merge');
+      git('commit', '-q', '-m', 'merge story');
+      const integrated = resolveIntegratedRunHead({ cwd: repo, workspacePath: repo, branchName: mainBranch });
+      expect(integrated.sha).toBe(git('rev-parse', 'HEAD'));
+      expect(integrated.sha).not.toBe(originSha);
+      expect(integrated.branch).toBe(mainBranch);
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('establishes one immutable run fallback root and never rebinds it to story worktrees', () => {
+    expect(ENGINE_SOURCE.match(/initializeRunFallbackContext\(/g)).toHaveLength(2); // definition + one run initialization
+    expect(ENGINE_SOURCE).toContain('initializeRunFallbackContext(config.cwd, config.runId, workspaceId)');
+    expect(ENGINE_SOURCE).not.toContain('initializeRunFallbackContext(effectiveCwd');
+    expect(ENGINE_SOURCE).not.toContain('setFallbackContext(effectiveCwd');
+    expect(ENGINE_SOURCE).toContain('Execution-engine fallback context cannot be rebound after run initialization');
+    expect(ENGINE_SOURCE).toContain("settlement: 'rejected'");
+    expect(ENGINE_SOURCE).toContain('accountWaveSettlement({');
+    expect(ENGINE_SOURCE).toContain('pendingIntegratedPasses.delete(storyId)');
+  });
+
+  test('covers direct/retry finalization and sequential/parallel worktree integration through one exact-head seam', () => {
+    expect(ENGINE_SOURCE.match(/await finalizeIntegratedStoryPass\(/g)).toHaveLength(3);
+    expect(ENGINE_SOURCE).toContain('Single-story wave — direct merge');
+    expect(ENGINE_SOURCE).toContain('await integrateAndFinalizeWaveContribution(');
+    expect(ENGINE_SOURCE).toContain('story, config, mode, playbook, logDir, workspaceId, retryCounts');
+    expect(ENGINE_SOURCE.match(/const integratedHead = resolveIntegratedRunHead\(config\)/g)).toHaveLength(1);
+    expect(ENGINE_SOURCE).not.toContain('commitSha: pending.commitSha');
+  });
+
+  test('keeps host database authority out of every model child environment', () => {
+    expect(ENGINE_SOURCE).toContain('HOST_ONLY_AGENT_ENV_VARS');
+    for (const key of ['DATABASE_URL', 'PGPASSWORD', 'PGDATABASE', 'RORCA_PROCESS_ROLE']) {
+      expect(ENGINE_SOURCE).toContain(`'${key}'`);
+    }
+    expect(ENGINE_SOURCE).toContain("!k.startsWith('RORCA_WAL_TRUST_')");
   });
 
   test('keeps one mode/provider-neutral adapter and removes parallel merge bypasses', () => {
@@ -162,10 +285,10 @@ describe('execution-engine closeout architecture', () => {
   });
 
   test('retains ANSI waves and makes the existing PTY contract explicitly sequential', () => {
-    expect(ENGINE_SOURCE).toContain("config.parallelism > 1 && config.terminalMode !== 'pty' && !config.specificStory");
+    expect(ENGINE_SOURCE).toContain('config.parallelism > 1 && !isPtyTerminalMode(config.terminalMode) && !config.specificStory');
     expect(PIPELINE_SOURCE).toContain('const storyIsolated = isolatedStoryIds.has(story.id)');
     expect(ENGINE_SOURCE).toContain('compileWaves(waveStories)');
-    expect(ENGINE_SOURCE).toContain('runWithBoundedConcurrency(waveExecutions.map(item => item.task), config.parallelism)');
+    expect(ENGINE_SOURCE).toContain('runWaveTasksWithRejectionFence(waveExecutions.map(item => item.task), config.parallelism)');
     expect(ENGINE_SOURCE).toContain('computeTransitivelyBlockedStories(currentStories, failedIds, processedIds)');
     expect(ENGINE_SOURCE).toContain('Single-story wave — executing directly on the run branch (no per-story worktree)');
     expect(PIPELINE_SOURCE).toContain('if (!requiresPerStoryWorktree(wave.stories.length)) continue');
@@ -187,8 +310,10 @@ describe('execution-engine closeout architecture', () => {
     expect(parallel).toContain('Rejected executor promises:');
     expect(parallel).toContain('pendingCloseoutIds: new Set(pendingIntegratedPasses.keys())');
     expect(WORKER_SOURCE).not.toContain('promoting execution closeout to done');
-    expect(WORKER_SOURCE).toContain('Refusing to promote non-zero engine closeout despite complete-looking spec state');
-    expect(WORKER_SOURCE).toContain('if (worktreePath && payload.branchName && shouldRouteCompletedRunWorktree({');
+    expect(WORKER_SOURCE).toContain('Refusing to promote non-zero engine closeout despite complete-looking host authority');
+    expect(WORKER_SOURCE).toContain("const hostReleaseOwned = status === 'done' && hostAuthority?.releaseEligible === true");
+    expect(WORKER_SOURCE).toContain('await prepareRunReleaseIntent({');
+    expect(WORKER_SOURCE).not.toContain('shouldRouteCompletedRunWorktree({');
 
     const persistenceStart = ENGINE_SOURCE.indexOf('async function recordParallelStoryInfrastructureFailure(');
     const persistenceEnd = ENGINE_SOURCE.indexOf('// ─── CA-011', persistenceStart);
@@ -219,17 +344,37 @@ describe('execution-engine closeout architecture', () => {
     const handlerEnd = WORKER_SOURCE.indexOf('// ── Job handler: pipeline:retry', handlerStart);
     const handler = WORKER_SOURCE.slice(handlerStart, handlerEnd);
     const processFinished = handler.indexOf("emitWalEvent('run_process_finished'");
-    const semanticCloseout = handler.indexOf("emitWalEvent('run_closeout'", processFinished);
-    const subscriberFinished = handler.indexOf("emitWalEvent('run_finished'", semanticCloseout);
+    const successfulHostCloseout = handler.indexOf('await persistHostRunCloseout({', processFinished);
+    const releasePreparation = handler.indexOf('await prepareRunReleaseIntent({', successfulHostCloseout);
+    const releaseReconciliation = handler.indexOf('await reconcileRunReleaseIntent(', releasePreparation);
+    const failureHostCloseout = handler.indexOf('await persistHostRunCloseout({', successfulHostCloseout + 1);
+    const closeHandlerEnd = handler.indexOf("child.on('error'", failureHostCloseout);
 
     expect(processFinished).toBeGreaterThan(0);
-    expect(handler).toContain("const provisionalStatus = status === 'done' ? 'running' : status");
-    expect(semanticCloseout).toBeGreaterThan(processFinished);
-    expect(subscriberFinished).toBeGreaterThan(semanticCloseout);
-    expect(handler.slice(processFinished, semanticCloseout)).not.toContain("emitWalEvent('run_finished'");
-    expect(handler.slice(subscriberFinished, handlerEnd)).toContain('semantic_closeout: true');
+    expect(successfulHostCloseout).toBeGreaterThan(processFinished);
+    expect(releasePreparation).toBeGreaterThan(successfulHostCloseout);
+    expect(releaseReconciliation).toBeGreaterThan(releasePreparation);
+    expect(failureHostCloseout).toBeGreaterThan(releaseReconciliation);
+    expect(closeHandlerEnd).toBeGreaterThan(failureHostCloseout);
+    expect(handler.slice(processFinished, closeHandlerEnd)).not.toContain("emitWalEvent('run_finished'");
+    expect(handler).toContain('semanticCloseoutCompleted = true');
+    expect(handler).toContain("status = release.status === 'completed' ? 'done' : 'release_pending'");
     expect(handler).toContain("summary = 'worker_closeout_failed'");
     expect(handler).toContain("reason: 'worker_closeout_failed'");
+
+    const releaseStart = RELEASE_AUTHORITY_SOURCE.indexOf('export async function reconcileRunReleaseIntent(');
+    const release = RELEASE_AUTHORITY_SOURCE.slice(releaseStart);
+    const durableCloseout = release.indexOf('const closeout = await loadHostRunCloseoutReference(runId)');
+    const closeoutValidation = release.indexOf('if (closeout.reference.id !== row.host_closeout_event_id', durableCloseout);
+    const terminalIntent = release.indexOf('terminal = await persistTerminalIntent(row)', closeoutValidation);
+    const publicDone = release.indexOf('await commitPublicDoneAndTerminalReady(row, terminal)', terminalIntent);
+    const terminalRelay = release.indexOf('await relayTrustedWalEvent(terminal)', publicDone);
+    expect(durableCloseout).toBeGreaterThan(0);
+    expect(closeoutValidation).toBeGreaterThan(durableCloseout);
+    expect(terminalIntent).toBeGreaterThan(closeoutValidation);
+    expect(publicDone).toBeGreaterThan(terminalIntent);
+    expect(terminalRelay).toBeGreaterThan(publicDone);
+    expect(RELEASE_AUTHORITY_SOURCE).toContain('semantic_closeout: true');
   });
 
   test('keeps retry/restart identity and timeout/cancellation paths fail closed', () => {

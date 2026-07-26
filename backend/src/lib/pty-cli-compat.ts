@@ -10,7 +10,7 @@
  * touch credentials, or change a CLI's configuration.
  */
 
-import { spawn, spawnSync } from 'child_process';
+import { probeAutonomousCli, probeAutonomousCliSync } from './autonomous-cli-probe';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentType } from './config';
@@ -163,17 +163,11 @@ function toPublicProbe({ rawOutput: _rawOutput, ...probe }: InternalPtyCliProbeR
 
 function runProbe(binaryPath: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): InternalPtyCliProbeResult {
   try {
-    const result = spawnSync(binaryPath, args, {
-      cwd: osSafeCwd(),
-      env,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024,
-      windowsHide: true,
-    });
+    const result = probeAutonomousCliSync(binaryPath, args, { env, timeoutMs });
     const rawOutput = String(`${result.stdout ?? ''}\n${result.stderr ?? ''}`).replace(/\0/g, '').slice(0, 64 * 1024);
-    const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' || result.signal === 'SIGTERM';
+    const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+      || result.error?.message.includes('timed out') === true
+      || result.signal === 'SIGKILL';
     return {
       args,
       ok: result.status === 0 && !result.error,
@@ -186,10 +180,6 @@ function runProbe(binaryPath: string, args: string[], env: NodeJS.ProcessEnv, ti
     const rawOutput = String(error instanceof Error ? error.message : error);
     return { args, ok: false, timedOut: false, exitCode: null, output: trimOutput(rawOutput), rawOutput };
   }
-}
-
-function osSafeCwd(): string {
-  try { return process.cwd(); } catch { return path.parse(process.execPath).root; }
 }
 
 function parseVersion(output: string): string | null {
@@ -271,52 +261,21 @@ export function probePtyCliCompatibility(agentType: AgentType, opts: PtyCliProbe
 }
 
 async function runProbeAsync(binaryPath: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<InternalPtyCliProbeResult> {
-  return new Promise((resolve) => {
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    let timedOut = false;
-    let timer: NodeJS.Timeout | undefined;
-    const finish = (exitCode: number | null, error?: Error) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      const rawOutput = String(`${stdout}\n${stderr}${error ? `\n${error.message}` : ''}`).replace(/\0/g, '').slice(0, 64 * 1024);
-      resolve({
-        args,
-        ok: exitCode === 0 && !error && !timedOut,
-        timedOut,
-        exitCode,
-        output: trimOutput(rawOutput),
-        rawOutput,
-      });
-    };
-    let child;
-    try {
-      child = spawn(binaryPath, args, {
-        cwd: osSafeCwd(),
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
-    } catch (error) {
-      finish(null, error instanceof Error ? error : new Error(String(error)));
-      return;
-    }
-    child.stdout?.setEncoding('utf8');
-    child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => { if (stdout.length < 64 * 1024) stdout += chunk; });
-    child.stderr?.on('data', (chunk: string) => { if (stderr.length < 64 * 1024) stderr += chunk; });
-    child.once('error', (error) => finish(null, error));
-    child.once('close', (code) => finish(code));
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      // Resolve even if a broken wrapper never reports close after SIGTERM.
-      setTimeout(() => finish(null), 100).unref?.();
-    }, timeoutMs);
-    timer.unref?.();
-  });
+  const result = await probeAutonomousCli(binaryPath, args, { env, timeoutMs });
+  const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+    || result.error?.message.includes('timed out') === true
+    || result.signal === 'SIGKILL';
+  const rawOutput = String(`${result.stdout}\n${result.stderr}${result.error ? `\n${result.error.message}` : ''}`)
+    .replace(/\0/g, '')
+    .slice(0, 64 * 1024);
+  return {
+    args,
+    ok: result.status === 0 && !result.error && !timedOut,
+    timedOut,
+    exitCode: result.status,
+    output: trimOutput(rawOutput),
+    rawOutput,
+  };
 }
 
 /** Async health-safe variant; provider probes run concurrently without blocking the event loop. */

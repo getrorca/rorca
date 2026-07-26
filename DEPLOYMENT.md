@@ -1,334 +1,92 @@
-# Rorca Production Deployment Guide
+# Rorca private operator deployment guide
 
-Step-by-step instructions for deploying Rorca to a production server.
+Rorca OSS is a local, single-operator application. It does not ship a hosted multi-user login/token flow. The supported Compose topology keeps the API/UI private with `AUTH_REQUIRED=false`; only the signed GitHub webhook callback may be exposed publicly through the reviewed exact-path ingress.
 
-## Prerequisites
+## Supported topology
 
-- Linux server (Ubuntu 22.04+ recommended) or macOS
-- Docker 24+ and Docker Compose v2
-- Domain name with DNS pointed to your server
-- SSL certificate (Let's Encrypt recommended)
-- 2GB+ RAM, 10GB+ disk
+- API and static UI: `127.0.0.1:3030` by default (`RORCA_BIND_ADDRESS` / `RORCA_PORT`). Use SSH or another operator-controlled private access path when administering a remote host.
+- PostgreSQL 16: private Compose network only.
+- Worker: private Compose network only.
+- Public ingress, when explicitly authorized: exact `Host(hooks.rorca.ai) && Path(/api/webhooks/github) && Method(POST)` with the 1 MiB request bound in `deploy/ovh/github-webhook-traefik.dynamic.yml`.
+- No public router for the ordinary UI, API, health endpoints, or webhook administration routes.
 
-## 1. Clone and Configure
+Do not set `AUTH_REQUIRED=true`: no production browser login flow is provided. Do not change the loopback bind to `0.0.0.0` or attach the ordinary service to a broad Traefik router.
 
-```bash
-git clone https://github.com/getrorca/rorca.git /opt/rorca
-cd /opt/rorca
-```
-
-Copy and fill in environment variables:
+## Configure
 
 ```bash
 cp deploy/env.production.example .env
 ```
 
-**Required variables** (see `deploy/env.production.example` for full docs):
+Required local secrets:
 
-| Variable | Example | Notes |
-|----------|---------|-------|
-| `JWT_SECRET` | (generate below) | Auth token signing key |
-| `CORS_ORIGIN` | `https://app.rorca.dev` | Exact frontend URL |
-| `RORCA_BASE_URL` | `https://app.rorca.dev` | Absolute frontend URL used for generated links and browser-facing callbacks |
+- `JWT_SECRET`: strong independent value used for encryption/signing internals; it does not enable a login flow.
+- `RORCA_INTERNAL_SERVICE_TOKEN`: independent unpredictable server↔worker credential of at least 32 bytes. A separately deployed Hermes process must receive this exact value as its `RORCA_API_TOKEN`; Hermes sends it only as a Bearer credential with `X-Rorca-Service: hermes`. Do not use a browser JWT, MCP token, provider token, or a second independently generated value for that service link.
+- `RORCA_OPERATOR_CAPABILITY_SHA256`: SHA-256 digest only. Keep the preimage outside env files, browser storage, URLs, logs, the repository, and the database.
 
-Wave-parallel execution is not production-ready. Production deployments must keep sequential execution; `RORCA_EXPERIMENTAL_WAVE_PARALLEL` is ignored/refused under `NODE_ENV=production`. See [Wave-parallel experimental safety gate](docs/wave-parallel-experimental-gate.md) for the temporary non-production test procedure.
+Keep:
 
-Generate a secure JWT secret:
-
-```bash
-openssl rand -base64 32
+```dotenv
+AUTH_REQUIRED=false
+RORCA_BIND_ADDRESS=127.0.0.1
+RORCA_PORT=3030
+CORS_ORIGIN=http://127.0.0.1:3030
+RORCA_BASE_URL=http://127.0.0.1:3030
+RORCA_EXPERIMENTAL_WAVE_PARALLEL=false
 ```
 
-## 2. SSL Certificate
+Generate secrets outside shell history where practical. Capability or provider credential generation/rotation is a separately authorized operator procedure.
 
-### Option A: Let's Encrypt (recommended)
+## Static review before startup
 
-```bash
-# Install certbot
-sudo apt install certbot
+The normal release checks must pass before an authorized deployment:
 
-# Get certificate (standalone — stop nginx first if running)
-sudo certbot certonly --standalone -d app.rorca.dev
+- root/backend TypeScript and affected tests;
+- tier, OpenAPI placeholder/MCP, Swagger, contract 9.0.0, license, YAML/Compose, and migration checks;
+- PostgreSQL image policy: no seed/dump/archive in Git or build contexts, extensions-only init, exact AGE package pin, and no application migration touching `pgboss.*`;
+- exact OVH webhook host/path/method/body-limit rules;
+- built-Linux sandbox/egress probe.
 
-# Certificates saved to:
-#   /etc/letsencrypt/live/app.rorca.dev/fullchain.pem
-#   /etc/letsencrypt/live/app.rorca.dev/privkey.pem
-```
+This guide does not authorize image builds, container starts, database access, provider calls, deployment, DNS/OVH/Coolify changes, or policy activation.
 
-Copy or symlink certificates for nginx:
+## Authorized Compose startup
 
-```bash
-sudo mkdir -p /etc/nginx/ssl
-sudo ln -sf /etc/letsencrypt/live/app.rorca.dev/fullchain.pem /etc/nginx/ssl/fullchain.pem
-sudo ln -sf /etc/letsencrypt/live/app.rorca.dev/privkey.pem /etc/nginx/ssl/privkey.pem
-```
-
-Set up auto-renewal:
+Only after the relevant operator authorizes deployment:
 
 ```bash
-sudo systemctl enable certbot.timer
-```
-
-### Option B: Self-signed (testing only)
-
-```bash
-sudo mkdir -p /etc/nginx/ssl
-sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout /etc/nginx/ssl/privkey.pem \
-  -out /etc/nginx/ssl/fullchain.pem \
-  -subj "/CN=localhost"
-```
-
-## 3. Nginx Setup
-
-Install the production nginx config:
-
-```bash
-# Replace $DOMAIN with your actual domain
-sed 's/\$DOMAIN/app.rorca.dev/g' deploy/nginx.conf > /tmp/rorca-nginx.conf
-sudo cp /tmp/rorca-nginx.conf /etc/nginx/sites-available/rorca
-sudo ln -sf /etc/nginx/sites-available/rorca /etc/nginx/sites-enabled/rorca
-sudo rm -f /etc/nginx/sites-enabled/default
-
-# Test and reload
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-The production config (`deploy/nginx.conf`) includes:
-- HTTPS termination with TLS 1.2/1.3
-- Security headers (HSTS, CSP, X-Frame-Options, X-Content-Type-Options)
-- Gzip compression
-- Static asset caching (1 year for hashed assets)
-- Rate limiting: 30 req/s API, 5 req/min auth, 3 req/min LLM generation
-- SSE proxy with long timeouts for pipeline streaming
-- Dotfile access denied
-
-## 4. Database Migration
-
-Database migrations run automatically on first backend startup. PostgreSQL connection is configured via `DATABASE_URL` env var.
-
-For Docker deployments, the `rorca-pgdata` volume persists the database across container restarts. Docker Compose includes a PostgreSQL 16 service with pgvector + Apache AGE extensions.
-
-### Manual migration (non-Docker)
-
-```bash
-cd /opt/rorca/backend
-DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca NODE_ENV=production npx tsx src/server.ts
-# Server starts, runs migrations, then Ctrl+C
-```
-
-Verify:
-
-```bash
-psql "$DATABASE_URL" -c "\dt"
-# Should list: workspaces, direction_layers, pipeline_runs, story_results, wal_events, ...
-```
-
-## 5. Build and Deploy
-
-### Option A: Docker Compose (recommended)
-
-```bash
-cd /opt/rorca
-
-# Build images
 docker compose build
-
-# Start services
 docker compose up -d
-
-# Verify
-docker compose ps
-docker compose logs -f rorca-backend
 ```
 
-### Option B: Direct (no Docker)
+The canonical root Compose file has no public Traefik router and binds the UI/API to loopback. The OVH overlay only adds the private upstream alias used by the separate exact-path dynamic configuration.
 
-```bash
-# Install dependencies
-cd /opt/rorca && npm ci
-cd /opt/rorca/backend && npm ci
+## GitHub operator ceremony
 
-# Build
-cd /opt/rorca && npm run build
+Read-only Settings > GitHub views work while provider changes are locked. For an intentional provider/release-authority mutation:
 
-# Start backend
-cd /opt/rorca/backend
-NODE_ENV=production node dist/server.js &
+1. Open the private local UI.
+2. Enter the capability preimage in **Provider changes lock**.
+3. Perform the intended operation.
+4. Explicitly lock the capability afterward.
 
-# Serve frontend via nginx (copy build output)
-sudo cp -r /opt/rorca/dist/* /usr/share/nginx/html/
-sudo systemctl reload nginx
-```
+The preimage is memory-only and is cleared on navigation, sign-out, rejection/configuration errors, or explicit lock. Missing or wrong capability produces an actionable fail-closed UI. It is never provided to autonomous children.
 
-## 6. Backup Configuration
+See `docs/operations/github-app-setup.md` for App setup/binding and exact repository authority.
 
-### Automated PostgreSQL Backups
+## Database initialization and backups
 
-Configure the backup directory:
+A fresh PostgreSQL image initializes only `vector`, `age`, and `pgcrypto`. API startup applies Rorca application migrations. Worker startup lets pg-boss create/upgrade and bootstrap its own schema/queues. No seed or backup is restored automatically.
 
-```bash
-# .env
-BACKUP_DIR=/data/backups
-```
+Store database backups outside the repository and every Docker build context. Never commit raw or compressed exports. See `docs/security/database-export-incident-response.md` for containment, Git-history truth, and separately authorized credential rotation.
 
-Set up a cron job for regular backups using `pg_dump`:
+## Required staging evidence
 
-```bash
-# Daily backup at 2 AM
-echo "0 2 * * * pg_dump \$DATABASE_URL --format=custom --file=/data/backups/rorca-\$(date +\%Y\%m\%d).dump" | sudo crontab -
-```
+Source/static checks are not runtime proof. Before production enablement, separately authorized staging must still prove:
 
-### Off-site Backup
+1. a genuinely fresh PostgreSQL 16 cluster contains only extensions, application migrations, and pg-boss bootstrap state—no user/workspace/run/integration seed rows;
+2. dirty migration and pg-boss runtime behavior;
+3. built-Linux bubblewrap/model-egress behavior under the target kernel/seccomp/AppArmor/capability posture;
+4. live GitHub Manifest/token/webhook/ref/PR/Check/branch-protection races;
+5. deployed OVH exact-path isolation.
 
-```bash
-# Sync backups to S3 (daily, after local backup)
-# 15 2 * * * aws s3 sync /data/backups/ s3://your-bucket/rorca-backups/ --delete
-```
-
-### Restore from Backup
-
-```bash
-# Stop the backend
-docker compose stop rorca-backend
-
-# Restore database
-pg_restore --clean --if-exists -d "$DATABASE_URL" /data/backups/rorca-20260224.dump
-
-# Restart
-docker compose start rorca-backend
-```
-
-## 7. Log Rotation
-
-Install the logrotate configuration:
-
-```bash
-sudo cp deploy/logrotate.conf /etc/logrotate.d/rorca
-```
-
-This rotates:
-- Pipeline run logs (daily, 14 days retention, 100MB max)
-- Application logs (daily, 30 days retention, 50MB max)
-- Nginx access/error logs (daily, 30 days retention)
-
-Test with dry run:
-
-```bash
-sudo logrotate -d /etc/logrotate.d/rorca
-```
-
-For Docker deployments, container logs are managed by Docker's logging driver. Configure in `daemon.json`:
-
-```json
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "50m",
-    "max-file": "5"
-  }
-}
-```
-
-## 8. Health Monitoring
-
-### Health Check Script
-
-```bash
-# Basic check
-./deploy/healthcheck.sh
-
-# JSON output (for monitoring integrations)
-./deploy/healthcheck.sh --json
-
-# Quiet mode (exit code only — for cron/alerting)
-./deploy/healthcheck.sh --quiet
-```
-
-Exit codes: `0` = healthy, `1` = degraded, `2` = critical.
-
-The script checks:
-- Backend API responsiveness
-- Database connectivity and file integrity
-- Disk space (warn at 85%, critical at 95%)
-- Backend process presence
-- Stale pipeline run detection
-
-### Monitoring Integration
-
-```bash
-# Cron-based alerting (every 5 minutes)
-*/5 * * * * /opt/rorca/deploy/healthcheck.sh --quiet || echo "Rorca unhealthy" | mail -s "ALERT" ops@example.com
-
-# Datadog/Nagios custom check
-*/1 * * * * /opt/rorca/deploy/healthcheck.sh --json >> /var/log/rorca/healthcheck.json
-```
-
-### API Health Endpoints
-
-| Endpoint | Auth | Purpose |
-|----------|------|---------|
-| `GET /api/health` | No | Basic: status, uptime, DB connected, active runs |
-| `GET /api/health/detailed` | No | Extended: DB size, memory, pending specs, last backup |
-
-## 9. Security Checklist
-
-- [ ] `JWT_SECRET` is unique, randomly generated, and not the default
-- [ ] SSL certificate installed and auto-renewing
-- [ ] `.env` file is not in version control (check `.gitignore`)
-- [ ] Firewall allows only ports 80, 443, and SSH
-- [ ] Database credentials are stored securely (not in code)
-- [ ] Nginx denies access to dotfiles
-- [ ] Rate limiting is active on auth and LLM endpoints
-- [ ] CORS_ORIGIN matches only your frontend domain
-- [ ] Optional GitHub tokens/credentials (if used) are provided via environment or local CLI auth, not hardcoded
-- [ ] Regular backups are configured and tested with a restore drill
-
-## 10. Troubleshooting
-
-### Backend won't start
-
-```bash
-# Check logs
-docker compose logs rorca-backend
-
-# Common: port already in use
-lsof -ti:3030 | xargs kill -9
-```
-
-### Database connection issues
-
-If you see "connection refused" or pool timeout errors:
-
-```bash
-# Check PostgreSQL is running
-docker compose ps db
-docker compose logs db
-
-# Verify connectivity
-psql "$DATABASE_URL" -c "SELECT 1"
-```
-
-### Stale pipeline runs
-
-After a server restart, running pipelines are orphaned:
-
-```bash
-psql "$DATABASE_URL" -c "UPDATE pipeline_runs SET status='failed', finished_at=NOW() WHERE status='running';"
-```
-
-### SSE streams disconnecting
-
-Ensure nginx has:
-- `proxy_buffering off` on SSE endpoints
-- `proxy_read_timeout 3600s` (1 hour minimum)
-- No CDN/proxy in front that buffers responses
-
-### Certificate renewal failed
-
-```bash
-sudo certbot renew --dry-run
-# If standalone fails because port 80 is in use:
-sudo certbot renew --webroot -w /usr/share/nginx/html
-```
+Do not claim these staging results from source-only validation.

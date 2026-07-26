@@ -69,6 +69,7 @@ function rowFromCandidate(candidate: Candidate, overrides: Partial<Row> = {}): R
     actor: candidate.principal.displayLabel,
     delegated_principal_id: candidate.principal.delegatedOnBehalfOf?.principalId ?? null,
     delegated_display_label: candidate.principal.delegatedOnBehalfOf?.displayLabel ?? null,
+    provider_human_receipt_id: candidate.principal.providerHumanReceiptId ?? null,
     source_request_id: candidate.sourceRequestId,
     source_channel: candidate.principal.sourceChannel,
     scope_key: candidate.scopeKey,

@@ -8,12 +8,10 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
 import request from 'supertest';
+import app from '../../server';
 import { getAuthToken } from './helpers/auth-helper';
 import { queryOne, execute } from '../../db/index';
-
-let app: Express;
 let tmpDir: string;
 let authToken: string;
 
@@ -21,15 +19,14 @@ let authToken: string;
 const WORKSPACE_ID = '42';
 
 beforeEach(async () => {
-  jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-queue-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WORKSPACE_ID, tmpDir]);
-  await execute(`DELETE FROM run_queue WHERE workspace_id = $1`, [WORKSPACE_ID]);
+  await execute(
+    `INSERT INTO workspaces (id, label, path)
+     VALUES ($1, 'Test Workspace', $2)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, tmpDir],
+  );
+  await execute('DELETE FROM run_queue WHERE workspace_id = $1', [WORKSPACE_ID]);
   // Status is global; clear unrelated runs left by other suites in the shared test DB.
   await execute(`UPDATE pipeline_runs SET status = 'done', finished_at = NOW() WHERE status = 'running'`);
 
@@ -37,8 +34,7 @@ await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Worksp
 });
 
 afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe('GET /api/run-queue', () => {

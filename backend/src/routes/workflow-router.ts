@@ -50,6 +50,8 @@ interface VaultKeyCheck {
  * @swagger
  * /api/workflow-router:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workflow Router]
  *     summary: List all workflow configurations
  *     operationId: listWorkflowConfigs
@@ -124,6 +126,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workflow-router/{workflowId}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workflow Router]
  *     summary: Update a workflow configuration
  *     operationId: updateWorkflowConfig
@@ -267,6 +271,8 @@ router.put('/:workflowId', async (req: Request, res: Response) => {
  * @swagger
  * /api/workflow-router/resolved/{workflowId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workflow Router]
  *     summary: Get fully resolved workflow configuration
  *     operationId: getResolvedWorkflowConfig

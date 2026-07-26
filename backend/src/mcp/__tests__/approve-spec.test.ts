@@ -5,12 +5,15 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { installMcpFetchFixture } from './fetch-fixture';
+
 const mockFetch = jest.fn();
-(global as any).fetch = mockFetch;
+installMcpFetchFixture(mockFetch);
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCA_API } from '../server';
+import { server } from '../server';
+const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -49,7 +52,7 @@ test('calls POST /api/specs/:specId/approve with workspaceId and notes in body',
   expect(body).toEqual({ workspaceId: 'ws-123', notes: 'LGTM' });
 });
 
-test('returns success message with approved path and run command', async () => {
+test('returns the exact approved-path response as structured JSON text', async () => {
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => ({ path: 'specs/approved/auth-system.json' }),
@@ -60,11 +63,10 @@ test('returns success message with approved path and run command', async () => {
 
   expect(result.content).toHaveLength(1);
   expect(result.content[0].type).toBe('text');
-  expect(result.content[0].text).toContain('Spec approved and moved to: specs/approved/auth-system.json');
-  expect(result.content[0].text).toContain('run-loop.sh --json specs/approved/auth-system.json');
+  expect(JSON.parse(result.content[0].text)).toEqual({ path: 'specs/approved/auth-system.json' });
 });
 
-test('throws with error message when API returns non-200', async () => {
+test('returns an MCP error result when API returns non-200', async () => {
   mockFetch.mockResolvedValueOnce({
     ok: false,
     status: 404,
@@ -72,9 +74,9 @@ test('throws with error message when API returns non-200', async () => {
   });
 
   const handler = getToolHandler('rorca_approve_spec');
-  await expect(
-    handler({ workspaceId: 'ws-123', specId: 'bad-id' })
-  ).rejects.toThrow('Approval failed (404): Spec not found');
+  const result = await handler({ workspaceId: 'ws-123', specId: 'bad-id' });
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toBe('Error (404): Spec not found');
 });
 
 test('notes is optional (omit from body when not provided)', async () => {

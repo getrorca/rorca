@@ -15,6 +15,7 @@
 
 import crypto from 'node:crypto';
 import { z } from 'zod';
+import { GitShaSchema } from './git-sha';
 import {
   EvidenceClassificationSchema,
   EvidenceTrustLevelSchema,
@@ -46,11 +47,11 @@ const NonEmptyStringSchema = z.string().trim().min(1);
 const HashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 
 export const ReleaseLineageSchema = z.object({
-  commitSha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/).optional(),
+  commitSha: GitShaSchema.optional(),
   artifactDigest: HashSchema.optional(),
   deploymentId: NonEmptyStringSchema.optional(),
   /** Commit that produced artifactDigest. A mismatch is a broken lineage link. */
-  artifactCommitSha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/).optional(),
+  artifactCommitSha: GitShaSchema.optional(),
   /** Artifact used by deploymentId. A mismatch is a broken lineage link. */
   deploymentArtifactDigest: HashSchema.optional(),
 }).strict();

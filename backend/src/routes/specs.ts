@@ -19,10 +19,16 @@ import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo, ALL_MODELS, isValidModel } from '../lib/llm-client';
-import { writeSpec } from '../lib/spec-writer';
+import {
+  buildSpecDiagramsDocument,
+  buildSpecDocument,
+  writeSpec,
+  writeSpecDiagramArtifact,
+  type GeneratedSpec,
+} from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey, getOpenRouterPrefs } from './vault';
-import { authRequired } from '../lib/auth-utils';
+import { authRequired, isLocalHumanApprovalPrincipal } from '../lib/auth-utils';
 import { getEffectiveUser } from '../lib/get-user';
 import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
@@ -48,6 +54,9 @@ import { completeMatchSkillsPrompt } from '../lib/match-skills-llm';
 import { heuristicMatchSkills } from '../lib/match-skills-heuristic';
 import { getWorkspaceEnvVars } from './env-vars';
 import { score as scoreStory, type ScorerStory } from '../lib/complexity-scorer';
+import { githubRepoApiUrl, requireGithubRepositoryAuthority } from '../lib/github-repository-authority';
+import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
+import { fetchGithubWithTimeout } from '../lib/github-app-credential-provider';
 // git-hydrator imports removed — git_memory column dropped in migration 075
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
@@ -65,6 +74,8 @@ import {
   type SpecJob,
 } from '../db/spec-jobs';
 import { getBoss } from '../lib/pg-boss';
+import { getPgBossTableSql } from '../lib/pg-boss-schema';
+import { durableAtomicWriteFile, durableEnsureDirectory, fsyncDirectory } from '../lib/run-spec-snapshot';
 import {
   buildPersistPostSaveStages,
   getEffectiveGenerationLog,
@@ -108,7 +119,6 @@ import {
 import {
   assertSpecReadinessAllowsMutation,
   getSpecReadiness,
-  recordSpecReadinessOverride,
 } from '../lib/spec-readiness';
 import { SpecReadinessReasonCode } from '../reason-codes';
 import {
@@ -134,6 +144,19 @@ import {
   type PersistAuthoringBinding,
 } from '../lib/ssdlc-forge-authoring';
 import { planAuthoring } from '../lib/ssdlc-authoring-planner';
+import {
+  authoringMutationFailpoint,
+  authoringMutationRequestHash,
+  claimAuthoringMutation,
+  completeAuthoringMutation,
+  markAuthoringMutationStage,
+  readAuthoringMutationState,
+} from '../lib/authoring-mutations';
+import {
+  ProviderHumanEventSchema,
+  providerHumanActionHash,
+  verifyAndPersistProviderHumanAuthority,
+} from '../lib/provider-human-authority';
 import {
   backfillWorkspacePlans,
   compileSpecPlan,
@@ -483,6 +506,7 @@ interface SpecSummary {
 
 interface SpecVersionRow {
   id: number;
+  workspace_id: string;
   spec_slug: string;
   version: number;
   content_json: unknown; // jsonb — pg driver returns parsed object, not string
@@ -716,10 +740,20 @@ async function nextVersion(specSlug: string): Promise<number> {
   return (row?.max_ver ?? 0) + 1;
 }
 
-/** Snapshot a spec's current content into spec_versions */
-async function snapshotVersion(specSlug: string, contentJson: string, status: string, rejectionReason?: string): Promise<number> {
+/** Snapshot a spec's current content into its exact workspace version history. */
+async function snapshotVersion(
+  workspaceId: string,
+  specSlug: string,
+  contentJson: string,
+  status: string,
+  rejectionReason?: string,
+): Promise<number> {
   const version = await nextVersion(specSlug);
-  await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES ($1, $2, $3, $4, $5)`, [specSlug, version, contentJson, status, rejectionReason ?? null]);
+  await execute(
+    `INSERT INTO spec_versions (workspace_id, spec_slug, version, content_json, status, rejection_reason)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [workspaceId, specSlug, version, contentJson, status, rejectionReason ?? null],
+  );
   return version;
 }
 
@@ -818,50 +852,6 @@ interface SpecDiffResult {
   summary: { added: number; removed: number; modified: number; unchanged: number };
 }
 
-/**
- * @swagger
- * /api/specs/generate:
- *   post:
- *     tags: [Specs]
- *     summary: Generate a spec from a brief via LLM (legacy compatibility endpoint)
- *     operationId: generateSpec
- *     description: Legacy compatibility endpoint for server-side spec drafting from a brief. The preferred product-wide path is skill-first drafting plus canonical persistence through POST /api/specs/persist or the shared forge workflow.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId, brief]
- *             properties:
- *               workspaceId: { type: string }
- *               title: { type: string, description: "Optional — auto-generated from brief if omitted", example: "User Authentication" }
- *               brief: { type: string, example: "Add login/register with JWT tokens" }
- *               storyCount: { type: integer, default: 5 }
- *               model: { type: string, example: "claude-sonnet-4-5-20250929" }
- *               domain: { type: string }
- *               diagramTypes: { type: array, items: { type: string } }
- *               storyAnnotations: { type: string }
- *               templateId: { type: string }
- *               multiPass: { type: boolean, default: false, description: "Enable multi-pass spec generation (Pass 1: PM coarse stories, Pass 2: Spec Writer micro-stories)" }
- *     responses:
- *       200:
- *         description: Generated spec
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 slug: { type: string }
- *                 title: { type: string }
- *                 stories: { type: array, items: { $ref: '#/components/schemas/UserStory' } }
- *                 provider: { type: string }
- *                 model: { type: string }
- *                 usage: { type: object }
- *                 specPath: { type: string }
- *       400: { description: "Missing required fields" }
- *       404: { description: "Workspace not found" }
- */
 // ─── Multi-pass helpers ─────────────────────────────────────────────────────
 
 /** Load a default persona's prompt text from the default-personas/ directory. */
@@ -1089,7 +1079,7 @@ const PersistAuthoringBatchSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]),
   authoringPreflight: PersistAuthoringBindingSchema,
   drafts: z.array(z.record(z.string(), z.unknown())).min(1).max(12),
-  idempotencyKey: z.string().trim().min(2).max(128).optional(),
+  idempotencyKey: z.string().trim().min(8).max(128),
 }).strict();
 
 const CompileLifecyclePlanSchema = z.object({
@@ -1707,6 +1697,54 @@ interface ForgeContextBundle {
   opencodeDirectionContext: string;
 }
 
+function authoringSpecMaterialHash(document: Record<string, unknown>): string {
+  const material = structuredClone(document);
+  delete material.generatedAt;
+  const authoring = material.authoring;
+  if (authoring && typeof authoring === 'object' && !Array.isArray(authoring)) {
+    const mutable = authoring as Record<string, unknown>;
+    const mutationReceipt = mutable.mutationReceipt;
+    if (mutationReceipt && typeof mutationReceipt === 'object' && !Array.isArray(mutationReceipt)) {
+      delete (mutationReceipt as Record<string, unknown>).state;
+    }
+    delete mutable.approvalMutationReceipt;
+    delete mutable.approvalResult;
+    delete mutable.providerApproval;
+  }
+  return providerHumanActionHash(material);
+}
+
+function authoringDiagramMaterial(document: string): string {
+  return document.replace(/^Generated: .*$/m, 'Generated: <deterministic>');
+}
+
+async function ensureAuthoringVersionSnapshot(input: {
+  workspaceId: string;
+  slug: string;
+  contentJson: string;
+  receiptId: string;
+}): Promise<number> {
+  const existing = await queryOne<{ version: number; content_json: string | Record<string, unknown> }>(
+    `SELECT version, content_json FROM spec_versions
+      WHERE workspace_id = $1
+        AND spec_slug = $2
+        AND content_json::jsonb #>> '{authoring,mutationReceipt,receiptId}' = $3
+      ORDER BY version ASC LIMIT 1`,
+    [input.workspaceId, input.slug, input.receiptId],
+  );
+  if (existing) {
+    const stored = typeof existing.content_json === 'string'
+      ? JSON.parse(existing.content_json) as Record<string, unknown>
+      : existing.content_json;
+    const current = JSON.parse(input.contentJson) as Record<string, unknown>;
+    if (authoringSpecMaterialHash(stored) !== authoringSpecMaterialHash(current)) {
+      throw new ConflictError('Recovered authoring version snapshot has different material');
+    }
+    return Number(existing.version);
+  }
+  return snapshotVersion(input.workspaceId, input.slug, input.contentJson, 'pending');
+}
+
 interface ForgePersistResult {
   id: string;
   slug: string;
@@ -1737,7 +1775,16 @@ interface ForgePersistResult {
 async function persistExplicitDraftInternal(
   req: Request | undefined,
   body: z.infer<typeof PersistSpecDraftSchema>,
-  options?: { sourceMode?: string; invocationSurface?: string },
+  options?: {
+    sourceMode?: string;
+    invocationSurface?: string;
+    mutationReceipt?: {
+      receiptId: string;
+      requestHash: string;
+      idempotencyKey: string;
+      state: 'claimed' | 'artifact_written' | 'wal_written' | 'recoverable_failure';
+    };
+  },
 ): Promise<ForgePersistResult> {
   const workspaceId = String(body.workspaceId);
   const workspace = await getWorkspace(workspaceId, req);
@@ -1780,11 +1827,25 @@ async function persistExplicitDraftInternal(
     await assertAuthoritativePreflightReceipt(workspaceId, authoringBinding);
     await assertAuthoringConfirmation(workspaceId, authoringBinding);
   }
-  const persistedAuthoring = buildPersistedAuthoringMetadata({
-    binding: authoringBinding,
-    spec: authoringSpec,
-    stories: normalizedStories,
-  });
+  const confirmedRequester = authoringBinding?.confirmationReceiptId
+    ? await queryOne<{ actor: string; payload: Record<string, unknown> | string }>(
+      `SELECT actor, payload FROM wal_events
+       WHERE id = $1 AND workspace_id = $2 AND event_type = 'spec_authoring_plan_confirmed'`,
+      [authoringBinding.confirmationReceiptId, workspaceId],
+    )
+    : undefined;
+  const confirmationPayload = confirmedRequester
+    ? (typeof confirmedRequester.payload === 'string' ? JSON.parse(confirmedRequester.payload) : confirmedRequester.payload)
+    : undefined;
+  const persistedAuthoring = {
+    ...buildPersistedAuthoringMetadata({
+      binding: authoringBinding,
+      spec: authoringSpec,
+      stories: normalizedStories,
+    }),
+    ...(typeof confirmationPayload?.actorIdentity === 'string' ? { requesterActorId: confirmationPayload.actorIdentity } : {}),
+    ...(options?.mutationReceipt ? { mutationReceipt: options.mutationReceipt } : {}),
+  };
   const telemetry = authoringTelemetry(authoringBinding, 'persisting');
 
   const catalogs = await buildCatalogContext(workspace.path, workspaceId);
@@ -1795,16 +1856,34 @@ async function persistExplicitDraftInternal(
   const algorithmicDiagrams = generateDiagramBundle(normalizedStories as any, ['storyDeps']);
   const allDiagrams = { ...(body.diagrams ?? {}), ...algorithmicDiagrams };
   const mermaidDiagram = body.mermaidDiagram?.trim() || algorithmicDiagrams.storyDeps?.mermaid || '';
-
+  const generatedSpec: GeneratedSpec = {
+    slug,
+    title,
+    stories: normalizedStories,
+    diagrams: allDiagrams as GeneratedSpec['diagrams'],
+    mermaidDiagram: mermaidDiagram || undefined,
+    model: body.model,
+    contextUsed: body.contextUsed as GeneratedSpec['contextUsed'],
+    contextSummary: resolvedContextSummary,
+    reasoning: body.reasoning,
+    source,
+    postSavePolicy: postSavePolicyMetadata(postSavePolicy),
+    authoring: persistedAuthoring,
+  };
   const { pendingFile: existingPending, approvedFile: existingApproved, existingFile: existingSpecPath } = resolveSpecStoragePaths(workspace.path, slug);
   const hadExistingSpec = existingSpecPath !== null;
   const previousSpecRaw = existingSpecPath ? fs.readFileSync(existingSpecPath, 'utf8') : null;
   const previousSpecContent = previousSpecRaw ? JSON.parse(previousSpecRaw) as SpecEditInput : null;
+  const previousAuthoring = previousSpecContent?.authoring as Record<string, unknown> | undefined;
+  const previousMutationReceipt = previousAuthoring?.mutationReceipt as Record<string, unknown> | undefined;
+  const recoveringExactMutation = Boolean(options?.mutationReceipt
+    && previousMutationReceipt?.receiptId === options.mutationReceipt.receiptId
+    && previousMutationReceipt?.requestHash === options.mutationReceipt.requestHash
+    && previousMutationReceipt?.idempotencyKey === options.mutationReceipt.idempotencyKey);
 
-  if (hadExistingSpec && !overwrite) {
+  if (hadExistingSpec && !overwrite && !recoveringExactMutation) {
     throw new ConflictError(`Spec '${slug}' already exists. Re-submit with overwrite=true to replace it.`);
   }
-
   await assertNoActiveSpecExecutionConflicts(workspaceId, slug);
 
   if (previousSpecContent) {
@@ -1829,39 +1908,77 @@ async function persistExplicitDraftInternal(
     };
   }
 
-  if (fs.existsSync(existingPending)) {
-    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
-    fs.unlinkSync(existingPending);
-  } else if (fs.existsSync(existingApproved)) {
-    await snapshotVersion(slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
-    fs.unlinkSync(existingApproved);
+  generatedSpec.postSavePolicy = postSavePolicyMetadata(postSavePolicy);
+  const expectedSpecMaterialHash = authoringSpecMaterialHash(buildSpecDocument(generatedSpec, '<generated-at>'));
+  const expectedDiagramMaterial = authoringDiagramMaterial(buildSpecDiagramsDocument(generatedSpec, '<generated-at>'));
+  if (recoveringExactMutation) {
+    if (!previousSpecContent || authoringSpecMaterialHash(previousSpecContent as Record<string, unknown>) !== expectedSpecMaterialHash) {
+      throw new ConflictError('Persisted authoring artifact material differs from its mutation request');
+    }
+    const recoveryDiagramsPath = path.join(path.dirname(existingPending), `${slug}-diagrams.md`);
+    if (fs.existsSync(recoveryDiagramsPath)) {
+      if (authoringDiagramMaterial(fs.readFileSync(recoveryDiagramsPath, 'utf8')) !== expectedDiagramMaterial) {
+        throw new ConflictError('Persisted authoring diagram artifact differs from its mutation request');
+      }
+    } else {
+      writeSpecDiagramArtifact(workspace.path, generatedSpec);
+    }
   }
 
-  const writeResult = writeSpec(workspace.path, {
-    slug,
-    title,
-    stories: normalizedStories,
-    diagrams: allDiagrams as any,
-    mermaidDiagram: mermaidDiagram || undefined,
-    model: body.model,
-    contextUsed: body.contextUsed as any,
-    contextSummary: resolvedContextSummary,
-    reasoning: body.reasoning,
-    source,
-    postSavePolicy: postSavePolicyMetadata(postSavePolicy),
-    authoring: persistedAuthoring,
-  });
+  if (!recoveringExactMutation) {
+    if (fs.existsSync(existingPending)) {
+      await snapshotVersion(workspaceId, slug, previousSpecRaw ?? fs.readFileSync(existingPending, 'utf8'), 'pending');
+      fs.unlinkSync(existingPending);
+    } else if (fs.existsSync(existingApproved)) {
+      await snapshotVersion(workspaceId, slug, previousSpecRaw ?? fs.readFileSync(existingApproved, 'utf8'), 'approved');
+      fs.unlinkSync(existingApproved);
+    }
+  }
 
-  // Canonical persistence owns the version snapshot; plan compilation remains a
-  // read-only consumer of this durable normalized generation.
-  await snapshotVersion(slug, fs.readFileSync(writeResult.specPath, 'utf8'), 'pending');
-  await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: slug });
+  const writeResult = recoveringExactMutation
+    ? {
+      id: slug,
+      specPath: existingSpecPath!,
+      diagramsPath: path.join(path.dirname(existingPending), `${slug}-diagrams.md`),
+    }
+    : writeSpec(workspace.path, generatedSpec);
+  authoringMutationFailpoint('persist_after_file_publication');
+
+  if (!recoveringExactMutation) {
+    await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: slug });
+  }
+  if (options?.mutationReceipt) {
+    // Exact receipt-bound snapshot identity makes replay safe whether the crash
+    // occurred before or after snapshot insertion.
+    await ensureAuthoringVersionSnapshot({
+      workspaceId,
+      slug,
+      contentJson: fs.readFileSync(writeResult.specPath, 'utf8'),
+      receiptId: options.mutationReceipt.receiptId,
+    });
+  } else if (!recoveringExactMutation) {
+    await snapshotVersion(workspaceId, slug, fs.readFileSync(writeResult.specPath, 'utf8'), 'pending');
+  }
+  authoringMutationFailpoint('persist_after_snapshot');
+  if (options?.mutationReceipt && options.mutationReceipt.state !== 'artifact_written'
+    && options.mutationReceipt.state !== 'wal_written') {
+    await markAuthoringMutationStage({
+      receiptId: options.mutationReceipt.receiptId,
+      requestHash: options.mutationReceipt.requestHash,
+      from: 'claimed',
+      to: 'artifact_written',
+    });
+    options.mutationReceipt.state = 'artifact_written';
+  }
 
   const priorGenerationLog = await getEffectiveGenerationLog(slug);
   const priorFingerprints = readStageFingerprintsFromSummary(priorGenerationLog?.context_summary_json);
 
   const walEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ('spec_generated', $1, $2, 'api', $3) RETURNING *`,
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload, ingest_key)
+     VALUES ('spec_generated', $1, $2, 'api', $3, $4)
+     ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+     RETURNING *`,
     [workspaceId, slug, JSON.stringify({
       title,
       source,
@@ -1872,33 +1989,53 @@ async function persistExplicitDraftInternal(
       postSavePolicy: postSavePolicyMetadata(postSavePolicy),
       authoring: telemetry,
       ...(postSaveDecision ? { postSaveDecision } : {}),
-    })],
+    }), options?.mutationReceipt ? `authoring-persist-generated:v1:${options.mutationReceipt.receiptId}` : null],
   );
   if (walEvent) {
     broadcastAll(walEvent);
   }
 
-  const { stageFingerprints: currentFingerprints, saveGeneration, generationLogId } = await seedPersistGenerationLog({
-    slug,
-    workspaceId,
-    source,
-    ...(options?.sourceMode ? { sourceMode: options.sourceMode } : {}),
-    ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
-    title,
-    storyCount: normalizedStories.length,
-    stories: normalizedStories,
-    model: body.model,
-    overwrite,
-    postSave,
-    postSavePolicy,
-    ...(postSaveDecision ? { requestedPostSave, requestedPostSavePolicy, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
-    normalizationChanges: changes,
-    contextUsed: body.contextUsed,
-    callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
-    resolvedContextSummary,
-    reasoning: body.reasoning,
-    authoring: telemetry,
-  });
+  const recoveredGenerationLog = recoveringExactMutation && options?.mutationReceipt
+    ? await queryOne<{ id: number; save_generation: number }>(
+      `SELECT id, COALESCE(save_generation, id::bigint)::bigint AS save_generation
+       FROM spec_generation_logs
+       WHERE spec_slug = $1
+         AND context_summary_json #>> '{authoring,mutationReceipt,receiptId}' = $2
+       ORDER BY id DESC LIMIT 1`,
+      [slug, options.mutationReceipt.receiptId],
+    )
+    : null;
+  const seededGeneration = recoveredGenerationLog
+    ? {
+      stageFingerprints: computeSpecStageFingerprints({ title, userStories: normalizedStories }),
+      saveGeneration: Number(recoveredGenerationLog.save_generation),
+      generationLogId: Number(recoveredGenerationLog.id),
+    }
+    : await seedPersistGenerationLog({
+      slug,
+      workspaceId,
+      source,
+      ...(options?.sourceMode ? { sourceMode: options.sourceMode } : {}),
+      ...(options?.invocationSurface ? { invocationSurface: options.invocationSurface } : {}),
+      title,
+      storyCount: normalizedStories.length,
+      stories: normalizedStories,
+      model: body.model,
+      overwrite,
+      postSave,
+      postSavePolicy,
+      ...(postSaveDecision ? { requestedPostSave, requestedPostSavePolicy, postSaveDecision, postSaveStageReasons: postSaveStageReasonsForDecision(postSaveDecision) } : {}),
+      normalizationChanges: changes,
+      contextUsed: body.contextUsed,
+      callerContextSummary: body.contextSummary as Record<string, unknown> | undefined,
+      resolvedContextSummary,
+      reasoning: body.reasoning,
+      authoring: {
+        ...telemetry,
+        ...(options?.mutationReceipt ? { mutationReceipt: options.mutationReceipt } : {}),
+      },
+    });
+  const { stageFingerprints: currentFingerprints, saveGeneration, generationLogId } = seededGeneration;
 
   const workflowRun = await scheduleSpecPostSaveJobs(slug, workspaceId, {
     ...postSave,
@@ -1919,6 +2056,7 @@ async function persistExplicitDraftInternal(
     throwOnFailure: true,
     source: 'canonical-persist',
   });
+  authoringMutationFailpoint('persist_after_lifecycle_compilation');
   const lifecyclePlan: ForgePersistResult['lifecyclePlan'] = compiledPlan ? {
     planId: compiledPlan.planId,
     inputHash: compiledPlan.inputHash,
@@ -1933,16 +2071,32 @@ async function persistExplicitDraftInternal(
   );
   await updatePersistGenerationLogForSave(slug, saveGeneration, {
     summaryPatch: {
-      authoring: completedTelemetry,
+      authoring: {
+        ...completedTelemetry,
+        ...(options?.mutationReceipt ? { mutationReceipt: options.mutationReceipt } : {}),
+      },
       ...(lifecyclePlan ? { lifecyclePlan } : {}),
     },
   });
   const authoringWalEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
-     VALUES ('spec_authoring_persisted', $1, $2, 'authoring-persist', $3) RETURNING *`,
-    [workspaceId, slug, JSON.stringify(completedTelemetry)],
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload, ingest_key)
+     VALUES ('spec_authoring_persisted', $1, $2, 'authoring-persist', $3, $4)
+     ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+     RETURNING *`,
+    [workspaceId, slug, JSON.stringify(completedTelemetry),
+      options?.mutationReceipt ? `authoring-persist-complete:v1:${options.mutationReceipt.receiptId}` : null],
   );
   if (authoringWalEvent) broadcastAll(authoringWalEvent);
+  authoringMutationFailpoint('persist_after_wal');
+  if (options?.mutationReceipt && options.mutationReceipt.state !== 'wal_written') {
+    await markAuthoringMutationStage({
+      receiptId: options.mutationReceipt.receiptId,
+      requestHash: options.mutationReceipt.requestHash,
+      from: 'artifact_written',
+      to: 'wal_written',
+    });
+    options.mutationReceipt.state = 'wal_written';
+  }
   const finalPersistedContent = JSON.parse(fs.readFileSync(writeResult.specPath, 'utf8')) as Record<string, unknown>;
 
   return {
@@ -3037,7 +3191,16 @@ router.post('/authoring/preflight', validateBody(AuthoringPreflightRequestSchema
       [String(parsed.workspaceId), JSON.stringify(payload)],
     );
     if (walEvent) broadcastAll(walEvent);
-    res.json({ ...result, preflightReceiptId: walEvent!.id, telemetry: payload });
+    const confirmationTargetHash = result.state === 'accepted' && result.confirmationRequired
+      ? providerHumanActionHash({
+        purpose: 'authoring_plan_confirmation',
+        workspaceId: String(parsed.workspaceId),
+        acceptedPlanHash: result.acceptedPlanHash,
+        acceptedPreflightHash: result.acceptedPreflightHash,
+        preflightReceiptId: walEvent!.id,
+      })
+      : null;
+    res.json({ ...result, preflightReceiptId: walEvent!.id, confirmationTargetHash, telemetry: payload });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Authoring preflight');
   }
@@ -3059,14 +3222,14 @@ router.post('/authoring/preflight', validateBody(AuthoringPreflightRequestSchema
  *         application/json:
  *           schema:
  *             type: object
- *             required: [workspaceId, acceptedPlanHash, acceptedPreflightHash, confirmed, actor]
+ *             required: [workspaceId, acceptedPlanHash, acceptedPreflightHash, confirmed]
  *             additionalProperties: false
  *             properties:
  *               workspaceId: { type: string }
  *               acceptedPlanHash: { type: string }
  *               acceptedPreflightHash: { type: string }
  *               confirmed: { type: boolean, enum: [true] }
- *               actor: { type: object, additionalProperties: false }
+ *               attestation: { type: object, additionalProperties: false, description: "Required when a service principal relays an authenticated provider-human event." }
  *     responses:
  *       200: { description: Auditable confirmation receipt }
  *       404: { description: Accepted preflight identity not found }
@@ -3075,8 +3238,20 @@ router.post('/authoring/preflight/confirm', validateBody(AuthoringConfirmationRe
   try {
     const input = AuthoringConfirmationRequestSchema.parse(req.body);
     const workspaceId = String(input.workspaceId);
-    const preflightEvent = await queryOne<{ id: number }>(
-      `SELECT id FROM wal_events
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    if (!idempotencyKey) throw new ValidationError('Idempotency-Key header is required for authoring confirmation');
+    const claim = await claimAuthoringMutation({
+      workspaceId,
+      operation: 'confirm',
+      idempotencyKey,
+      request: input,
+    });
+    if (claim.completed && claim.responseBody) {
+      res.status(claim.responseStatus ?? 200).json(claim.responseBody);
+      return;
+    }
+    const preflightEvent = await queryOne<{ id: number; payload: Record<string, unknown> | string }>(
+      `SELECT id, payload FROM wal_events
        WHERE workspace_id = $1
          AND event_type = 'spec_authoring_preflight'
          AND payload::jsonb->>'state' = 'accepted'
@@ -3088,27 +3263,70 @@ router.post('/authoring/preflight/confirm', validateBody(AuthoringConfirmationRe
     if (!preflightEvent) {
       throw new NotFoundError('Accepted authoring preflight');
     }
+    const targetHash = providerHumanActionHash({
+      purpose: 'authoring_plan_confirmation',
+      workspaceId,
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      preflightReceiptId: preflightEvent.id,
+    });
+    const servicePrincipal = !req.user || req.user.email.toLowerCase().endsWith('@rorca.internal');
+    let actorIdentity: string;
+    let providerReceiptId: string | null = null;
+    if (input.attestation) {
+      const verified = await verifyAndPersistProviderHumanAuthority({
+        workspaceId,
+        purpose: 'authoring_plan_confirmation',
+        targetHash,
+        event: input.attestation,
+      });
+      actorIdentity = verified.actorId;
+      providerReceiptId = verified.receiptId;
+    } else {
+      if (servicePrincipal) throw new ForbiddenError('Service principals must relay exact provider-human confirmation authority');
+      actorIdentity = req.user!.id;
+    }
     const payload = {
       acceptedPlanHash: input.acceptedPlanHash,
       acceptedPreflightHash: input.acceptedPreflightHash,
-      actorType: input.actor.type,
-      actorIdentity: input.actor.identity,
+      actorType: 'human',
+      actorIdentity,
+      providerReceiptId,
+      targetHash,
       preflightWalEventId: preflightEvent.id,
       inferredFromModelOutput: false,
       grantsDownstreamApproval: false,
     };
     const receipt = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
-       VALUES ('spec_authoring_plan_confirmed', $1, $2, $3) RETURNING *`,
-      [workspaceId, input.actor.identity, JSON.stringify(payload)],
+      `WITH inserted AS (
+         INSERT INTO wal_events (event_type, workspace_id, actor, payload, ingest_key)
+         VALUES ('spec_authoring_plan_confirmed', $1, $2, $3, $4)
+         ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+         RETURNING *
+       )
+       SELECT * FROM inserted
+       UNION ALL
+       SELECT * FROM wal_events WHERE ingest_key = $4
+       LIMIT 1`,
+      [workspaceId, actorIdentity, JSON.stringify(payload), `authoring-confirm:v1:${claim.receiptId}`],
     );
     if (receipt) broadcastAll(receipt);
-    res.json({
+    const response = {
       confirmationReceiptId: receipt!.id,
+      providerReceiptId,
+      targetHash,
       acceptedPlanHash: input.acceptedPlanHash,
       acceptedPreflightHash: input.acceptedPreflightHash,
       grantsDownstreamApproval: false,
+      mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
+    };
+    await completeAuthoringMutation({
+      receiptId: claim.receiptId,
+      requestHash: claim.requestHash,
+      responseStatus: 200,
+      responseBody: response,
     });
+    res.json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Authoring confirmation');
   }
@@ -3938,7 +4156,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         multiPassStage: 'pass1-pm',
         userStories: pass1Result.stories,
       };
-      await snapshotVersion(slug, JSON.stringify(pass1Spec), 'pending');
+      await snapshotVersion(workspaceId, slug, JSON.stringify(pass1Spec), 'pending');
       await emitPassEvent(slug, 1, 'completed', workspaceId);
 
       logger.info(`[Specs] Pass 1 complete: ${pass1Result.stories.length} coarse stories`);
@@ -4048,7 +4266,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         multiPassStage: 'pass2-spec-writer',
         userStories: parsed.stories,
       };
-      await snapshotVersion(slug, JSON.stringify(pass2Spec), 'pending');
+      await snapshotVersion(workspaceId, slug, JSON.stringify(pass2Spec), 'pending');
       await emitPassEvent(slug, 2, 'completed', workspaceId);
 
       logger.info(`[Specs] Pass 2 complete: ${parsed.stories.length} micro-stories (decomposed from ${pass1Result.stories.length} coarse stories)`);
@@ -4148,7 +4366,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass3-ux-designer',
           userStories: parsed.stories,
         };
-        await snapshotVersion(slug, JSON.stringify(pass3Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass3Spec), 'pending');
         await emitPassEvent(slug, 3, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 3 complete: ${parsed.stories.length} stories enriched with visual descriptions`);
@@ -4278,7 +4496,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass4-best-practices',
           userStories: parsed.stories,
         };
-        await snapshotVersion(slug, JSON.stringify(pass4Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass4Spec), 'pending');
         await emitPassEvent(slug, 4, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 4 complete: ${parsed.stories.length} stories annotated with convention guidance`);
@@ -4443,7 +4661,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass5-adversarial-review',
           userStories: parsed.stories,
         };
-        await snapshotVersion(slug, JSON.stringify(pass5Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass5Spec), 'pending');
         await emitPassEvent(slug, 5, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 5 complete: ${parsed.stories.length} stories after adversarial review`);
@@ -4559,7 +4777,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           userStories: parsed.stories,
           ...(verificationReport ? { verificationReport } : {}),
         };
-        await snapshotVersion(slug, JSON.stringify(pass6Spec), 'pending');
+        await snapshotVersion(workspaceId, slug, JSON.stringify(pass6Spec), 'pending');
         await emitPassEvent(slug, 6, 'completed', workspaceId);
 
         // Attach verification report to parsed output for the response
@@ -4899,6 +5117,55 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
   }
 });
 
+const AuthoringMutationStateRequestSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  operation: z.enum(['preflight', 'confirm', 'persist', 'persist-batch', 'approve', 'compile-legacy']),
+  idempotencyKey: z.string().min(8).max(200),
+  request: z.unknown(),
+}).strict();
+
+/**
+ * @swagger
+ * /api/specs/authoring/mutation-state:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Reconcile one exact durable authoring mutation
+ *     operationId: getAuthoringMutationState
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Provider supervisors need a read-only exact-request reconciliation path after ambiguous authoring transport or process loss."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, operation, idempotencyKey, request]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               operation: { type: string, enum: [preflight, confirm, persist, persist-batch, approve, compile-legacy] }
+ *               idempotencyKey: { type: string }
+ *               request: { type: object, additionalProperties: true }
+ *     responses:
+ *       200: { description: Canonical mutation receipt, stage, and bounded completed response }
+ *       404: { description: Exact mutation is not claimed }
+ *       409: { description: Request hash differs from canonical mutation authority }
+ */
+router.post('/authoring/mutation-state', validateBody(AuthoringMutationStateRequestSchema), async (req: Request, res: Response) => {
+  try {
+    const input = AuthoringMutationStateRequestSchema.parse(req.body);
+    const state = await readAuthoringMutationState({
+      workspaceId: String(input.workspaceId),
+      operation: input.operation,
+      idempotencyKey: input.idempotencyKey,
+      requestHash: authoringMutationRequestHash(input.request),
+    });
+    if (!state) throw new NotFoundError('Authoring mutation not found');
+    res.json({ schemaVersion: 'rorca.authoring-mutation-state.v1', ...state });
+  } catch (error: unknown) {
+    handleRouteError(res, error, '[Specs] Authoring mutation state');
+  }
+});
+
 /**
  * @swagger
  * /api/specs/persist:
@@ -5062,11 +5329,48 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
   try {
     const parsedBody = PersistSpecDraftSchema.parse(req.body);
     resolvePostSavePolicy(resolvePersistPostSavePolicyInput(parsedBody));
-    const result = await persistExplicitDraftInternal(req, parsedBody);
-    res.json({
-      ...result,
+    const workspaceId = String(parsedBody.workspaceId);
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    const claim = parsedBody.authoringPreflight
+      ? await claimAuthoringMutation({
+        workspaceId,
+        operation: 'persist',
+        idempotencyKey: idempotencyKey ?? '',
+        request: parsedBody,
+        specId: parsedBody.slug ?? parsedBody.title,
+      })
+      : null;
+    if (claim?.completed && claim.responseBody) {
+      res.status(claim.responseStatus ?? 200).json(claim.responseBody);
+      return;
+    }
+    if (claim) authoringMutationFailpoint('persist_after_claim');
+    const result = await persistExplicitDraftInternal(req, parsedBody, claim ? {
+      sourceMode: 'skill-first-explicit',
+      invocationSurface: 'api.specs.persist',
+      mutationReceipt: {
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        idempotencyKey: idempotencyKey!,
+        state: claim.state === 'completed' ? 'wal_written' : claim.state,
+      },
+    } : undefined);
+    const { stories: _responseStories, diagrams: _responseDiagrams, mermaidDiagram: _responseMermaid, ...boundedResult } = result;
+    const response = {
+      ...(claim ? boundedResult : result),
       requestedPolicy: resolvePersistPostSavePolicyInput(parsedBody) ?? null,
-    });
+      ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
+    };
+    if (claim) {
+      authoringMutationFailpoint('persist_before_receipt_completion');
+      await completeAuthoringMutation({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        responseStatus: 200,
+        responseBody: response,
+      });
+    }
+    res.json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Persist explicit draft');
   }
@@ -5089,7 +5393,7 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
  *         application/json:
  *           schema:
  *             type: object
- *             required: [workspaceId, authoringPreflight, drafts]
+ *             required: [workspaceId, authoringPreflight, drafts, idempotencyKey]
  *             additionalProperties: false
  *             properties:
  *               workspaceId: { type: string }
@@ -5108,6 +5412,16 @@ router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (
     const workspaceId = String(input.workspaceId);
     const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) throw new NotFoundError('Workspace not found');
+    const parentClaim = await claimAuthoringMutation({
+      workspaceId,
+      operation: 'persist-batch',
+      idempotencyKey: input.idempotencyKey,
+      request: input,
+    });
+    if (parentClaim.completed && parentClaim.responseBody) {
+      res.status(parentClaim.responseStatus ?? 200).json(parentClaim.responseBody);
+      return;
+    }
     await assertAuthoritativePreflightReceipt(workspaceId, input.authoringPreflight);
     await assertAuthoringConfirmation(workspaceId, input.authoringPreflight);
 
@@ -5135,23 +5449,37 @@ router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (
           binding: input.authoringPreflight,
         });
 
-        const existing = resolveSpecStoragePaths(workspace.path, slug).existingFile;
-        if (existing) {
-          const content = JSON.parse(fs.readFileSync(existing, 'utf8')) as Record<string, unknown>;
-          const authoring = content.authoring as Record<string, unknown> | undefined;
-          const parent = authoring?.parentAuthoringPlan as Record<string, unknown> | undefined;
-          if (parent?.acceptedPreflightHash === input.authoringPreflight.acceptedPreflightHash
-            && authoring?.state === 'validated') {
-            results.push({ index, slug, status: 'reused', resumable: true });
-            continue;
-          }
+        const childIdempotencyKey = `batch:${parentClaim.receiptId}:${index}`;
+        const childClaim = await claimAuthoringMutation({
+          workspaceId,
+          operation: 'persist',
+          idempotencyKey: childIdempotencyKey,
+          request: draft,
+          specId: slug,
+          parentReceiptId: parentClaim.receiptId,
+        });
+        if (childClaim.completed && childClaim.responseBody) {
+          results.push({ index, slug, status: 'reused', resumable: true, ...childClaim.responseBody });
+          continue;
         }
-
         const persisted = await persistExplicitDraftInternal(req, draft, {
           sourceMode: 'skill-first-batch',
           invocationSurface: 'api.specs.persist.batch',
+          mutationReceipt: {
+            receiptId: childClaim.receiptId,
+            requestHash: childClaim.requestHash,
+            idempotencyKey: childIdempotencyKey,
+            state: childClaim.state === 'completed' ? 'wal_written' : childClaim.state,
+          },
         });
-        results.push({ index, slug: persisted.slug, status: 'persisted', lifecyclePlan: persisted.lifecyclePlan });
+        const childResponse = { slug: persisted.slug, lifecyclePlan: persisted.lifecyclePlan ?? null };
+        await completeAuthoringMutation({
+          receiptId: childClaim.receiptId,
+          requestHash: childClaim.requestHash,
+          responseStatus: 200,
+          responseBody: childResponse,
+        });
+        results.push({ index, status: 'persisted', ...childResponse });
       } catch (error) {
         results.push({
           index,
@@ -5176,24 +5504,57 @@ router.post('/persist/batch', validateBody(PersistAuthoringBatchSchema), async (
       callerSurface: input.authoringPreflight.callerSurface,
       model: input.authoringPreflight.model ?? null,
       persistenceOutcome: failed > 0 ? 'partial' : 'persisted',
-      idempotencyKey: input.idempotencyKey ?? null,
+      idempotencyKey: input.idempotencyKey,
       completed,
       failed,
     };
+    if (failed === 0 && parentClaim.state === 'claimed') {
+      await markAuthoringMutationStage({
+        receiptId: parentClaim.receiptId,
+        requestHash: parentClaim.requestHash,
+        from: 'claimed',
+        to: 'artifact_written',
+      });
+      parentClaim.state = 'artifact_written';
+    }
+    const failedIndexes = results.filter((result) => result.status === 'failed').map((result) => result.index);
     const walEvent = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
-       VALUES ('spec_authoring_batch_persisted', $1, 'authoring-persist', $2) RETURNING *`,
-      [workspaceId, JSON.stringify(payload)],
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload, ingest_key)
+       VALUES ('spec_authoring_batch_persisted', $1, 'authoring-persist', $2, $3)
+       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+       RETURNING *`,
+      [workspaceId, JSON.stringify(payload), failed === 0
+        ? `authoring-persist-batch-complete:v1:${parentClaim.receiptId}`
+        : `authoring-persist-batch-partial:v1:${parentClaim.receiptId}:${authoringMutationRequestHash(failedIndexes)}`],
     );
     if (walEvent) broadcastAll(walEvent);
-    res.status(failed > 0 ? 207 : 200).json({
+    if (failed === 0 && parentClaim.state !== 'wal_written') {
+      await markAuthoringMutationStage({
+        receiptId: parentClaim.receiptId,
+        requestHash: parentClaim.requestHash,
+        from: 'artifact_written',
+        to: 'wal_written',
+      });
+      parentClaim.state = 'wal_written';
+    }
+    const response = {
       status: failed > 0 ? 'partial' : 'completed',
       parentAuthoringPlanHash: input.authoringPreflight.planHash,
       acceptedPreflightHash: input.authoringPreflight.acceptedPreflightHash,
+      mutationReceipt: { receiptId: parentClaim.receiptId, requestHash: parentClaim.requestHash },
       summary: { completed, failed, total: results.length },
       results,
-      resume: failed > 0 ? { retryOnlyFailedIndexes: results.filter((result) => result.status === 'failed').map((result) => result.index) } : null,
-    });
+      resume: failed > 0 ? { retryOnlyFailedIndexes: failedIndexes } : null,
+    };
+    if (failed === 0) {
+      await completeAuthoringMutation({
+        receiptId: parentClaim.receiptId,
+        requestHash: parentClaim.requestHash,
+        responseStatus: 200,
+        responseBody: response,
+      });
+    }
+    res.status(failed > 0 ? 207 : 200).json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Persist explicit draft batch');
   }
@@ -5292,6 +5653,8 @@ router.post('/lifecycle/backfill', validateBody(BackfillLifecyclePlansSchema), a
  * @swagger
  * /api/specs/generate/job/{jobId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Poll async spec generation job status
  *     operationId: getSpecGenerationJobStatus
@@ -5504,8 +5867,8 @@ async function processBatch(batch: BatchState): Promise<void> {
   })]);
   broadcastAll(finishWalEvent!);
 
-  // Auto-clean batch from memory after 1 hour
-  setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000);
+  // Auto-clean batch from memory after 1 hour without retaining the server process.
+  setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000).unref();
 }
 
 /**
@@ -5553,6 +5916,30 @@ async function processBatch(batch: BatchState): Promise<void> {
  *                 briefCount: { type: integer }
  *       400: { description: "Missing or empty briefs array, or brief missing required fields" }
  *       500: { description: "Internal server error" }
+ */
+/**
+ * @swagger
+ * /api/specs/generate/batch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue multiple briefs through the legacy batch-generation alias
+ *     operationId: generateSpecBatchLegacy
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "The legacy alias preserves the same bounded local batch-authoring behavior as canonical forge/batch for existing CLI clients."
+ *     x-rorca-public-api: true
+ *     description: Compatibility alias for POST /api/specs/forge/batch with the same request and response contract.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [briefs]
+ *             properties:
+ *               briefs: { type: array, items: { type: object } }
+ *     responses:
+ *       201: { description: Batch queued successfully }
+ *       400: { description: Invalid briefs }
  */
 router.post(['/forge/batch', '/generate/batch'], async (req: Request, res: Response) => {
   try {
@@ -5653,6 +6040,25 @@ router.post(['/forge/batch', '/generate/batch'], async (req: Request, res: Respo
  *                 items: { type: array, items: { type: object } }
  *       404: { description: "Batch not found or expired" }
  */
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Read batch status through the legacy generation alias
+ *     operationId: getGenerateBatchStatusLegacy
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "The legacy alias exposes the same read-only local batch status as canonical forge/batch for existing clients."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Batch status }
+ *       404: { description: Batch not found or expired }
+ */
 router.get(['/forge/batch/:batchId', '/generate/batch/:batchId'], (req: Request, res: Response) => {
   try {
     const batchId = req.params.batchId as string;
@@ -5713,6 +6119,25 @@ router.get(['/forge/batch/:batchId', '/generate/batch/:batchId'], (req: Request,
  *       200:
  *         description: SSE event stream (text/event-stream)
  *       404: { description: "Batch not found or expired" }
+ */
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}/stream:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Stream batch progress through the legacy generation alias
+ *     operationId: streamGenerateBatchProgressLegacy
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "The legacy alias exposes the same read-only local batch progress stream as canonical forge/batch for existing clients."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: SSE batch progress stream }
+ *       404: { description: Batch not found or expired }
  */
 router.get(['/forge/batch/:batchId/stream', '/generate/batch/:batchId/stream'], (req: Request, res: Response) => {
   const batchId = req.params.batchId as string;
@@ -6386,6 +6811,8 @@ router.get('/kanban', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{id}/mark-done:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Manually mark a spec as done in the kanban board
  *     operationId: markSpecDone
@@ -6450,6 +6877,8 @@ router.post('/:id/mark-done', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{id}/unmark-done:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Remove the manual done mark from a spec
  *     operationId: unmarkSpecDone
@@ -6515,6 +6944,8 @@ const MAX_CUSTOM_COLUMNS = 8;
  * @swagger
  * /api/specs/kanban/columns:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: List custom kanban columns for a workspace
  *     operationId: listKanbanColumns
@@ -6571,6 +7002,8 @@ router.get('/kanban/columns', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Create a custom kanban column
  *     operationId: createKanbanColumn
@@ -6646,6 +7079,8 @@ router.post('/kanban/columns', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns/{id}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Update a custom kanban column
  *     operationId: updateKanbanColumn
@@ -6741,6 +7176,8 @@ router.put('/kanban/columns/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Delete a custom kanban column
  *     operationId: deleteKanbanColumn
@@ -6811,6 +7248,8 @@ router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/kanban/columns/assign:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Assign or unassign a spec to a custom kanban column
  *     operationId: assignSpecToKanbanColumn
@@ -7067,9 +7506,13 @@ async function rebuildSearchIndex(workspaceId: string, workspacePath: string): P
   }
 
   // Index rejected specs from WAL (most recent rejection per slug only)
-  const rejectedEvents = await query(`SELECT spec_id, ts, payload FROM wal_events
-     WHERE event_type = 'spec_rejected' AND payload::text LIKE '%' || $1 || '%'
-     ORDER BY ts DESC`, [workspaceId]) as { spec_id: string; ts: string; payload: string }[];
+  const rejectedEvents = await query(
+    `SELECT spec_id, ts, payload FROM wal_events
+     WHERE event_type = 'spec_rejected'
+       AND (workspace_id = $1 OR (workspace_id IS NULL AND payload ->> 'workspaceId' = $1))
+     ORDER BY ts DESC`,
+    [workspaceId],
+  ) as { spec_id: string; ts: string; payload: string }[];
 
   const seenRejected = new Set<string>();
   for (const evt of rejectedEvents) {
@@ -7081,7 +7524,12 @@ async function rebuildSearchIndex(workspaceId: string, workspacePath: string): P
     if (existing) continue;
 
     // Try to get content from spec_versions for richer indexing
-    const versionRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [evt.spec_id]) as { content_json: unknown } | undefined;
+    const versionRow = await queryOne(
+      `SELECT content_json FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2
+       ORDER BY version DESC LIMIT 1`,
+      [workspaceId, evt.spec_id],
+    ) as { content_json: unknown } | undefined;
 
     if (versionRow) {
       const content = typeof versionRow.content_json === 'string' ? JSON.parse(versionRow.content_json) : versionRow.content_json as any;
@@ -7327,10 +7775,13 @@ router.get('/archive', async (req: Request, res: Response) => {
 
     // Collect rejected specs from WAL events
     if (statusFilter === 'all' || statusFilter === 'rejected') {
-      const rejectedEvents = await query(`SELECT spec_id, ts, payload FROM wal_events
+      const rejectedEvents = await query(
+        `SELECT spec_id, ts, payload FROM wal_events
          WHERE event_type = 'spec_rejected'
-         AND payload::text LIKE '%' || $1 || '%'
-         ORDER BY ts DESC`, [workspaceId]) as { spec_id: string; ts: string; payload: string }[];
+           AND (workspace_id = $1 OR (workspace_id IS NULL AND payload ->> 'workspaceId' = $1))
+         ORDER BY ts DESC`,
+        [workspaceId],
+      ) as { spec_id: string; ts: string; payload: string }[];
 
       const seenRejected = new Set<string>();
       for (const evt of rejectedEvents) {
@@ -7394,7 +7845,12 @@ router.get('/archive', async (req: Request, res: Response) => {
           else if (fs.existsSync(approvedFile)) content = parseSpecFile(approvedFile);
           else {
             // Rejected spec — try spec_versions
-            const vRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [spec.id]) as { content_json: unknown } | undefined;
+            const vRow = await queryOne(
+              `SELECT content_json FROM spec_versions
+               WHERE workspace_id = $1 AND spec_slug = $2
+               ORDER BY version DESC LIMIT 1`,
+              [workspaceId, spec.id],
+            ) as { content_json: unknown } | undefined;
             if (vRow) content = typeof vRow.content_json === 'string' ? JSON.parse(vRow.content_json) : vRow.content_json as any;
           }
         } catch {
@@ -8296,6 +8752,11 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
  *         required: true
  *         schema: { type: string }
  *         description: Spec slug
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Exact workspace authority for the version history
  *     responses:
  *       200:
  *         description: Paginated list of spec versions
@@ -8319,40 +8780,58 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
  */
 router.get('/:specId/versions', async (req: Request, res: Response) => {
   try {
-    const { specId } = req.params;
+    const specIdParam = req.params.specId;
+    const specId = Array.isArray(specIdParam) ? specIdParam[0] : specIdParam;
+    const workspaceId = req.query.workspaceId as string | undefined;
+    if (!specId) {
+      throw new ValidationError('Missing required path param: specId');
+    }
+    if (!workspaceId) {
+      throw new ValidationError('Missing required query param: workspaceId');
+    }
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
 
-    let rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
-       FROM spec_versions WHERE spec_slug = $1 ORDER BY version ASC`, [specId]) as SpecVersionRow[];
+    let rows = await query(
+      `SELECT id, workspace_id, spec_slug, version, content_json, status, rejection_reason, created_at
+       FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2
+       ORDER BY version ASC`,
+      [workspaceId, specId],
+    ) as SpecVersionRow[];
 
-    // Auto-backfill: if no versions recorded yet, read the spec from disk and create version 1
+    // Auto-backfill only from the exact requested workspace. Version numbers
+    // remain globally monotonic per slug for the historical uniqueness contract.
     if (rows.length === 0) {
-      const workspaces = await query('SELECT path FROM workspaces') as { path: string }[];
-      for (const ws of workspaces) {
-        const candidates = [
-          path.join(ws.path, 'forge', 'specs', 'approved', `${specId}.json`),
-          path.join(ws.path, 'forge', 'specs', 'pending', `${specId}.json`),
-        ];
-        for (const candidate of candidates) {
-          if (fs.existsSync(candidate)) {
-            try {
-              const raw = fs.readFileSync(candidate, 'utf-8');
-              const parsed = JSON.parse(raw);
-              const status = candidate.includes('/approved/') ? 'approved' : 'pending';
-              // Use spec generatedAt as created_at if available
-              const createdAt = parsed.generatedAt ? new Date(parsed.generatedAt) : new Date();
-              await execute(
-                `INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason, created_at)
-                 VALUES ($1, 1, $2, $3, NULL, $4)
-                 ON CONFLICT (spec_slug, version) DO NOTHING`,
-                [specId, raw, status, createdAt.toISOString()],
-              );
-              rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
-                 FROM spec_versions WHERE spec_slug = $1 ORDER BY version ASC`, [specId]) as SpecVersionRow[];
-            } catch { /* unreadable — skip */ }
-            break;
-          }
-        }
-        if (rows.length > 0) break;
+      const candidates = [
+        path.join(workspace.path, 'forge', 'specs', 'approved', `${specId}.json`),
+        path.join(workspace.path, 'forge', 'specs', 'pending', `${specId}.json`),
+      ];
+      for (const candidate of candidates) {
+        if (!fs.existsSync(candidate)) continue;
+        try {
+          const raw = fs.readFileSync(candidate, 'utf-8');
+          const parsed = JSON.parse(raw);
+          const status = candidate.includes(`${path.sep}approved${path.sep}`) ? 'approved' : 'pending';
+          const createdAt = parsed.generatedAt ? new Date(parsed.generatedAt) : new Date();
+          const version = await nextVersion(specId);
+          await execute(
+            `INSERT INTO spec_versions
+               (workspace_id, spec_slug, version, content_json, status, rejection_reason, created_at)
+             VALUES ($1, $2, $3, $4, $5, NULL, $6)`,
+            [workspaceId, specId, version, raw, status, createdAt.toISOString()],
+          );
+          rows = await query(
+            `SELECT id, workspace_id, spec_slug, version, content_json, status, rejection_reason, created_at
+             FROM spec_versions
+             WHERE workspace_id = $1 AND spec_slug = $2
+             ORDER BY version ASC`,
+            [workspaceId, specId],
+          ) as SpecVersionRow[];
+        } catch { /* unreadable or concurrently versioned — skip */ }
+        break;
       }
     }
 
@@ -8395,6 +8874,11 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
  *         required: true
  *         schema: { type: string }
  *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Exact workspace authority for both versions
+ *       - in: query
  *         name: v1
  *         required: true
  *         schema: { type: integer }
@@ -8433,8 +8917,17 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
 router.get('/:specId/diff', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string | undefined;
     const v1 = parseInt(req.query.v1 as string);
     const v2 = parseInt(req.query.v2 as string);
+
+    if (!workspaceId) {
+      throw new ValidationError('Missing required query param: workspaceId');
+    }
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
 
     if (isNaN(v1) || isNaN(v2)) {
       throw new ValidationError('Missing or invalid query params: v1 and v2 must be integers');
@@ -8446,9 +8939,19 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
       return;
     }
 
-    const row1 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v1]) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row1 = await queryOne(
+      `SELECT content_json, status, rejection_reason, created_at
+       FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2 AND version = $3`,
+      [workspaceId, specId, v1],
+    ) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
-    const row2 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v2]) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row2 = await queryOne(
+      `SELECT content_json, status, rejection_reason, created_at
+       FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2 AND version = $3`,
+      [workspaceId, specId, v2],
+    ) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
     if (!row1 || !row2) {
       const missing = !row1 && !row2 ? `v${v1} and v${v2}` : !row1 ? `v${v1}` : `v${v2}`;
@@ -8478,6 +8981,8 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/versions/{version}/restore:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Restore a historical spec version
  *     operationId: restoreSpecVersion
@@ -8532,14 +9037,18 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;
     }
 
-    // Fetch the version to restore
-    const row = await queryOne('SELECT content_json, status FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, versionNum]) as { content_json: unknown; status: string } | undefined;
+    // Fetch only the exact workspace-owned version to restore.
+    const row = await queryOne(
+      `SELECT content_json, status FROM spec_versions
+       WHERE workspace_id = $1 AND spec_slug = $2 AND version = $3`,
+      [workspaceId, specId, versionNum],
+    ) as { content_json: unknown; status: string } | undefined;
 
     if (!row) {
       throw new NotFoundError(`Version ${versionNum} not found for spec ${specId}`);
@@ -8558,7 +9067,7 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     if (currentPath) {
       // Snapshot current state before overwriting
       const currentContent = fs.readFileSync(currentPath, 'utf8');
-      await snapshotVersion(specId, currentContent, currentStatus);
+      await snapshotVersion(workspaceId, specId, currentContent, currentStatus);
     }
 
     // Write restored content to the current location (or pending if no file exists)
@@ -8576,7 +9085,7 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     await markCurrentPlanStaleIfMaterialChanged({ workspaceId: String(workspaceId), workspacePath: workspace.path, specSlug: specId });
 
     // Snapshot the restored version
-    const newVersion = await snapshotVersion(specId, JSON.stringify(restoredContent), currentStatus);
+    const newVersion = await snapshotVersion(workspaceId, specId, JSON.stringify(restoredContent), currentStatus);
 
     // Emit WAL event
     await execute(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`, ['version_restored', specId, workspaceId, JSON.stringify({
@@ -8651,7 +9160,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;
@@ -8686,7 +9195,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
       }
 
       // Snapshot pre-edit state as a new version
-      const version = await snapshotVersion(specId, raw, 'pending');
+      const version = await snapshotVersion(workspaceId, specId, raw, 'pending');
 
       // Apply only provided fields
       if (title !== undefined) stories[storyIndex].title = title;
@@ -8768,6 +9277,8 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
  * @swagger
  * /api/specs/{specId}/stories/{storyId}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Update a single story
  *     operationId: updateStory
@@ -8868,7 +9379,7 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
 
     // Snapshot pre-edit state as a new version
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = await snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(workspaceId, specId, raw, status);
 
     // Apply edits — only update provided fields
     if (title !== undefined) stories[storyIndex].title = title;
@@ -8993,7 +9504,7 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
 
     // Snapshot pre-delete state
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = await snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(workspaceId, specId, raw, status);
 
     // Remove and reindex
     stories.splice(storyIndex, 1);
@@ -9043,6 +9554,8 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/rewrite:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: AI-assisted story rewrite
  *     operationId: rewriteStory
@@ -9190,6 +9703,8 @@ Rewrite the story following the user instructions. Keep the same scope unless to
  * @swagger
  * /api/specs/tags/autocomplete:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Autocomplete tag names
  *     operationId: autocompleteSpecTags
@@ -9339,6 +9854,8 @@ router.get('/:specId', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/fork:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Fork (deep copy) a spec with a new slug
  *     operationId: forkSpec
@@ -9454,7 +9971,7 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
     }
 
     // Snapshot version
-    await snapshotVersion(forkSlug, JSON.stringify(forkedSpec), 'pending');
+    await snapshotVersion(workspaceId, forkSlug, JSON.stringify(forkedSpec), 'pending');
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_forked', $1, $2, 'user', $3)` + ' RETURNING *', [forkSlug, workspaceId, JSON.stringify({ forkedFrom: specId, title: forkedSpec.title })]);
@@ -9468,6 +9985,133 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Fork');
+  }
+});
+
+const SpecHumanApprovalSchema = z.object({
+  acceptedPlanHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  acceptedPreflightHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  persistReceiptId: z.string().uuid(),
+  persistRequestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  attestation: ProviderHumanEventSchema,
+}).strict();
+
+const ApproveSpecRequestSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  readinessOverride: z.literal(false).optional(),
+  humanApproval: SpecHumanApprovalSchema.optional(),
+}).strict();
+
+const SpecApprovalTargetRequestSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  acceptedPlanHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  acceptedPreflightHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  persistReceiptId: z.string().uuid(),
+  persistRequestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+}).strict();
+
+function governedSpecApprovalResponseIdentity(input: {
+  workspaceId: string;
+  specId: string;
+  idempotencyKey: string;
+  approval: z.infer<typeof SpecHumanApprovalSchema>;
+  providerApproval: { receiptId: string; actorId: string; targetHash: string };
+  mutationReceipt: { receiptId: string; requestHash: string };
+}) {
+  return {
+    schemaVersion: 'rorca.spec-approval-response-identity.v1',
+    workspaceId: input.workspaceId,
+    specId: input.specId,
+    idempotencyKey: input.idempotencyKey,
+    targetHash: input.providerApproval.targetHash,
+    actorId: input.providerApproval.actorId,
+    providerHumanReceiptId: input.providerApproval.receiptId,
+    acceptedPlanHash: input.approval.acceptedPlanHash,
+    acceptedPreflightHash: input.approval.acceptedPreflightHash,
+    persistReceiptId: input.approval.persistReceiptId,
+    persistRequestHash: input.approval.persistRequestHash,
+    mutationReceiptId: input.mutationReceipt.receiptId,
+    mutationRequestHash: input.mutationReceipt.requestHash,
+  };
+}
+
+/**
+ * @swagger
+ * /api/specs/{specId}/approval-target:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Resolve the exact provider-human spec approval target
+ *     operationId: resolveSpecApprovalTarget
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Provider adapters need a read-only canonical target hash before collecting a separately signed human approval action."
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, acceptedPlanHash, acceptedPreflightHash, persistReceiptId, persistRequestHash]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               acceptedPlanHash: { type: string }
+ *               acceptedPreflightHash: { type: string }
+ *               persistReceiptId: { type: string, format: uuid }
+ *               persistRequestHash: { type: string }
+ *     responses:
+ *       200: { description: rorca.spec-approval-target.v1 exact approval target and request/material/readiness identity }
+ *       409: { description: Persisted authoring identity mismatch }
+ */
+router.post('/:specId/approval-target', validateBody(SpecApprovalTargetRequestSchema), async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const input = SpecApprovalTargetRequestSchema.parse(req.body);
+    const workspaceId = String(input.workspaceId);
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) throw new NotFoundError('Workspace not found');
+    const { pendingDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    if (!fs.existsSync(pendingFile)) throw new NotFoundError(`Spec '${specId}' not found in pending`);
+    const pendingContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8')) as Record<string, unknown>;
+    const authoring = pendingContent.authoring as Record<string, unknown> | undefined;
+    if (!authoring || authoring.state !== 'validated') throw new UnprocessableError('Spec approval target requires validated authoring state', 'AUTHORING_PREFLIGHT_REQUIRED');
+    const parentPlan = authoring.parentAuthoringPlan as Record<string, unknown> | undefined;
+    const mutationReceipt = authoring.mutationReceipt as Record<string, unknown> | undefined;
+    if (parentPlan?.acceptedPlanHash !== input.acceptedPlanHash
+      || parentPlan?.acceptedPreflightHash !== input.acceptedPreflightHash
+      || mutationReceipt?.receiptId !== input.persistReceiptId
+      || mutationReceipt?.requestHash !== input.persistRequestHash) {
+      throw new ConflictError('Spec approval target differs from persisted authoring authority');
+    }
+    const readiness = await getSpecReadiness({
+      workspaceId, workspacePath: workspace.path, specId,
+      specPath: `forge/specs/pending/${specId}.json`,
+    });
+    assertSpecReadinessAllowsMutation(readiness, false);
+    const materialHash = providerHumanActionHash(pendingContent);
+    const readinessFingerprint = providerHumanActionHash(readiness);
+    const targetHash = providerHumanActionHash({
+      purpose: 'spec_set_approval', workspaceId,
+      specs: [{ specId, materialHash, persistReceiptId: input.persistReceiptId }],
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      readinessFingerprint,
+    });
+    res.json({
+      schemaVersion: 'rorca.spec-approval-target.v1', targetHash, workspaceId, specId,
+      acceptedPlanHash: input.acceptedPlanHash,
+      acceptedPreflightHash: input.acceptedPreflightHash,
+      persistReceiptId: input.persistReceiptId,
+      persistRequestHash: input.persistRequestHash,
+      materialHash, readinessFingerprint,
+      requesterActorId: typeof authoring.requesterActorId === 'string' ? authoring.requesterActorId : null,
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Approval target');
   }
 });
 
@@ -9498,7 +10142,17 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
  *               workspaceId: { type: string }
  *               readinessOverride:
  *                 type: boolean
- *                 description: Explicitly approve despite readiness blockers; usage is logged to WAL for auditability.
+ *                 enum: [false]
+ *                 description: Governed approval never permits readiness override.
+ *               humanApproval:
+ *                 type: object
+ *                 description: Exact accepted authoring identity plus signed provider-human attestation for governed specs.
+ *                 properties:
+ *                   acceptedPlanHash: { type: string }
+ *                   acceptedPreflightHash: { type: string }
+ *                   persistReceiptId: { type: string, format: uuid }
+ *                   persistRequestHash: { type: string }
+ *                   attestation: { type: object }
  *     responses:
  *       200:
  *         description: Spec approved
@@ -9508,19 +10162,43 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
  *               type: object
  *               properties:
  *                 ok: { type: boolean }
- *                 specPath: { type: string }
+ *                 approvedPath: { type: string }
+ *                 readiness: { type: object }
+ *                 providerApproval: { type: object }
+ *                 localApproval:
+ *                   type: object
+ *                   description: Explicit local-single-user approval identity; never available to authenticated hosted users or internal services.
+ *                 mutationReceipt: { type: object }
+ *                 responseIdentity:
+ *                   type: object
+ *                   description: rorca.spec-approval-response-identity.v1 exact request/target/receipt binding
  *       404: { description: "Spec not found in pending/" }
  */
-router.post('/:specId/approve', async (req: Request, res: Response) => {
+router.post('/:specId/approve', validateBody(ApproveSpecRequestSchema), async (req: Request, res: Response) => {
   try {
     const specId = String(req.params.specId);
-    const { workspaceId, readinessOverride, runAnywayOverride, overrideReadinessGate } = req.body;
-    const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
-
-    if (!workspaceId) {
-      throw new ValidationError('Missing required field: workspaceId');
+    const input = ApproveSpecRequestSchema.parse(req.body);
+    const workspaceId = String(input.workspaceId);
+    const readinessOverrideRequested = false;
+    const servicePrincipal = !req.user || req.user.email.toLowerCase().endsWith('@rorca.internal');
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    if ((input.humanApproval || servicePrincipal) && !idempotencyKey) {
+      throw new ValidationError('Idempotency-Key header is required for governed spec approval');
+    }
+    const claim = idempotencyKey
+      ? await claimAuthoringMutation({
+        workspaceId,
+        operation: 'approve',
+        idempotencyKey,
+        request: { specId, ...input },
+        specId,
+      })
+      : null;
+    if (claim?.completed && claim.responseBody) {
+      res.status(claim.responseStatus ?? 200).json(claim.responseBody);
       return;
     }
+    if (claim) authoringMutationFailpoint('approve_after_claim');
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
@@ -9530,10 +10208,78 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
     const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
 
     if (!fs.existsSync(pendingFile)) {
+      if (claim && fs.existsSync(approvedFile)) {
+        const approvedContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8')) as Record<string, unknown>;
+        const approvedAuthoring = approvedContent.authoring as Record<string, unknown> | undefined;
+        const approvalMutationReceipt = approvedAuthoring?.approvalMutationReceipt as Record<string, unknown> | undefined;
+        const approvalResult = approvedAuthoring?.approvalResult as Record<string, unknown> | undefined;
+        if (approvalMutationReceipt?.receiptId === claim.receiptId
+          && approvalMutationReceipt?.requestHash === claim.requestHash
+          && approvalResult) {
+          if (approvalResult.materialHash !== authoringSpecMaterialHash(approvedContent)) {
+            throw new ConflictError('Approved authoring artifact material differs from its mutation receipt');
+          }
+          const replayProviderApproval = approvalResult.providerApproval as Record<string, unknown> | null | undefined;
+          if (replayProviderApproval) {
+            const durableProviderReceipt = await queryOne<{ id: string }>(
+              `SELECT id FROM provider_human_authority_receipts
+                WHERE id = $1 AND workspace_id = $2 AND purpose = 'spec_set_approval'
+                  AND target_hash = $3 AND actor_id = $4`,
+              [replayProviderApproval.receiptId, workspaceId, replayProviderApproval.targetHash, replayProviderApproval.actorId],
+            );
+            if (!durableProviderReceipt) throw new ConflictError('Approved artifact lacks its exact durable provider-human receipt');
+          }
+          if (claim.state === 'claimed' || claim.state === 'recoverable_failure') {
+            await markAuthoringMutationStage({
+              receiptId: claim.receiptId,
+              requestHash: claim.requestHash,
+              from: 'claimed',
+              to: 'artifact_written',
+            });
+            claim.state = 'artifact_written';
+          }
+          const replayWal = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload, ingest_key)
+             VALUES ('spec_approved', $1, $2, $3, $4, $5)
+             ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+             RETURNING *`,
+            [specId, workspaceId, String(approvalResult.actorId ?? 'provider-human'),
+              JSON.stringify(approvalResult.walPayload ?? { workspaceId }),
+              `authoring-approve:v1:${claim.receiptId}`],
+          );
+          if (replayWal) broadcastAll(replayWal);
+          if (claim.state !== 'wal_written') {
+            await markAuthoringMutationStage({
+              receiptId: claim.receiptId,
+              requestHash: claim.requestHash,
+              from: 'artifact_written',
+              to: 'wal_written',
+            });
+            claim.state = 'wal_written';
+          }
+          const response = {
+            ok: true,
+            approvedPath: approvedFile,
+            readiness: approvalResult.readiness,
+            ...(approvalResult.providerApproval ? { providerApproval: approvalResult.providerApproval } : {}),
+            ...(approvalResult.localApproval ? { localApproval: approvalResult.localApproval } : {}),
+            mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
+            ...(approvalResult.responseIdentity ? { responseIdentity: approvalResult.responseIdentity } : {}),
+          };
+          await completeAuthoringMutation({
+            receiptId: claim.receiptId,
+            requestHash: claim.requestHash,
+            responseStatus: 200,
+            responseBody: response,
+          });
+          res.json(response);
+          return;
+        }
+      }
       throw new NotFoundError(`Spec '${specId}' not found in pending`);
-      return;
     }
 
     const pendingContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8')) as Record<string, unknown>;
@@ -9561,23 +10307,176 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
       specPath: `forge/specs/pending/${specId}.json`,
     });
     assertSpecReadinessAllowsMutation(readiness, readinessOverrideRequested);
-    if (readiness.executionGate.status === 'blocked' && readinessOverrideRequested) {
-      await recordSpecReadinessOverride({ workspaceId, specId, action: 'approve', readiness });
+
+    const authoringRecord = authoring && typeof authoring === 'object' && !Array.isArray(authoring)
+      ? authoring as Record<string, unknown>
+      : null;
+    const governedAuthoring = pendingContent.source === 'hermes-chatops-skill-first'
+      || Boolean(authoringRecord?.mutationReceipt);
+    const localHumanApprovalPrincipal = isLocalHumanApprovalPrincipal(req.user);
+    if (governedAuthoring && !input.humanApproval && !localHumanApprovalPrincipal) {
+      throw new ForbiddenError('Governed provider-authored specs require exact provider-human approval authority');
     }
 
-    // Create approved/ if needed and move the file
-    fs.mkdirSync(approvedDir, { recursive: true });
-    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    let providerApproval: { receiptId: string; actorId: string; targetHash: string } | null = null;
+    let localApproval: {
+      schemaVersion: 'rorca.local-human-approval.v1';
+      actorId: string;
+      authorityMode: 'local-single-user';
+    } | null = null;
+    if (input.humanApproval) {
+      if (!authoringRecord) throw new UnprocessableError('Provider-human approval requires governed authoring metadata', 'AUTHORING_PREFLIGHT_REQUIRED');
+      const parentPlan = authoringRecord.parentAuthoringPlan as Record<string, unknown> | undefined;
+      const mutationReceipt = authoringRecord.mutationReceipt as Record<string, unknown> | undefined;
+      if (parentPlan?.acceptedPlanHash !== input.humanApproval.acceptedPlanHash
+        || parentPlan?.acceptedPreflightHash !== input.humanApproval.acceptedPreflightHash
+        || mutationReceipt?.receiptId !== input.humanApproval.persistReceiptId
+        || mutationReceipt?.requestHash !== input.humanApproval.persistRequestHash) {
+        throw new ConflictError('Spec approval target differs from persisted authoring authority');
+      }
+      const targetHash = providerHumanActionHash({
+        purpose: 'spec_set_approval',
+        workspaceId,
+        specs: [{
+          specId,
+          materialHash: providerHumanActionHash(pendingContent),
+          persistReceiptId: input.humanApproval.persistReceiptId,
+        }],
+        acceptedPlanHash: input.humanApproval.acceptedPlanHash,
+        acceptedPreflightHash: input.humanApproval.acceptedPreflightHash,
+        readinessFingerprint: providerHumanActionHash(readiness),
+      });
+      const receipt = await verifyAndPersistProviderHumanAuthority({
+        workspaceId,
+        purpose: 'spec_set_approval',
+        targetHash,
+        event: input.humanApproval.attestation,
+        requesterActorId: typeof authoringRecord.requesterActorId === 'string' ? authoringRecord.requesterActorId : null,
+        requireDistinctActor: ['high', 'critical'].includes(String(
+          (authoringRecord.lifecycleCompiler as Record<string, unknown> | undefined)?.riskLevel ?? '',
+        ).toLowerCase()),
+      });
+      providerApproval = { receiptId: receipt.receiptId, actorId: receipt.actorId, targetHash };
+      authoringMutationFailpoint('approve_after_provider_approval');
+      authoringRecord.providerApproval = {
+        schemaVersion: 'provider-human-event.v1',
+        receiptId: receipt.receiptId,
+        actorId: receipt.actorId,
+        provider: input.humanApproval.attestation.provider,
+        providerTenantId: input.humanApproval.attestation.providerTenantId,
+        conversationId: input.humanApproval.attestation.conversationId,
+        threadId: input.humanApproval.attestation.threadId,
+        messageId: input.humanApproval.attestation.messageId,
+        targetHash,
+        acceptedPlanHash: input.humanApproval.acceptedPlanHash,
+        acceptedPreflightHash: input.humanApproval.acceptedPreflightHash,
+        persistReceiptId: input.humanApproval.persistReceiptId,
+      };
+    } else if (localHumanApprovalPrincipal) {
+      localApproval = {
+        schemaVersion: 'rorca.local-human-approval.v1',
+        actorId: req.user!.id,
+        authorityMode: 'local-single-user',
+      };
+      if (authoringRecord) authoringRecord.localApproval = localApproval;
+    } else if (servicePrincipal) {
+      throw new ForbiddenError('Service principals must relay exact provider-human approval authority');
+    }
+
+    const responseIdentity = input.humanApproval && providerApproval && claim && idempotencyKey
+      ? governedSpecApprovalResponseIdentity({
+        workspaceId,
+        specId,
+        idempotencyKey,
+        approval: input.humanApproval,
+        providerApproval,
+        mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash },
+      })
+      : null;
+
+    if (claim) {
+      const mutableAuthoring = authoringRecord ?? {};
+      pendingContent.authoring = mutableAuthoring;
+      mutableAuthoring.approvalMutationReceipt = {
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        idempotencyKey,
+      };
+      mutableAuthoring.approvalResult = {
+        readiness,
+        providerApproval,
+        localApproval,
+        materialHash: authoringSpecMaterialHash(pendingContent),
+        actorId: providerApproval?.actorId ?? localApproval?.actorId ?? req.user!.id,
+        walPayload: { workspaceId, providerApproval, localApproval },
+        ...(responseIdentity ? { responseIdentity } : {}),
+      };
+    }
+    // Publish the updated pending bytes through an exclusive temp file, file
+    // fsync, rename, and source-directory fsync before crossing directories.
+    durableAtomicWriteFile(pendingFile, `${JSON.stringify(pendingContent, null, 2)}\n`);
+
+    // A durable cross-directory rename requires both directory entries to be
+    // flushed. Recovery therefore observes either the exact pending artifact or
+    // the exact approved artifact, never a torn in-place rewrite.
+    durableEnsureDirectory(approvedDir);
+    fsyncDirectory(path.dirname(approvedDir));
+    fsyncDirectory(approvedDir);
     fs.renameSync(pendingFile, approvedFile);
+    fsyncDirectory(pendingDir);
+    fsyncDirectory(approvedDir);
+    authoringMutationFailpoint('approve_after_rename');
+    if (claim && claim.state !== 'artifact_written' && claim.state !== 'wal_written') {
+      await markAuthoringMutationStage({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        from: 'claimed',
+        to: 'artifact_written',
+      });
+      claim.state = 'artifact_written';
+    }
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_approved', $1, $2, 'user', $3) RETURNING *`,
-      [specId, workspaceId, JSON.stringify({ workspaceId })],
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload, ingest_key)
+       VALUES ('spec_approved', $1, $2, $3, $4, $5)
+       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+       RETURNING *`,
+      [specId, workspaceId, providerApproval?.actorId ?? localApproval?.actorId ?? req.user!.id,
+        JSON.stringify({ workspaceId, providerApproval, localApproval }),
+        claim ? `authoring-approve:v1:${claim.receiptId}` : null],
     );
     if (walEvent) broadcastAll(walEvent);
+    authoringMutationFailpoint('approve_after_wal');
+    if (claim && claim.state !== 'wal_written') {
+      await markAuthoringMutationStage({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        from: 'artifact_written',
+        to: 'wal_written',
+      });
+      claim.state = 'wal_written';
+    }
 
-    res.json({ ok: true, approvedPath: approvedFile, readiness });
+    const response = {
+      ok: true,
+      approvedPath: approvedFile,
+      readiness,
+      ...(providerApproval ? { providerApproval } : {}),
+      ...(localApproval ? { localApproval } : {}),
+      ...(claim ? { mutationReceipt: { receiptId: claim.receiptId, requestHash: claim.requestHash } } : {}),
+      ...(responseIdentity ? { responseIdentity } : {}),
+    };
+    if (claim) {
+      authoringMutationFailpoint('approve_before_receipt_completion');
+      await completeAuthoringMutation({
+        receiptId: claim.receiptId,
+        requestHash: claim.requestHash,
+        responseStatus: 200,
+        responseBody: response,
+      });
+    }
+    res.json(response);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Approve');
   }
@@ -9623,7 +10522,7 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;
@@ -9637,7 +10536,11 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
       // Approved spec dragged back to Draft — move it back to pending/ (unapprove)
       fs.mkdirSync(pendingDir, { recursive: true });
       fs.renameSync(approvedFile, pendingFile);
-      await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId, reason: reason ?? null, from: 'approved' })]);
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+         VALUES ('spec_rejected', $1, $2, 'user', $3)`,
+        [workspaceId, specId, JSON.stringify({ workspaceId, reason: reason ?? null, from: 'approved' })],
+      );
       res.json({ ok: true });
       return;
     }
@@ -9649,11 +10552,15 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
 
     // Pending spec rejected — snapshot and delete
     const content = fs.readFileSync(pendingFile, 'utf8');
-    await snapshotVersion(specId as string, content, 'rejected', (reason as string) ?? undefined);
+    await snapshotVersion(workspaceId, specId as string, content, 'rejected', (reason as string) ?? undefined);
     fs.unlinkSync(pendingFile);
 
     // Emit WAL event
-    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId, reason: reason ?? null })]);
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+       VALUES ('spec_rejected', $1, $2, 'user', $3)`,
+      [workspaceId, specId, JSON.stringify({ workspaceId, reason: reason ?? null })],
+    );
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -10050,6 +10957,8 @@ router.post('/:specId/workflow/stages/:stageKey/retry', async (req: Request, res
  * @swagger
  * /api/specs/{specId}/check:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Validate a spec's structure and story integrity
  *     operationId: checkSpec
@@ -10252,6 +11161,8 @@ router.get('/:specId/check', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/score:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Compute quality score for a spec's acceptance criteria
  *     operationId: scoreSpec
@@ -10415,6 +11326,8 @@ router.get('/:specId/score', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Delete a spec
  *     operationId: deleteSpec
@@ -10497,6 +11410,8 @@ const VALID_REVIEW_STATUSES: ReviewStatus[] = ['draft', 'review_requested', 'app
  * @swagger
  * /api/specs/{specId}/request-review:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Submit spec for review
  *     operationId: requestSpecReview
@@ -10582,6 +11497,8 @@ router.post('/:specId/request-review', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/review:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Approve or request changes on a spec review
  *     operationId: reviewSpec
@@ -10774,6 +11691,8 @@ function computeParallelGroups(stories: UserStory[]): string[][] {
  * @swagger
  * /api/specs/{specId}/stories/bulk:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Bulk story actions (exclude, include, delete, set_priority)
  *     operationId: bulkStoryAction
@@ -10876,7 +11795,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
 
     // Snapshot pre-mutation state
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = await snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(workspaceId, specId, raw, status);
 
     let eventType: string;
 
@@ -11213,6 +12132,8 @@ interface DependencySuggestion {
  * @swagger
  * /api/specs/{specId}/detect-dependencies:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: AI-powered dependency detection
  *     operationId: detectDependencies
@@ -11420,6 +12341,8 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
  * @swagger
  * /api/specs/{specId}/apply-dependencies:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Accept and apply suggested dependencies
  *     operationId: applyDependencies
@@ -11557,6 +12480,8 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
  * @swagger
  * /api/specs/{specId}/tags:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Add tags to a spec
  *     operationId: addSpecTags
@@ -11638,6 +12563,8 @@ router.post('/:specId/tags', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/tags/{tag}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Remove a tag from a spec
  *     operationId: removeSpecTag
@@ -11719,6 +12646,8 @@ interface StoryCommitRow {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/commits:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: List git commits for a story
  *     operationId: listStoryCommits
@@ -11784,6 +12713,8 @@ router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Respon
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/branch:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Create a git branch for a story
  *     operationId: createStoryBranch
@@ -11926,6 +12857,8 @@ function renderPrTemplate(template: string, vars: Record<string, string>): strin
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/pr-body:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Generate PR body for a story
  *     operationId: generateStoryPrBody
@@ -12040,11 +12973,6 @@ interface GitHubIssue {
   state: string;
 }
 
-interface GithubWebhookRow {
-  repo_owner: string;
-  repo_name: string;
-}
-
 /**
  * Fetch a page of GitHub issues by number.
  * Uses the individual issue endpoint for specific numbers,
@@ -12067,8 +12995,8 @@ async function fetchGithubIssues(
     const results = await Promise.all(
       batch.map(async (num) => {
         const res = await githubRateLimiter.execute(() =>
-          fetch(
-            `https://api.github.com/repos/${owner}/${repo}/issues/${num}`,
+          fetchGithubWithTimeout(fetch,
+            githubRepoApiUrl(owner, repo, `/issues/${num}`),
             {
               headers: {
                 'Authorization': `Bearer ${token}`,
@@ -12108,8 +13036,8 @@ async function fetchAllGithubIssues(
 
   while (true) {
     const res = await githubRateLimiter.execute(() =>
-      fetch(
-        `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`,
+      fetchGithubWithTimeout(fetch,
+        githubRepoApiUrl(owner, repo, `/issues?state=open&per_page=${perPage}&page=${page}`),
         {
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -12157,6 +13085,8 @@ function githubIssueToStory(
  * @swagger
  * /api/specs/{specId}/import/github-issues:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Import GitHub issues as stories
  *     operationId: importGithubIssues
@@ -12213,22 +13143,20 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       throw new NotFoundError('Workspace not found');
       return;
     }
-
-    // Resolve GitHub connection for this workspace
-    const ghConn = await queryOne('SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]) as GithubWebhookRow | undefined;
-
-    if (!ghConn) {
-      throw new ValidationError('No GitHub connection for this workspace. Connect via workspace settings first.');
-      return;
+    if (issueNumbers !== undefined && (!Array.isArray(issueNumbers) || issueNumbers.length > 100
+      || issueNumbers.some((value) => !Number.isSafeInteger(value) || value <= 0))) {
+      throw new ValidationError('issueNumbers must contain at most 100 positive safe integers');
     }
 
-    // Resolve GitHub token from local credentials or environment
-    const githubToken = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
-
-    if (!githubToken) {
-      throw new ValidationError('No GitHub token available. Set GITHUB_TOKEN or GH_TOKEN for repository actions.');
-      return;
-    }
+    // Resolve repository and credential through canonical exact-repository
+    // authority. Ambient process tokens are never issue-import authority.
+    const authority = await requireGithubRepositoryAuthority(workspaceId);
+    const resolvedGithub = await resolveWorkspaceGitHubToken(workspaceId, {
+      repository: { owner: authority.owner, name: authority.name }, purpose: 'issues-read',
+    });
+    if (!resolvedGithub) throw new ValidationError('No exact-repository GitHub credential is available for this workspace.');
+    const ghConn = { repo_owner: authority.owner, repo_name: authority.name };
+    const githubToken = resolvedGithub.token;
 
     // Find the spec on disk
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
@@ -12444,11 +13372,11 @@ async function fetchGithubIssuesDirect(
   const perPage = 100;
 
   while (true) {
-    let url = `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`;
+    let url = githubRepoApiUrl(owner, repo, `/issues?state=open&per_page=${perPage}&page=${page}`);
     if (milestone) url += `&milestone=${encodeURIComponent(milestone)}`;
 
     const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
+      fetchGithubWithTimeout(fetch, url, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Accept': 'application/vnd.github+json',
@@ -12495,10 +13423,12 @@ interface ImportRequestBody {
  * @swagger
  * /api/specs/{specId}/import:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Unified issue import from Linear or GitHub
  *     operationId: importIssues
- *     description: Imports issues from Linear or GitHub as user stories appended to a spec. Supports preview mode. For Linear, requires an API key and optional team/project/label filters. For GitHub, requires a token, owner, and repo name. Emits an issues_imported WAL event.
+ *     description: Imports issues from Linear or the workspace's canonical exact-repository GitHub authority as user stories appended to a spec. Supports preview mode. Caller-supplied GitHub tokens/repositories are deprecated and never used as authority. Emits an issues_imported WAL event.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -12611,16 +13541,25 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
         return linearIssueToStory(issue, storyId);
       });
     } else {
-      // GitHub import
-      if (!body.githubToken || !body.githubOwner || !body.githubRepo) {
-        throw new ValidationError('Missing required fields: githubToken, githubOwner, githubRepo');
-        return;
+      // GitHub import always uses canonical App-first repository authority. Any
+      // retained owner/repo fields are accepted only as an equality assertion;
+      // caller-supplied token material is never used.
+      const expectedRepository = body.githubOwner || body.githubRepo
+        ? { owner: String(body.githubOwner ?? ''), name: String(body.githubRepo ?? '') }
+        : undefined;
+      const authority = await requireGithubRepositoryAuthority(workspaceId, { expectedRepository });
+      const resolvedGithub = await resolveWorkspaceGitHubToken(workspaceId, {
+        repository: { owner: authority.owner, name: authority.name }, purpose: 'issues-read',
+      });
+      if (!resolvedGithub) throw new ValidationError('No exact-repository GitHub credential is available for this workspace.');
+      if (body.githubMilestone !== undefined && (typeof body.githubMilestone !== 'string' || body.githubMilestone.length > 100)) {
+        throw new ValidationError('githubMilestone must be at most 100 characters');
       }
 
       const { issues, errors } = await fetchGithubIssuesDirect(
-        body.githubOwner,
-        body.githubRepo,
-        body.githubToken,
+        authority.owner,
+        authority.name,
+        resolvedGithub.token,
         body.githubMilestone,
       );
       importErrors = errors;
@@ -12698,6 +13637,8 @@ interface StoryCommentRow {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/comments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: List comments for a story
  *     operationId: listStoryComments
@@ -12760,6 +13701,8 @@ router.get('/:specId/stories/:storyId/comments', async (req: Request, res: Respo
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/comments:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Create a comment on a story
  *     operationId: createStoryComment
@@ -12852,7 +13795,7 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
       for (const name of mentionedNames) {
         const mentionedUserId = userByName.get(name.toLowerCase());
         if (mentionedUserId && mentionedUserId !== user.id) {
-          createNotification(
+          await createNotification(
             mentionedUserId,
             'mention',
             `${comment.display_name} mentioned you in a comment`,
@@ -12873,6 +13816,8 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/comments/{commentId}/resolve:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Resolve a story comment
  *     operationId: resolveStoryComment
@@ -12952,6 +13897,8 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', async (req:
  * @swagger
  * /api/specs/{specId}/comments/counts:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Get unresolved comment counts per story
  *     operationId: getCommentCounts
@@ -13002,6 +13949,8 @@ router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/assign:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Assign or unassign a spec to a user
  *     operationId: assignSpec
@@ -13135,6 +14084,8 @@ router.put('/:specId/assign', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/assign:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Assign or unassign a story to a user
  *     operationId: assignStory
@@ -13286,6 +14237,8 @@ router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Respons
  * @swagger
  * /api/specs/{specId}/assignments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Get all assignments for a spec
  *     operationId: getSpecAssignments
@@ -13374,6 +14327,8 @@ router.get('/:specId/assignments', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/enhance-criteria:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: AI-suggest additional acceptance criteria
  *     operationId: enhanceStoryCriteria
@@ -13541,6 +14496,8 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
  * @swagger
  * /api/specs/{specId}/stories/{storyId}/accept-criteria:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Accept and apply suggested acceptance criteria
  *     operationId: acceptStoryCriteria
@@ -13651,6 +14608,8 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
  * @swagger
  * /api/specs/{specId}/match-skills:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: LLM-driven skill matching for a spec
  *     operationId: matchSkills
@@ -13931,7 +14890,7 @@ ${storyList}`;
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     // Create spec version for audit trail
-    await snapshotVersion(specId, JSON.stringify(specContent), specStatus === 'approved' ? 'approved' : 'pending');
+    await snapshotVersion(workspaceId, specId, JSON.stringify(specContent), specStatus === 'approved' ? 'approved' : 'pending');
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)` + ' RETURNING *', ['skill_matched', specId, workspaceId, JSON.stringify({
@@ -14038,6 +14997,8 @@ router.post('/:specId/match-skills/async', async (req: Request, res: Response) =
  * @swagger
  * /api/specs/{specId}/suggest-models:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: LLM-driven model suggestion for each story in a spec
  *     operationId: suggestModels
@@ -14210,6 +15171,8 @@ ${storyList}`;
  * @swagger
  * /api/specs/{specId}/validate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: LLM-powered deep spec review
  *     operationId: validateSpec
@@ -14401,6 +15364,8 @@ Respond with ONLY valid JSON, no markdown fences, no prose. Format:
  * @swagger
  * /api/specs/{specId}/suggest-skills:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Run skill matching for a spec via the skill-matcher module
  *     operationId: suggestSkills
@@ -14505,7 +15470,7 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
     }
 
     // Create spec version for audit trail
-    await snapshotVersion(specId, JSON.stringify(result.spec), specStatus === 'approved' ? 'approved' : 'pending');
+    await snapshotVersion(workspaceId, specId, JSON.stringify(result.spec), specStatus === 'approved' ? 'approved' : 'pending');
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(
@@ -14585,6 +15550,8 @@ router.post('/:specId/suggest-skills/async', async (req: Request, res: Response)
  * @swagger
  * /api/specs/{specId}/fix:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Specs]
  *     summary: Apply automated structural fixes to a spec
  *     operationId: fixSpec
@@ -14725,7 +15692,7 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
       const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
       fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
       const normalizedSpecId = Array.isArray(specId) ? specId[0] : specId;
-      await snapshotVersion(normalizedSpecId, JSON.stringify(content), specStatus);
+      await snapshotVersion(workspaceId, normalizedSpecId, JSON.stringify(content), specStatus);
       await markCurrentPlanStaleIfMaterialChanged({ workspaceId, workspacePath: workspace.path, specSlug: normalizedSpecId });
     }
 
@@ -14741,6 +15708,8 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/attachments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List all attachments for a spec
  *     tags: [Specs]
  *     parameters:
@@ -14847,6 +15816,8 @@ router.get('/:specId/attachments', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{specId}/attachments/{attachmentId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Download a specific attachment for a spec
  *     tags: [Specs]
  *     parameters:
@@ -14931,6 +15902,8 @@ const attachmentUpload = multer({
  * @swagger
  * /api/specs/{specId}/attachments:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Upload a file attachment for a spec
  *     tags: [Specs]
  *     parameters:
@@ -15042,6 +16015,8 @@ router.post(
  * @swagger
  * /api/specs/{specId}/attachments/{attachmentId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Delete a specific attachment for a spec
  *     tags: [Specs]
  *     parameters:
@@ -15222,7 +16197,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
 
     const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
     fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
-    await snapshotVersion(specId, JSON.stringify(content), specStatus);
+    await snapshotVersion(String(workspaceId), specId, JSON.stringify(content), specStatus);
 
     const userStories: any[] = content.userStories ?? [];
     res.json({
@@ -15650,6 +16625,8 @@ router.post('/:specId/enrich/async', async (req: Request, res: Response) => {
  * @swagger
  * /api/specs/{id}/assign-models:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Assign per-story model tiers based on complexity scoring
  *     description: >
  *       Scores each story via the complexity scorer and assigns a model tier
@@ -15996,11 +16973,6 @@ function latestRelevantStageJob(jobs: SpecJob[], stage: RepairPostSaveStage, sav
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
 }
 
-function isPgBossMetadataUnavailable(error: unknown): boolean {
-  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
-  return code === '42P01' || code === '3F000';
-}
-
 async function listLivePgBossRepairJobs(workspaceId: string, specId: string, queueName: string): Promise<RepairPgBossJob[]> {
   type Row = {
     id: string;
@@ -16015,7 +16987,7 @@ async function listLivePgBossRepairJobs(workspaceId: string, specId: string, que
   try {
     rows = await query<Row>(
       `SELECT id::text, name, state, created_on, started_on, data
-       FROM pgboss.job
+       FROM ${getPgBossTableSql('job')}
        WHERE name = $1
          AND state IN ('created', 'active', 'retry')
          AND data->>'specId' = $2
@@ -16024,10 +16996,9 @@ async function listLivePgBossRepairJobs(workspaceId: string, specId: string, que
       [queueName, specId, workspaceId],
     );
   } catch (error) {
-    if (isPgBossMetadataUnavailable(error)) {
-      logger.warn({ err: error, queueName, specId, workspaceId }, '[Specs] pg-boss metadata unavailable during repair liveness check — assuming no live jobs');
-      return [];
-    }
+    // Queue metadata is evidence, never absence authority. If it cannot be
+    // inspected, repair must not infer that publication is safe or duplicate
+    // an application-owned pending/running job.
     throw new ConflictError(`Unable to verify pg-boss liveness for ${queueName} repair: ${error instanceof Error ? error.message : String(error)}`);
   }
 

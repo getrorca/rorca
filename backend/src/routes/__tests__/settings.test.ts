@@ -8,28 +8,48 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
+import { execute } from '../../db/index';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
+let userId: string;
 
-beforeEach(async () => {
-  jest.resetModules();
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-settings-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const authId = crypto.randomUUID();
+  const email = `settings-${crypto.randomUUID()}@test.rorca.local`;
+  const user = await ensureTestUser({ email, authId, role: 'admin', plan: 'pro' });
+  userId = user.id;
+  const serverModule = require('../../server');
+  const expressApp = serverModule.default as Express;
+  authToken = await getAuthToken(expressApp, { email, authId, role: 'admin', displayName: 'Settings Test User' });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  await execute('DELETE FROM user_settings WHERE user_id = $1', [userId]);
+  await execute(
+    `UPDATE users SET display_name = 'Settings Test User', avatar_url = NULL WHERE id = $1`,
+    [userId],
+  );
+});
+
+afterAll(async () => {
+  await execute('DELETE FROM user_settings WHERE user_id = $1', [userId]);
+  await execute('DELETE FROM users WHERE id = $1', [userId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 describe('GET /api/settings/profile', () => {
@@ -93,35 +113,20 @@ describe('PUT /api/settings/profile', () => {
   });
 });
 
-describe('PUT /api/settings/password', () => {
-  it('rejects wrong current password with 403', async () => {
+describe('PUT /api/settings/password retirement', () => {
+  it.each([
+    { currentPassword: 'definitelywrongpassword', newPassword: 'newpassword456' },
+    { newPassword: 'newpassword456' },
+    { currentPassword: 'securepass123', newPassword: 'abc' },
+  ])('remains unavailable without reflecting password material', async (body) => {
     const res = await request(app)
       .put('/api/settings/password')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ currentPassword: 'definitelywrongpassword', newPassword: 'newpassword456' });
+      .send(body);
 
-    expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/incorrect/i);
-  });
-
-  it('returns 400 for missing currentPassword', async () => {
-    const res = await request(app)
-      .put('/api/settings/password')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ newPassword: 'newpassword456' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/currentPassword/i);
-  });
-
-  it('returns 400 for short new password', async () => {
-    const res = await request(app)
-      .put('/api/settings/password')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ currentPassword: 'securepass123', newPassword: 'abc' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/6 characters/i);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+    expect(JSON.stringify(res.body)).not.toContain(String(body.currentPassword ?? body.newPassword));
   });
 });
 

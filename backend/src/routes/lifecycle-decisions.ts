@@ -15,9 +15,13 @@ import {
   recordSsdlcDecision,
   revokeSsdlcDecision,
   type DecisionSubject,
-  type DelegatedDecisionIdentity,
   type RecordSsdlcDecisionInput,
 } from '../lib/ssdlc-decisions';
+import {
+  ProviderHumanEventSchema,
+  providerHumanActionHash,
+  verifyAndPersistProviderHumanAuthority,
+} from '../lib/provider-human-authority';
 
 const router = Router();
 
@@ -31,6 +35,7 @@ const CALLER_ACTOR_FIELDS = [
   'principalDisplayLabel',
   'authority',
   'role',
+  'delegatedOnBehalfOf',
 ] as const;
 
 function bodyObject(req: Request): Record<string, unknown> {
@@ -47,22 +52,15 @@ function rejectActorClaims(body: Record<string, unknown>): void {
   }
 }
 
-function delegatedIdentity(body: Record<string, unknown>): DelegatedDecisionIdentity | undefined {
-  const value = body.delegatedOnBehalfOf;
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new ValidationError('delegatedOnBehalfOf must be an identity object');
-  }
-  const candidate = value as Record<string, unknown>;
-  if (typeof candidate.principalId !== 'string' || typeof candidate.displayLabel !== 'string') {
-    throw new ValidationError('delegatedOnBehalfOf requires principalId and displayLabel');
-  }
-  return { principalId: candidate.principalId, displayLabel: candidate.displayLabel };
+function requestPrincipal(req: Request) {
+  if (!req.user) throw new AuthError();
+  return deriveDecisionPrincipal(req.user);
 }
 
-function requestPrincipal(req: Request, body: Record<string, unknown> = {}) {
-  if (!req.user) throw new AuthError();
-  return deriveDecisionPrincipal(req.user, delegatedIdentity(body));
+function isServicePrincipal(req: Request): boolean {
+  return !req.user
+    || req.user.email.toLowerCase().endsWith('@rorca.internal')
+    || req.user.id === 'system';
 }
 
 function sourceRequestId(req: Request): string {
@@ -85,6 +83,125 @@ function decisionSubject(value: unknown): DecisionSubject | null | undefined {
   }
   return { type: subject.type, value: subject.value };
 }
+
+function lifecycleDecisionInput(body: Record<string, unknown>, sourceId = 'target-resolution'): RecordSsdlcDecisionInput {
+  if (typeof body.decisionType !== 'string'
+    || !SSDLC_DECISION_TYPES.includes(body.decisionType as (typeof SSDLC_DECISION_TYPES)[number])) {
+    throw new ValidationError('decisionType is not a caller-authorized lifecycle decision type', { field: 'decisionType' });
+  }
+  return {
+    workspaceId: optionalString(body.workspaceId) ?? '',
+    specSlug: optionalString(body.specSlug) ?? '',
+    specVersion: body.specVersion as string | number | null | undefined,
+    runId: body.runId === undefined || body.runId === null ? body.runId as null | undefined : Number(body.runId),
+    storyId: optionalString(body.storyId),
+    phaseId: optionalString(body.phaseId) ?? '',
+    gateId: optionalString(body.gateId),
+    decisionType: body.decisionType as RecordSsdlcDecisionInput['decisionType'],
+    rationale: optionalString(body.rationale) ?? '',
+    expiresAt: body.expiresAt as string | null | undefined,
+    evidenceGap: optionalString(body.evidenceGap),
+    subject: decisionSubject(body.subject),
+    sourceRequestId: sourceId,
+  };
+}
+
+function lifecycleDecisionResponseScope(input: RecordSsdlcDecisionInput) {
+  return {
+    workspaceId: input.workspaceId,
+    specSlug: input.specSlug,
+    specVersion: input.specVersion ?? null,
+    runId: input.runId ?? null,
+    storyId: input.storyId ?? null,
+    phaseId: input.phaseId,
+    gateId: input.gateId ?? null,
+    decisionType: input.decisionType,
+  };
+}
+
+export function lifecycleDecisionProviderTarget(input: RecordSsdlcDecisionInput): string {
+  return providerHumanActionHash({
+    purpose: 'lifecycle_decision',
+    workspaceId: input.workspaceId,
+    specSlug: input.specSlug,
+    specVersion: input.specVersion ?? null,
+    runId: input.runId ?? null,
+    storyId: input.storyId ?? null,
+    phaseId: input.phaseId,
+    gateId: input.gateId ?? null,
+    decisionType: input.decisionType,
+    rationale: input.rationale,
+    expiresAt: input.expiresAt ?? null,
+    evidenceGap: input.evidenceGap ?? null,
+    subject: input.subject ?? null,
+  });
+}
+
+/**
+ * @swagger
+ * /api/lifecycle/decisions/target:
+ *   post:
+ *     tags: [Lifecycle Decisions]
+ *     summary: Resolve the exact provider-human lifecycle decision target
+ *     operationId: resolveLifecycleDecisionTarget
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Returns the canonical hash a provider human must sign; it grants no decision authority and performs no mutation."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, specSlug, phaseId, decisionType, rationale]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               specSlug: { type: string }
+ *               specVersion: { oneOf: [{ type: string }, { type: integer }], nullable: true }
+ *               runId: { type: integer, nullable: true }
+ *               storyId: { type: string, nullable: true }
+ *               phaseId: { type: string }
+ *               gateId: { type: string, nullable: true }
+ *               decisionType: { type: string, enum: [defer, not_applicable_confirmation, gate_override, qa_approval, merge_approval, production_approval] }
+ *               rationale: { type: string }
+ *               expiresAt: { type: string, format: date-time, nullable: true }
+ *               evidenceGap: { type: string, nullable: true }
+ *               subject: { type: object, nullable: true }
+ *     responses:
+ *       200:
+ *         description: Canonical provider-human target hash and exact request identity
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [targetHash, command, workspaceId, responseIdentity]
+ *               properties:
+ *                 targetHash: { type: string }
+ *                 command: { type: string }
+ *                 workspaceId: { type: string }
+ *                 responseIdentity: { type: object }
+ */
+router.post('/decisions/target', async (req, res, next) => {
+  try {
+    const body = bodyObject(req);
+    rejectActorClaims(body);
+    requestPrincipal(req);
+    const input = lifecycleDecisionInput(body);
+    const targetHash = lifecycleDecisionProviderTarget(input);
+    res.json({
+      ok: true,
+      workspaceId: input.workspaceId,
+      targetHash,
+      command: `approve lifecycle decision ${targetHash}`,
+      responseIdentity: {
+        schemaVersion: 'rorca.lifecycle-decision-target-identity.v1',
+        ...lifecycleDecisionResponseScope(input),
+        targetHash,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * @swagger
@@ -110,17 +227,23 @@ function decisionSubject(value: unknown): DecisionSubject | null | undefined {
  *             properties:
  *               workspaceId: { type: string }
  *               specSlug: { type: string }
+ *               specVersion: { oneOf: [{ type: string }, { type: integer }], nullable: true }
+ *               runId: { type: integer, nullable: true }
+ *               storyId: { type: string, nullable: true }
  *               phaseId: { type: string }
- *               gateId: { type: string }
+ *               gateId: { type: string, nullable: true }
  *               decisionType: { type: string, enum: [defer, not_applicable_confirmation, gate_override, qa_approval, merge_approval, production_approval] }
  *               rationale: { type: string }
  *               expiresAt: { type: string, format: date-time }
  *               evidenceGap: { type: string }
  *               subject: { type: object }
- *               delegatedOnBehalfOf: { type: object }
+ *               humanApproval:
+ *                 type: object
+ *                 description: Exact signed provider-human event required for service-relayed governed decisions
+ *                 required: [schemaVersion, issuerId, keyId, provider, providerTenantId, actorId, conversationId, threadId, messageId, occurredAt, normalizedCommandHash, ingressIdempotencyKey, signature]
  *     responses:
- *       201: { description: Governed decision durably recorded }
- *       200: { description: Exact idempotent replay returned }
+ *       201: { description: Governed decision durably recorded with exact responseIdentity }
+ *       200: { description: Exact idempotent replay returned with the same responseIdentity }
  *       400: { description: Invalid scope or decision contract }
  *       403: { description: Principal or policy is not authorized }
  *       409: { description: Conflicting active decision or revision mismatch }
@@ -129,28 +252,47 @@ router.post('/decisions', async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectActorClaims(body);
-    const principal = requestPrincipal(req, body);
-    if (typeof body.decisionType !== 'string'
-      || !SSDLC_DECISION_TYPES.includes(body.decisionType as (typeof SSDLC_DECISION_TYPES)[number])) {
-      throw new ValidationError('decisionType is not a caller-authorized lifecycle decision type', { field: 'decisionType' });
+    requestPrincipal(req);
+    const input = lifecycleDecisionInput(body, sourceRequestId(req));
+    const event = body.humanApproval === undefined
+      ? null
+      : ProviderHumanEventSchema.parse(body.humanApproval);
+    if (isServicePrincipal(req) && !event) {
+      throw new AuthError('Service principals must relay exact provider-human lifecycle authority');
     }
-    const input: RecordSsdlcDecisionInput = {
-      workspaceId: optionalString(body.workspaceId) ?? '',
-      specSlug: optionalString(body.specSlug) ?? '',
-      specVersion: body.specVersion as string | number | null | undefined,
-      runId: body.runId === undefined || body.runId === null ? body.runId as null | undefined : Number(body.runId),
-      storyId: optionalString(body.storyId),
-      phaseId: optionalString(body.phaseId) ?? '',
-      gateId: optionalString(body.gateId),
-      decisionType: body.decisionType as RecordSsdlcDecisionInput['decisionType'],
-      rationale: optionalString(body.rationale) ?? '',
-      expiresAt: body.expiresAt as string | null | undefined,
-      evidenceGap: optionalString(body.evidenceGap),
-      subject: decisionSubject(body.subject),
-      sourceRequestId: sourceRequestId(req),
-    };
+    const principal = event
+      ? await (async () => {
+        const targetHash = lifecycleDecisionProviderTarget(input);
+        const receipt = await verifyAndPersistProviderHumanAuthority({
+          workspaceId: input.workspaceId,
+          purpose: 'lifecycle_decision',
+          targetHash,
+          event,
+        });
+        return {
+          principalType: 'provider_human' as const,
+          principalId: receipt.actorId,
+          displayLabel: `${event.provider}:${receipt.actorId}`,
+          role: 'human-approver',
+          sourceChannel: 'provider' as const,
+          providerHumanReceiptId: receipt.receiptId,
+        };
+      })()
+      : requestPrincipal(req);
     const result = await recordSsdlcDecision(input, principal);
-    res.status(result.replayed ? 200 : 201).json(result);
+    const targetHash = lifecycleDecisionProviderTarget(input);
+    res.status(result.replayed ? 200 : 201).json({
+      ...result,
+      responseIdentity: {
+        schemaVersion: 'rorca.lifecycle-decision-response-identity.v1',
+        ...lifecycleDecisionResponseScope(input),
+        targetHash,
+        sourceRequestId: input.sourceRequestId,
+        actorId: principal.principalId,
+        providerHumanReceiptId: principal.providerHumanReceiptId ?? null,
+        decisionId: String(result.decision.id),
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -184,7 +326,7 @@ router.post('/decisions/:decisionId/revoke', async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectActorClaims(body);
-    const principal = requestPrincipal(req, body);
+    const principal = requestPrincipal(req);
     const result = await revokeSsdlcDecision({
       workspaceId: optionalString(body.workspaceId) ?? '',
       decisionId: req.params.decisionId,

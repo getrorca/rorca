@@ -33,13 +33,16 @@ import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // ── Connection ─────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
+
+// PgBoss alone owns this suite's schema; this also isolates real integration
+// evidence from legacy unit fixtures that created a partial `pgboss` schema.
+const BOSS_SCHEMA = pgBossTestSchema('integration');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -99,6 +102,7 @@ const activeChildren: ChildProcess[] = [];
 beforeAll(async () => {
   // 1. Connect pool (used for assertions and cleanup)
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // 2. Run migrations (ensures schema parity with production)
   const { runPgMigrations } = await import('../db/pg-index');
@@ -117,7 +121,7 @@ beforeAll(async () => {
   // 4. Start pg-boss pointing at the test DB with fast polling for tests
   boss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
   });
   boss.on('error', () => { /* suppress noise in test output */ });
@@ -527,12 +531,12 @@ describe('pg-boss integration — pipeline:run lifecycle', () => {
     // contains our runId. This confirms the job was enqueued with the correct payload.
     const jobFound = await waitFor(async () => {
       const { rows: archiveRows } = await pool.query<{ id: string }>(
-        `SELECT id FROM pgboss.archive WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
+        `SELECT id FROM ${BOSS_SCHEMA}.archive WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
         [runId],
       );
       // Also check active queue in case archiving hasn't happened yet
       const { rows: jobRows } = await pool.query<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
+        `SELECT id FROM ${BOSS_SCHEMA}.job WHERE name = 'pipeline:run' AND (data->>'runId')::int = $1`,
         [runId],
       );
       return archiveRows.length + jobRows.length > 0;

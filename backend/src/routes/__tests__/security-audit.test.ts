@@ -5,13 +5,33 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { createServer, type Server } from 'node:http';
 import request from 'supertest';
 import app from '../../server';
 
+let server: Server;
+
 describe('security audit regressions', () => {
+  beforeAll(async () => {
+    server = createServer(app);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  });
   test('state-changing route rejects missing CSRF token with 403', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/workspaces')
+      .set('Origin', 'http://localhost:5210')
       .send({ path: '/tmp/demo', label: 'Demo' });
 
     expect(res.status).toBe(403);
@@ -20,7 +40,7 @@ describe('security audit regressions', () => {
   });
 
   test('invalid bearer token is rejected with 401 in local fallback mode', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get('/api/workspaces')
       .set('Authorization', 'Bearer forged.invalid.token');
 

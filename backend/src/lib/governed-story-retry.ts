@@ -83,6 +83,7 @@ function latestCompletions(rows: readonly RetryCompletionEvidence[]): RetryCompl
  */
 export function deriveAuthoritativeRetryScope(input: {
   originalRunLineage: number[];
+  targetRunId: number;
   completions: RetryCompletionEvidence[];
   integrations: RetryIntegrationEvidence[];
   closeouts: RetryRunCloseoutEvidence[];
@@ -93,20 +94,26 @@ export function deriveAuthoritativeRetryScope(input: {
     throw new Error('[governed-retry] original run lineage is invalid');
   }
   const lineageSet = new Set(lineage);
+  if (!lineageSet.has(input.targetRunId)) throw new Error('[governed-retry] target run is outside original lineage');
   const closeouts = input.closeouts.filter((row) => lineageSet.has(row.runId));
-  if (closeouts.length === 0) throw new Error('[governed-retry] run_closeout evidence is required');
-  const targetCloseout = closeouts[closeouts.length - 1];
-  if (!targetCloseout.integratedRevision || !targetCloseout.evidenceIdentity) {
-    throw new Error('[governed-retry] latest run_closeout identity is incomplete');
+  const closeoutByRun = new Map<number, RetryRunCloseoutEvidence>();
+  for (const closeout of closeouts) {
+    if (closeoutByRun.has(closeout.runId)) throw new Error(`[governed-retry] run ${closeout.runId} has contradictory closeout authority`);
+    if (!closeout.integratedRevision || !closeout.evidenceIdentity) {
+      throw new Error(`[governed-retry] run ${closeout.runId} closeout identity is incomplete`);
+    }
+    closeoutByRun.set(closeout.runId, closeout);
   }
+  const missingCloseout = lineage.find((runId) => !closeoutByRun.has(runId));
+  if (missingCloseout) throw new Error(`[governed-retry] run_closeout evidence is required for run ${missingCloseout}`);
+  const targetCloseout = closeoutByRun.get(input.targetRunId)!;
   const completions = latestCompletions(input.completions.filter((row) => lineageSet.has(row.runId)));
   const integrationByAttempt = new Map(
     input.integrations
       .filter((row) => lineageSet.has(row.runId))
       .map((row) => [`${row.runId}:${row.storyId}:${row.attempt}`, row]),
   );
-  const acceptedInCloseout = new Set(closeouts.flatMap((row) => row.acceptedStoryIds));
-  const ancestry = new Set(closeouts.flatMap((row) => [row.integratedRevision, ...row.integrationAncestry]));
+  const ancestryInOrder = closeouts.flatMap((row) => [...row.integrationAncestry, row.integratedRevision]);
   const carriedForward: CarriedForwardStory[] = [];
   const failedOrUnresolved = new Set<string>();
 
@@ -118,8 +125,8 @@ export function deriveAuthoritativeRetryScope(input: {
         || integration?.state !== 'finalized'
         || integration.sourceCommit !== completion.sourceCommit
         || !integration.resultingHead
-        || !acceptedInCloseout.has(completion.storyId)
-        || !ancestry.has(integration.resultingHead)
+        || !closeoutByRun.get(completion.runId)?.acceptedStoryIds.includes(completion.storyId)
+        || !closeoutByRun.get(completion.runId)?.integrationAncestry.includes(integration.resultingHead)
       ) {
         throw new Error(`[governed-retry] accepted story ${completion.storyId} lacks matching finalized integration and run_closeout ancestry`);
       }
@@ -152,7 +159,7 @@ export function deriveAuthoritativeRetryScope(input: {
   const projection = {
     originalRunLineage: lineage,
     targetRevision: targetCloseout.integratedRevision,
-    priorIntegrationAncestry: canonicalUnique([...ancestry]),
+    priorIntegrationAncestry: [...new Set(ancestryInOrder)],
     executableStoryIds: requested,
     carriedForward,
   };
@@ -189,6 +196,7 @@ export interface GovernedRetryDispatchIdentity {
   approvedPreviewHash: string;
   scopeHash: string;
   evidenceHash: string;
+  taskManifestLineageHash: string | null;
   storyAttempts: GovernedRetryStoryAttemptIdentity[];
   carriedForward: CarriedForwardStory[];
   identityHash: string;
@@ -199,6 +207,10 @@ export type GovernedRetryDispatchIdentityInput = Omit<GovernedRetryDispatchIdent
 export function createGovernedRetryDispatchIdentity(input: GovernedRetryDispatchIdentityInput): GovernedRetryDispatchIdentity {
   if (input.queueName !== 'pipeline:retry' || input.fencingToken < 1 || input.storyAttempts.length === 0) {
     throw new Error('[governed-retry] dispatch identity is incomplete');
+  }
+  if (input.taskManifestLineageHash !== null
+    && !/^sha256:[a-f0-9]{64}$/.test(input.taskManifestLineageHash)) {
+    throw new Error('[governed-retry] TaskManifest lineage hash is invalid');
   }
   if (input.baseRevision !== input.integratedRevision || input.recoveryRefRevision !== input.integratedRevision) {
     throw new Error('[governed-retry] retry target must be the exact latest integrated recovery-ref revision');

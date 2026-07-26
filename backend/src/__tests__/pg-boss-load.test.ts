@@ -35,6 +35,8 @@ import * as http from 'http';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // ── Extend Jest timeout for this suite ──────────────────────────────────────
 
@@ -42,10 +44,8 @@ jest.setTimeout(150_000);
 
 // ── Connection ──────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
+const BOSS_SCHEMA = pgBossTestSchema('load');
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -366,6 +366,7 @@ async function triggerRun(
 beforeAll(async () => {
   // 1. Connect pool (max:20 to avoid exhaustion with 2 workers × 3 slots + test assertions)
   pool = new Pool({ connectionString: DB_URL, max: 20 });
+  await assertConnectedTestDatabase(pool, DB_URL);
   pool.on('error', (err) => { bossErrors.push(err); });
 
   // 2. Run migrations
@@ -384,7 +385,7 @@ beforeAll(async () => {
   // 4. Start pg-boss with fast polling (1s for tests)
   boss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
   });
   boss.on('error', (err: Error) => { bossErrors.push(err); });

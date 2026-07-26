@@ -5,7 +5,9 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { randomUUID } from 'node:crypto';
 import { query, queryOne, transaction } from '../db/index';
+import { releaseDispatchPublication } from './dispatch-publication';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 
@@ -26,6 +28,7 @@ interface QueuedRunRow {
   agent_model: string | null;
   effective_options: { effort?: string | null } | null;
   trigger_options: Record<string, unknown> | null;
+  task_manifest_id: string | null;
 }
 
 const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
@@ -85,15 +88,9 @@ async function getQueueMaxConcurrent(): Promise<number> {
   return DEFAULT_QUEUE_MAX_CONCURRENT;
 }
 
-async function failQueuedDispatch(runId: number | string, reason: string): Promise<void> {
-  await queryOne(
-    `UPDATE pipeline_runs
-        SET status = 'failed', finished_at = NOW(), summary = $2
-      WHERE id = $1 AND status = 'queued'
-      RETURNING id`,
-    [runId, reason],
-  );
-  logger.error(`[RunQueue] Failed to dispatch queued run ${runId}: ${reason}`);
+async function failQueuedDispatch(runId: number | string, publicationOwner: string, reason: string): Promise<void> {
+  await releaseDispatchPublication(Number(runId), publicationOwner, reason);
+  logger.error(`[RunQueue] Deferred queued run ${runId} after dispatch failure: ${reason}`);
 }
 
 /**
@@ -111,32 +108,39 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
     // US-005: Read queue_max_concurrent from worker_settings
     const queueMaxConcurrent = await getQueueMaxConcurrent();
 
-    // Count active runs triggered via 'queue' for this workspace
-    const activeQueueCount = Number(
-      (await queryOne<{ count: string }>(
-        `SELECT COUNT(*) as count FROM pipeline_runs
-         WHERE workspace_id = $1 AND status IN ('running', 'paused') AND triggered_via = 'queue'`,
+    const publicationOwner = `queue-promoter:${process.pid}:${randomUUID()}`;
+    const nextQueued = await transaction(async (client) => {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext('rorca:queue-promotion:' || $1))`, [workspaceId]);
+      const active = (await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM pipeline_runs
+          WHERE workspace_id = $1 AND status IN ('starting', 'running', 'paused') AND triggered_via = 'queue'`,
         [workspaceId],
-      ))?.count ?? '0',
-    );
-
-    if (activeQueueCount >= queueMaxConcurrent) {
-      logger.info(
-        `[RunQueue] Workspace ${workspaceId} has ${activeQueueCount}/${queueMaxConcurrent} active queue runs, skipping advance`,
+      )).rows[0];
+      if (Number(active?.count ?? 0) >= queueMaxConcurrent) return null;
+      const selected = (await client.query<QueuedRunRow>(
+        `SELECT run.id, run.spec_path, run.workspace_id, run.queued_at, run.queue_position,
+                run.parallelism, run.auto_worktree, run.auto_merge, run.merge_strategy,
+                run.include_graph, run.terminal_mode, run.execution_environment,
+                run.agent_type, run.agent_model, run.effective_options, run.trigger_options, run.task_manifest_id
+           FROM pipeline_runs run
+           JOIN pipeline_dispatch_publications publication ON publication.run_id = run.id
+          WHERE run.workspace_id = $1 AND run.status = 'queued'
+            AND publication.state = 'reserved'
+            AND NOT EXISTS (SELECT 1 FROM pipeline_run_cancellation_requests cancellation WHERE cancellation.run_id = run.id)
+          ORDER BY run.queued_at ASC NULLS LAST, run.id ASC
+          FOR UPDATE OF run, publication SKIP LOCKED LIMIT 1`,
+        [workspaceId],
+      )).rows[0];
+      if (!selected) return null;
+      const claimed = await client.query(
+        `UPDATE pipeline_dispatch_publications
+            SET state = 'preparing', lease_owner = $2,
+                lease_expires_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
+          WHERE run_id = $1 AND state = 'reserved'`,
+        [selected.id, publicationOwner],
       );
-      return;
-    }
-
-    // Find the next queued run (oldest first), including auto_worktree
-    const nextQueued = await queryOne<QueuedRunRow>(
-      `SELECT id, spec_path, workspace_id, queued_at, queue_position, parallelism, auto_worktree,
-              auto_merge, merge_strategy, include_graph, terminal_mode, execution_environment,
-              agent_type, agent_model, effective_options, trigger_options
-         FROM pipeline_runs
-       WHERE workspace_id = $1 AND status = 'queued'
-       ORDER BY queued_at ASC NULLS LAST, id ASC LIMIT 1`,
-      [workspaceId],
-    );
+      return claimed.rowCount === 1 ? selected : null;
+    });
 
     if (!nextQueued) {
       logger.info(`[RunQueue] No queued runs for workspace ${workspaceId}`);
@@ -172,9 +176,15 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
         specPath: nextQueued.spec_path,
         workspaceId: nextQueued.workspace_id,
         queuedRunId: nextQueued.id,
+        dispatchPublicationOwner: publicationOwner,
         orchestrationMode: nextQueued.parallelism > 1 ? 'wave-parallel' : 'sequential',
         parallelism: nextQueued.parallelism,
         forceSequential: nextQueued.parallelism <= 1,
+        ...(nextQueued.task_manifest_id ? {
+          readinessOverride: true,
+          taskManifestPromotion: true,
+          manifestId: nextQueued.task_manifest_id,
+        } : {}),
         qualificationReceiptId: nextQueued.trigger_options?.qualificationReceiptId,
         rolloutCohort: nextQueued.trigger_options?.rolloutCohort,
         triggerOptions: nextQueued.trigger_options ?? undefined,
@@ -195,13 +205,13 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
     }).then(async (resp) => {
       if (!resp.ok) {
         const body = await resp.text();
-        await failQueuedDispatch(nextQueued.id, `HTTP ${resp.status}: ${body.slice(0, 500)}`);
+        await failQueuedDispatch(nextQueued.id, publicationOwner, `HTTP ${resp.status}: ${body.slice(0, 500)}`);
       } else {
         logger.info(`[RunQueue] Successfully triggered queued run ${nextQueued.id}`);
       }
     }).catch(async (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      await failQueuedDispatch(nextQueued.id, `HTTP trigger failed: ${message}`);
+      await failQueuedDispatch(nextQueued.id, publicationOwner, `HTTP trigger failed: ${message}`);
     });
   } catch (err) {
     logger.error(`[RunQueue] advanceQueue error: ${err}`);

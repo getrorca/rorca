@@ -5,15 +5,17 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'node:crypto';
 import PgBoss from 'pg-boss';
 import { CronExpressionParser } from 'cron-parser';
-import { query, execute } from '../db/index';
+import { query, execute, transaction } from '../db/index';
 import { INTERNAL_SERVICE_TOKEN } from '../lib/auth-utils';
 import { createBackup, pruneOldBackups } from './backup';
 import { logger } from './logger';
 import { pruneExpiredMcpAuditLogs, runMcpAuditAnomalyScan } from './mcp-audit';
 import { getRunPtyRetentionDays, pruneExpiredRunPtyCaptures } from './run-pty-store';
 import { runPtyRetention } from './pty-operations';
+import { isReleaseOneCapabilityEnabled } from './release-one-capability-profile';
 
 interface ScheduleRow {
   id: number;
@@ -39,7 +41,10 @@ export async function triggerScheduledRun(schedule: {
   spec_id: string;
   agent?: string | null;
   model?: string | null;
-}): Promise<void> {
+}, requestKey?: string): Promise<{ accepted: boolean; runId: number | null; reason: string }> {
+  if (!isReleaseOneCapabilityEnabled('scheduled_autonomy')) {
+    return { accepted: false, runId: null, reason: 'RELEASE_ONE_CAPABILITY_DISABLED:scheduled_autonomy' };
+  }
   const specPath = `forge/specs/approved/${schedule.spec_id}.json`;
 
   const port = process.env.PORT || 3030;
@@ -51,6 +56,7 @@ export async function triggerScheduledRun(schedule: {
       triggerType: 'scheduled',
       orchestrationMode: 'sequential',
       parallelism: 1,
+      ...(requestKey ? { idempotencyKey: requestKey } : {}),
     };
     if (schedule.agent) body.agent = schedule.agent;
     if (schedule.model) body.model = schedule.model;
@@ -68,17 +74,20 @@ export async function triggerScheduledRun(schedule: {
 
     if (respBody.conflict) {
       logger.info(`[Scheduler] Skipped schedule ${schedule.id} — active run conflict`);
-      return;
+      return { accepted: true, runId: null, reason: 'active_run_conflict' };
     }
 
     if (!resp.ok) {
       logger.error({ error: respBody.error }, `[Scheduler] Trigger failed for schedule ${schedule.id}`);
-      return;
+      return { accepted: false, runId: null, reason: String(respBody.code ?? 'trigger_failed') };
     }
 
+    const runId = Number(respBody.runId);
     logger.info(`[Scheduler] Triggered run ${respBody.runId} for schedule ${schedule.id} (spec: ${schedule.spec_id})`);
+    return { accepted: true, runId: Number.isSafeInteger(runId) && runId > 0 ? runId : null, reason: 'dispatched' };
   } catch (error) {
     logger.error({ error }, `[Scheduler] HTTP trigger failed for schedule ${schedule.id}`);
+    return { accepted: false, runId: null, reason: 'transport_failure' };
   }
 }
 
@@ -87,16 +96,19 @@ export async function triggerScheduledRun(schedule: {
  * and last_triggered_at. Used by the pg-boss cron handler to determine which
  * pipeline_schedules to fire on each minute tick.
  */
-export function isDue(schedule: { cron_expression: string; last_triggered_at: string | null }): boolean {
+export function scheduledOccurrence(schedule: { cron_expression: string; last_triggered_at: string | null }): Date | null {
   try {
     const interval = CronExpressionParser.parse(schedule.cron_expression);
-    const prevDue = interval.prev().toDate();
+    const previous = interval.prev().toDate();
     const lastTriggered = schedule.last_triggered_at ? new Date(schedule.last_triggered_at) : null;
-    if (!lastTriggered) return true;
-    return prevDue.getTime() > lastTriggered.getTime();
+    return !lastTriggered || previous.getTime() > lastTriggered.getTime() ? previous : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function isDue(schedule: { cron_expression: string; last_triggered_at: string | null }): boolean {
+  return scheduledOccurrence(schedule) !== null;
 }
 
 /**
@@ -106,38 +118,94 @@ export function isDue(schedule: { cron_expression: string; last_triggered_at: st
  * pg-boss provides distributed locking via the `pipeline:cron` schedule so this
  * fires exactly once per minute even with multiple worker instances running.
  */
-export async function checkAndFireDueSchedules(): Promise<void> {
-  try {
-    const schedules = await query<ScheduleRow>(
-      'SELECT * FROM pipeline_schedules WHERE enabled = true',
-      [],
-    );
+interface ScheduleOccurrenceRow extends ScheduleRow {
+  occurrence_id: number;
+  request_key: string;
+}
 
-    for (const schedule of schedules) {
-      if (isDue(schedule)) {
-        // Update last_triggered_at immediately to prevent double-firing
-        await execute(
-          `UPDATE pipeline_schedules SET last_triggered_at = NOW(), updated_at = NOW() WHERE id = $1`,
-          [schedule.id],
-        );
+async function dispatchScheduleOccurrence(occurrence: ScheduleOccurrenceRow): Promise<void> {
+  const leaseOwner = `schedule-dispatch:${process.pid}:${crypto.randomUUID()}`;
+  const claimed = await query<{ id: number }>(
+    `UPDATE pipeline_schedule_occurrences
+        SET status = 'dispatching', lease_owner = $2,
+            lease_expires_at = NOW() + INTERVAL '2 minutes',
+            attempt_count = attempt_count + 1, last_attempt_at = NOW()
+      WHERE id = $1
+        AND (status = 'claimed' OR (status = 'dispatching' AND lease_expires_at <= NOW()))
+      RETURNING id`,
+    [occurrence.occurrence_id, leaseOwner],
+  );
+  if (claimed.length !== 1) return;
 
-        triggerScheduledRun(schedule).catch(err => {
-          logger.error({ err }, `[Scheduler] Unhandled error for schedule ${schedule.id}`);
-        });
-      }
-    }
-  } catch (error) {
-    logger.error({ error }, '[Scheduler] checkAndFireDueSchedules error');
+  const outcome = await triggerScheduledRun(occurrence, occurrence.request_key);
+  const completed = await execute(
+    `UPDATE pipeline_schedule_occurrences
+        SET status = CASE WHEN $3 THEN 'dispatched' ELSE 'claimed' END,
+            dispatched_at = CASE WHEN $3 THEN NOW() ELSE NULL END,
+            run_id = CASE WHEN $3 THEN $4 ELSE run_id END,
+            last_error_code = CASE WHEN $3 THEN NULL ELSE $5 END,
+            lease_owner = NULL, lease_expires_at = NULL
+      WHERE id = $1 AND status = 'dispatching' AND lease_owner = $2`,
+    [occurrence.occurrence_id, leaseOwner, outcome.accepted, outcome.runId, outcome.reason],
+  );
+  if (completed.rowCount !== 1) {
+    throw new Error(`[Scheduler] occurrence ${occurrence.occurrence_id} lost its application dispatch lease`);
   }
 }
 
-/**
- * Compute the pg-boss schedule name for a given schedule ID.
- * Used by route handlers for boss.schedule() / boss.unschedule() calls.
- * Must be consistent everywhere.
- */
-export function scheduleName(scheduleId: number): string {
-  return `pipeline:cron:${scheduleId}`;
+export async function checkAndFireDueSchedules(): Promise<void> {
+  if (!isReleaseOneCapabilityEnabled('scheduled_autonomy')) return;
+  try {
+    const pending = await query<ScheduleOccurrenceRow>(
+      `SELECT schedule.*, occurrence.id AS occurrence_id, occurrence.request_key
+       FROM pipeline_schedule_occurrences occurrence
+       JOIN pipeline_schedules schedule ON schedule.id = occurrence.schedule_id
+       WHERE (occurrence.status = 'claimed'
+              OR (occurrence.status = 'dispatching' AND occurrence.lease_expires_at <= NOW()))
+         AND schedule.enabled = TRUE
+       ORDER BY occurrence.id ASC LIMIT 100`,
+      [],
+    );
+    for (const occurrence of pending) await dispatchScheduleOccurrence(occurrence);
+
+    const schedules = await query<ScheduleRow>(
+      'SELECT * FROM pipeline_schedules WHERE enabled = true ORDER BY id',
+      [],
+    );
+    for (const schedule of schedules) {
+      const occurrenceAt = scheduledOccurrence(schedule);
+      if (!occurrenceAt) continue;
+      const requestKey = `schedule:${schedule.id}:${occurrenceAt.toISOString()}`;
+      const claimed = await transaction(async (client) => {
+        const inserted = (await client.query<{ occurrence_id: number }>(
+          `INSERT INTO pipeline_schedule_occurrences (
+             schedule_id, workspace_id, scheduled_for, request_key, status
+           ) VALUES ($1,$2,$3,$4,'claimed')
+           ON CONFLICT (schedule_id, scheduled_for) DO NOTHING
+           RETURNING id AS occurrence_id`,
+          [schedule.id, schedule.workspace_id, occurrenceAt.toISOString(), requestKey],
+        )).rows[0];
+        if (!inserted) return null;
+        const advanced = await client.query(
+          `UPDATE pipeline_schedules
+           SET last_triggered_at = $2, updated_at = NOW()
+           WHERE id = $1 AND enabled = TRUE
+             AND (last_triggered_at IS NULL OR last_triggered_at < $2)
+           RETURNING id`,
+          [schedule.id, occurrenceAt.toISOString()],
+        );
+        if (advanced.rowCount !== 1) {
+          await client.query('DELETE FROM pipeline_schedule_occurrences WHERE id = $1', [inserted.occurrence_id]);
+          return null;
+        }
+        return { ...schedule, occurrence_id: inserted.occurrence_id, request_key: requestKey };
+      });
+      if (claimed) await dispatchScheduleOccurrence(claimed);
+    }
+  } catch (error) {
+    logger.error({ error }, '[Scheduler] checkAndFireDueSchedules error');
+    throw error;
+  }
 }
 
 /**
@@ -146,9 +214,8 @@ export function scheduleName(scheduleId: number): string {
  * pg-boss distributed locking ensures exactly one fire per minute across all
  * worker instances. The handler then checks pipeline_schedules for due entries.
  *
- * Individual per-schedule entries (pipeline:cron:<id>) are ALSO registered so
- * pg-boss provides a per-schedule distributed lock: exactly one trigger per
- * schedule interval even with N workers.
+ * Application-owned occurrence rows provide the per-schedule exactly-once
+ * claim. No dynamic per-schedule pg-boss queues or schedules exist.
  */
 export const PIPELINE_CRON_QUEUE = 'pipeline:cron';
 
@@ -158,16 +225,17 @@ export const PIPELINE_CRON_QUEUE = 'pipeline:cron';
  *    The handler calls checkAndFireDueSchedules() — which checks all enabled
  *    pipeline_schedules for due entries. pg-boss distributed locking prevents
  *    double-firing across multiple workers.
- * 2. Also register individual per-schedule boss.schedule() entries (pipeline:cron:<id>)
- *    for additional per-schedule granularity. These queue jobs are handled by the
- *    same pipeline:cron handler via triggerScheduledRun() directly.
- *
- * Re-registration is idempotent — safe on every worker restart.
+ * Application rows reconcile create/update/delete and restart without dynamic
+ * queue subscriptions. Re-registration is idempotent on every worker restart.
  */
 export async function registerSchedulesWithBoss(
   boss: PgBoss,
   cronJobHandler: CronJobHandler,
 ): Promise<void> {
+  if (!isReleaseOneCapabilityEnabled('scheduled_autonomy')) {
+    logger.info('[Scheduler] Release-1 scheduled autonomy is disabled; meta-cron was not registered');
+    return;
+  }
   // 1. Register the meta-cron: fires every minute, handler checks all due schedules.
   // pipeline:cron queue is already created by ensureQueues() in initBoss(), but
   // createQueue() is idempotent — safe to call again for explicit documentation.
@@ -180,39 +248,6 @@ export async function registerSchedulesWithBoss(
     logger.error({ err }, '[Scheduler] Failed to register meta-cron pipeline:cron');
   }
 
-  // 2. Also register per-schedule entries for direct distributed-lock firing
-  try {
-    const schedules = await query<ScheduleRow>(
-      'SELECT * FROM pipeline_schedules WHERE enabled = true',
-      [],
-    );
-
-    for (const schedule of schedules) {
-      const name = scheduleName(schedule.id);
-      const data = {
-        scheduleId: schedule.id,
-        specId: schedule.spec_id,
-        workspaceId: schedule.workspace_id,
-        agent: schedule.agent ?? null,
-        model: schedule.model ?? null,
-      };
-
-      try {
-        // pg-boss v10: createQueue() must precede schedule() and work() — idempotent
-        await boss.createQueue(name);
-        await boss.schedule(name, schedule.cron_expression, data);
-        // Each per-schedule queue needs its own worker subscription
-        await boss.work(name, cronJobHandler);
-        logger.info(`[Scheduler] Registered per-schedule ${name} (${schedule.cron_expression})`);
-      } catch (perErr) {
-        logger.error({ err: perErr, scheduleId: schedule.id }, `[Scheduler] Failed to register ${name}`);
-      }
-    }
-
-    logger.info(`[Scheduler] Registered ${schedules.length} per-schedule entrie(s) with pg-boss`);
-  } catch (error) {
-    logger.error({ error }, '[Scheduler] Failed to load schedules from DB');
-  }
 }
 
 // ─── Daily backup cron ──────────────────────────────────────────────────────

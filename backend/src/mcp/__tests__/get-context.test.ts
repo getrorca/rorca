@@ -5,12 +5,15 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { installMcpFetchFixture } from './fetch-fixture';
+
 const mockFetch = jest.fn();
-(global as any).fetch = mockFetch;
+installMcpFetchFixture(mockFetch);
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCA_API } from '../server';
+import { server } from '../server';
+const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -59,7 +62,7 @@ test('includes specBrief as l4SpecBrief when provided', async () => {
   await handler({ workspaceId: 'ws-123', specBrief: 'Build auth system' });
 
   const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-  expect(body.l4SpecBrief).toBe('Build auth system');
+  expect(body.specBrief).toBe('Build auth system');
 });
 
 test('includes storyAnnotations as l5Annotations when provided', async () => {
@@ -75,10 +78,10 @@ test('includes storyAnnotations as l5Annotations when provided', async () => {
   });
 
   const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-  expect(body.l5Annotations).toBe('Must use JWT tokens');
+  expect(body.storyAnnotations).toBe('Must use JWT tokens');
 });
 
-test('returns { content: [{ type: "text", text: synthesizedString }] }', async () => {
+test('returns the exact synthesis response as structured JSON text', async () => {
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => ({ synthesized: 'full direction stack output' }),
@@ -87,19 +90,18 @@ test('returns { content: [{ type: "text", text: synthesizedString }] }', async (
   const handler = getToolHandler('rorca_get_context');
   const result = await handler({ workspaceId: 'ws-123' });
 
-  expect(result).toEqual({
-    content: [{ type: 'text', text: 'full direction stack output' }],
-  });
+  expect(result.content).toHaveLength(1);
+  expect(JSON.parse(result.content[0].text)).toEqual({ synthesized: 'full direction stack output' });
 });
 
-test('throws when API returns non-200', async () => {
+test('returns an MCP error result when API returns non-200', async () => {
   mockFetch.mockResolvedValueOnce({
     ok: false,
     status: 500,
   });
 
   const handler = getToolHandler('rorca_get_context');
-  await expect(handler({ workspaceId: 'ws-123' })).rejects.toThrow(
-    'Direction Stack synthesis failed: 500'
-  );
+  const result = await handler({ workspaceId: 'ws-123' });
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toBe('Error (500): ');
 });

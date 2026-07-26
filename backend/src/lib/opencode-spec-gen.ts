@@ -18,20 +18,13 @@
 
 import { spawn } from 'child_process';
 import { detectOpenCode } from './opencode-detector';
+import { prepareAutonomousModelSandboxLaunch } from './autonomous-sandbox';
 import { OpenCodeStreamParser, type ParsedEvent } from './opencode-parser';
 import type { TokenUsage } from './llm-client';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const OPENCODE_SPEC_TIMEOUT_MS = 120_000; // 120s — longer than SDK path due to codebase exploration
-
-// Claude env vars to strip (prevent subprocess from inheriting Claude Code session)
-const CLAUDE_ENV_VARS_TO_REMOVE = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_AGENT_SDK_VERSION',
-  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
-];
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -251,18 +244,6 @@ export function validateSpecQuality(
   return { valid: errors.length === 0, errors };
 }
 
-// ─── Clean Environment ───────────────────────────────────────────────────────
-
-function buildCleanEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-      env[k] = v;
-    }
-  }
-  return env;
-}
-
 // ─── Main: Generate Spec via OpenCode ────────────────────────────────────────
 
 /**
@@ -297,16 +278,22 @@ export async function generateSpecViaOpenCode(opts: {
     args.push('--model', model);
   }
 
+  const launch = await prepareAutonomousModelSandboxLaunch({
+    command: status.opencodeBinPath,
+    args,
+    cwd: opts.workspacePath,
+    env: Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+  });
+
   return new Promise((resolve) => {
-    const env = buildCleanEnv();
     const parser = new OpenCodeStreamParser();
     const allEvents: ParsedEvent[] = [];
     let stdoutData = '';
     let stderrData = '';
 
-    const child = spawn(status.opencodeBinPath!, args, {
-      cwd: opts.workspacePath,
-      env,
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

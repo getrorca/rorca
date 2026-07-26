@@ -54,7 +54,7 @@ export const DEFAULT_TASK_MANIFEST_COMMAND_DENYLIST = [
   'rm -rf --no-preserve-root /',
   'mkfs',
   'dd if=',
-  'sudo ',
+  'sudo',
   'docker login',
   'kubectl apply',
   'kubectl delete',
@@ -125,6 +125,7 @@ export const TaskManifestSourceSchema = z.object({
     issueUrl: mediumString('Linear issue URL').optional(),
   }).strict().optional(),
   slack: z.object({
+    teamId: identifierString('Slack team id').optional(),
     channelId: identifierString('Slack channel id').optional(),
     threadTs: shortString('Slack thread timestamp').optional(),
     messageTs: shortString('Slack message timestamp').optional(),
@@ -215,7 +216,8 @@ export const TaskManifestPolicySchema = z.object({
   credentialCopyingAllowed: z.literal(false).default(false),
   commandDenylist: z.array(mediumString('command denylist item'))
     .max(TASK_MANIFEST_LIMITS.maxCommandCount, `Command denylist must contain at most ${TASK_MANIFEST_LIMITS.maxCommandCount} items`)
-    .default(() => [...DEFAULT_TASK_MANIFEST_COMMAND_DENYLIST]),
+    .default(() => [...DEFAULT_TASK_MANIFEST_COMMAND_DENYLIST])
+    .transform((values) => [...new Set([...DEFAULT_TASK_MANIFEST_COMMAND_DENYLIST, ...values])]),
   requiredValidation: z.array(identifierString('required validation'))
     .max(TASK_MANIFEST_LIMITS.maxValidationCount, `Required validation must contain at most ${TASK_MANIFEST_LIMITS.maxValidationCount} items`)
     .default(() => [...DEFAULT_TASK_MANIFEST_REQUIRED_VALIDATION]),
@@ -254,6 +256,16 @@ const isoTimestamp = shortString('createdAt')
     message: 'createdAt must be an ISO-8601 timestamp',
   });
 
+function normalizedScopePath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+}
+
+function pathWithinScope(candidate: string, scope: string): boolean {
+  const path = normalizedScopePath(candidate);
+  const root = normalizedScopePath(scope);
+  return path === root || path.startsWith(`${root}/`);
+}
+
 export const TaskManifestSchema = z.object({
   manifestVersion: z.literal(TASK_MANIFEST_VERSION),
   manifestId: z.string().uuid(),
@@ -274,6 +286,35 @@ export const TaskManifestSchema = z.object({
     .max(TASK_MANIFEST_LIMITS.maxEvidenceCount, `evidence must contain at most ${TASK_MANIFEST_LIMITS.maxEvidenceCount} items`),
   createdAt: isoTimestamp,
 }).strict().superRefine((manifest, ctx) => {
+  if (manifest.boundedScope.allowedPaths.length === 0) {
+    addCustomIssue(ctx, ['boundedScope', 'allowedPaths'], 'Direct task-manifest execution requires at least one host-enforced allowed path');
+  }
+  const allowed = manifest.boundedScope.allowedPaths;
+  for (const [taskIndex, task] of manifest.tasks.entries()) {
+    if (task.targetPaths.length === 0) {
+      addCustomIssue(ctx, ['tasks', taskIndex, 'targetPaths'], 'Every direct task-manifest task requires an explicit target path');
+    }
+    for (const [pathIndex, target] of task.targetPaths.entries()) {
+      if (!allowed.some((scope) => pathWithinScope(target, scope))) {
+        addCustomIssue(ctx, ['tasks', taskIndex, 'targetPaths', pathIndex], 'Task target path is outside the declared allowed paths');
+      }
+    }
+  }
+  // Forbidden scopes may intentionally carve a sensitive subtree out of an
+  // allowed parent; host closeout always evaluates forbidden paths first.
+  const denylist = manifest.policy.commandDenylist.map((value) => value.toLowerCase().trim());
+  // Schema transformation unions the immutable host denylist with caller
+  // additions, so a caller can add restrictions but can never remove defaults.
+  const declaredCommands = [
+    ...manifest.tasks.flatMap((task) => task.commands),
+    ...manifest.validation.requiredCommands,
+  ];
+  for (const [index, command] of declaredCommands.entries()) {
+    const normalized = command.toLowerCase();
+    if (denylist.some((denied) => denied && normalized.includes(denied))) {
+      addCustomIssue(ctx, ['policy', 'commandDenylist', index], 'A declared command matches the immutable command denylist');
+    }
+  }
   for (const issue of collectContextSafetyIssues(manifest, {
     maxStringChars: TASK_MANIFEST_LIMITS.maxStringChars,
     maxArrayItems: TASK_MANIFEST_LIMITS.maxStringArrayItems,

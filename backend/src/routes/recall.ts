@@ -871,6 +871,8 @@ async function fetchRecentRunsDump(workspaceId: string): Promise<RunSummary[]> {
  * @swagger
  * /api/recall/dump:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     operationId: getRecallDump
  *     summary: Unfiltered brain export with no token budget or limits
  *     description: >

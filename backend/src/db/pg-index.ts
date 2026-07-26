@@ -23,6 +23,7 @@
 import { Pool } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
+import { bootstrapRorcaV2GraphForLifecycle } from '../lib/graph-contract';
 
 const MIGRATIONS_ADVISORY_LOCK_KEY = 8_244_250_520_000;
 
@@ -79,14 +80,20 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
   if (!pool) pool = createPool();
 
   let client = await pool.connect();
+  let clientUsable = true;
   let advisoryLockHeld = false;
+  let migrationsCompleted = false;
 
-  try {
-    // Serialize migration runners across server/worker/dev processes.
-    // Without this, two processes can both observe a migration as unapplied and race
-    // to INSERT the same version into schema_migrations, crashing one side during dev startup.
+  const acquireMigrationSession = async (): Promise<void> => {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]);
     advisoryLockHeld = true;
+    await client.query('SET search_path TO rorca, public');
+  };
+
+  try {
+    // Serialize migration runners across server/worker/dev processes. The lock
+    // belongs to this exact session and is reacquired after client replacement.
+    await acquireMigrationSession();
 
     // Ensure the application schema exists before any unqualified migration SQL runs.
     // Without this, early migrations (e.g. 001_init.sql) land in public on a fresh
@@ -94,9 +101,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     // That split creates duplicate tables across schemas and breaks idempotency.
     await client.query('CREATE SCHEMA IF NOT EXISTS rorca');
 
-    // Pin search_path for the migration session. Include rorca so new RLS migrations
-    // can reference app tables (run_output_chunks, pipeline_runs, etc.) by unqualified name.
-    await client.query('SET search_path TO rorca, public');
+    // acquireMigrationSession pinned rorca/public on the lock-owning session.
 
     // Ensure schema_migrations tracking table exists in public explicitly.
     // On a brand-new database the rorca schema may not exist yet, so an unqualified
@@ -167,7 +172,55 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     // Fetch already-applied versions.
     // pg returns BIGINT as strings — coerce to numbers for Set.has() lookups.
     const { rows: applied } = await client.query('SELECT version FROM public.schema_migrations');
-    const appliedVersions = new Set(applied.map(r => Number(r.version)));
+    let appliedVersions = new Set(applied.map(r => Number(r.version)));
+    const refreshAppliedVersions = async (): Promise<void> => {
+      const refreshed = await client.query('SELECT version FROM public.schema_migrations');
+      appliedVersions = new Set(refreshed.rows.map(r => Number(r.version)));
+    };
+    const replacePoisonedMigrationSession = async (): Promise<void> => {
+      advisoryLockHeld = false; // destroying this backend releases its session lock
+      try { client.release(true); } catch { /* already released or dead */ }
+      clientUsable = false;
+      client = await pool!.connect();
+      clientUsable = true;
+      try {
+        await acquireMigrationSession();
+        // Another runner may have applied migrations while this process did not
+        // own the lock. Refresh before any catalog, DDL, or marker write.
+        await refreshAppliedVersions();
+      } catch (error) {
+        if (advisoryLockHeld) {
+          try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* best effort */ }
+        }
+        advisoryLockHeld = false;
+        try { client.release(true); } catch { /* unusable replacement */ }
+        clientUsable = false;
+        throw error;
+      }
+    };
+
+    const persistMigrationMarker = async (
+      version: number,
+      filename: string,
+      skippedInLiteMode: boolean,
+    ): Promise<void> => {
+      const inserted = await client.query<{ filename: string; skipped_in_lite_mode: boolean }>(
+        `INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (version) DO NOTHING
+         RETURNING filename, skipped_in_lite_mode`,
+        [version, filename, skippedInLiteMode],
+      );
+      const marker = inserted.rows[0] ?? (await client.query<{ filename: string; skipped_in_lite_mode: boolean }>(
+        `SELECT filename, skipped_in_lite_mode
+         FROM public.schema_migrations WHERE version = $1`,
+        [version],
+      )).rows[0];
+      if (!marker || marker.filename !== filename
+        || Boolean(marker.skipped_in_lite_mode) !== skippedInLiteMode) {
+        throw new Error(`[pg-migrate] Durable migration marker conflict for version ${version}`);
+      }
+    };
 
     // PG-019: Migrations that create extensions may fail on managed services
     // (e.g., Supabase pre-installs pgvector, Neon doesn't support AGE).
@@ -200,12 +253,11 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         continue;
       }
 
-      // AGE graph names are PostgreSQL schemas. The legacy graph was named
-      // `rorca`, which now intentionally belongs to application tables. If AGE
-      // is installed but that graph was never created, executing migration 050
-      // would LOAD AGE, fail at create_graph('rorca'), and poison the backend
-      // session after rollback. Skip it before LOAD; the supported rorca_v2
-      // bootstrap uses its own non-conflicting graph schema.
+      // AGE graph names are PostgreSQL schemas. The obsolete graph was named
+      // `rorca`, which now belongs exclusively to application tables. Handle
+      // migration 050 without executing historical graph DDL, then run the
+      // idempotent rorca_v2 lifecycle bootstrap after every migration pass —
+      // including when version 050 was recorded by an older release.
       if (file.startsWith('050_knowledge_graph')) {
         // Keep the useful, non-conflicting part of the legacy migration: install
         // AGE when this PostgreSQL distribution and role support it. Failure is
@@ -216,33 +268,29 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           console.warn(`[pg-migrate] AGE extension unavailable; continuing in graph-lite mode: ${(err as Error).message || err}`);
 
           // Loading AGE can install backend hooks before CREATE EXTENSION later
-          // fails (for example when a non-superuser owns an otherwise capable
-          // macOS PostgreSQL installation). Those hooks then reference the
-          // absent ag_catalog schema and poison unrelated later DDL. Discard the
-          // backend session before continuing in graph-lite mode.
-          try { client.release(true); } catch { /* already released or dead */ }
-          client = await pool.connect();
-        }
-
-        const catalog = await client.query<{ graph_catalog: string | null }>(
-          `SELECT to_regclass('ag_catalog.ag_graph')::text AS graph_catalog`,
-        );
-        let legacyGraphExists = false;
-        if (catalog.rows[0]?.graph_catalog) {
-          const graph = await client.query<{ exists: boolean }>(
-            `SELECT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'rorca') AS exists`,
-          );
-          legacyGraphExists = Boolean(graph.rows[0]?.exists);
-        }
-        if (!legacyGraphExists) {
-          await client.query(
-            'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
-            [version, `${file} [skipped: application schema collision]`],
-          );
+          // fails. Replace the poisoned session, reacquire the same global lock,
+          // restore search_path, and refresh the ledger before continuing.
+          await replacePoisonedMigrationSession();
+          if (appliedVersions.has(version)) {
+            skippedCount++;
+            continue;
+          }
+          // CREATE/LOAD failed, so graph catalog probing is neither authoritative
+          // nor necessarily permitted. Persist the graph-lite decision under the
+          // replacement session's reacquired lock and continue fail-closed.
+          await persistMigrationMarker(version, `${file} [skipped: extension unavailable]`, true);
+          appliedVersions.add(version);
           skippedCount++;
-          console.warn('[pg-migrate] Skipping legacy rorca AGE graph: application schema owns that name; use rorca_v2 bootstrap');
           continue;
         }
+
+        // Never execute the historical migration body: it is capability-only,
+        // and graph ownership belongs to the lifecycle bootstrap below.
+        await persistMigrationMarker(version, `${file} [graph bootstrap: rorca_v2]`, false);
+        appliedVersions.add(version);
+        appliedCount++;
+        console.log('[pg-migrate] AGE capability recorded; rorca_v2 lifecycle bootstrap pending');
+        continue;
       }
 
       const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
@@ -254,17 +302,9 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         // temporarily switch it to public and do not restore it for the session.
         await client.query('SET LOCAL search_path TO rorca, public');
         await client.query(sql);
-        try {
-          await client.query(
-            'INSERT INTO public.schema_migrations (version, filename) VALUES ($1, $2)',
-            [version, file]
-          );
-        } catch (err) {
-          if ((err as { code?: string }).code !== '23505') {
-            throw err;
-          }
-        }
+        await persistMigrationMarker(version, file, false);
         await client.query('COMMIT');
+        appliedVersions.add(version);
         appliedCount++;
         console.log(`[pg-migrate] Applied: ${file}`);
       } catch (err) {
@@ -281,21 +321,18 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           console.warn(`[pg-migrate] Reason: ${(err as Error).message || err}`);
 
           // AGE's LOAD can leave the backend session poisoned even when the SQL
-          // error is non-fatal. Destroy the pooled connection so later DDL runs
-          // on a fresh backend instead of inheriting AGE hooks.
-          try { client.release(true); } catch { /* already released or dead */ }
-          client = await pool.connect();
-          await client.query('SET search_path TO rorca, public');
-
-          // Record as applied to prevent retries
-          try {
-            await client.query(
-              'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
-              [version, `${file} [skipped: extension unavailable]`]
-            );
-          } catch {
-            // schema_migrations insert itself may fail if version already exists
+          // error is non-fatal. Replace it under a newly acquired lock and
+          // refresh versions before deciding whether this runner writes a marker.
+          await replacePoisonedMigrationSession();
+          if (appliedVersions.has(version)) {
+            skippedCount++;
+            continue;
           }
+
+          // The marker is migration authority. Any write/readback failure aborts;
+          // graph-lite operation must never be reported from memory alone.
+          await persistMigrationMarker(version, `${file} [skipped: extension unavailable]`, true);
+          appliedVersions.add(version);
           skippedCount++;
           continue;
         }
@@ -307,16 +344,30 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     }
 
     console.log(`[pg-migrate] Done. Applied: ${appliedCount}, Skipped: ${skippedCount}, Total: ${files.length}`);
+    migrationsCompleted = true;
   } finally {
     // Restore search_path before releasing connection back to pool.
     // We set search_path=public above; without restoring, subsequent queries
     // on this pooled connection miss the rorca schema (same bug as AGE pool poisoning).
-    try { await client.query('SET search_path TO rorca, public'); } catch { /* best-effort */ }
-    if (advisoryLockHeld) {
-      try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* best-effort */ }
+    if (clientUsable) {
+      try { await client.query('SET search_path TO rorca, public'); } catch { /* best-effort */ }
+      if (advisoryLockHeld) {
+        try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* best-effort */ }
+      }
+      client.release();
     }
-    client.release();
-    if (ownPool) await pool.end();
+    try {
+      if (migrationsCompleted) {
+        const graphLifecycle = await bootstrapRorcaV2GraphForLifecycle(pool);
+        if (graphLifecycle.available) {
+          console.log(`[pg-migrate] Graph bootstrap ready: ${graphLifecycle.graphName} (${graphLifecycle.labels.length} keyed labels)`);
+        } else {
+          console.warn(`[pg-migrate] Graph Lite active: rorca_v2 bootstrap ${graphLifecycle.reason}${graphLifecycle.errorCode ? ` (${graphLifecycle.errorCode})` : ''}`);
+        }
+      }
+    } finally {
+      if (ownPool) await pool.end();
+    }
   }
 }
 
@@ -325,7 +376,13 @@ export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promis
   if (!pool) pool = createPool();
 
   const client = await pool.connect();
+  let advisoryLockHeld = false;
   try {
+    // Marker deletion is migration authority. Serialize it with every runner on
+    // the same session and keep selection/deletion in one transaction.
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]);
+    advisoryLockHeld = true;
+    await client.query('BEGIN');
     await client.query(`
       ALTER TABLE public.schema_migrations
       ADD COLUMN IF NOT EXISTS skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
@@ -337,25 +394,36 @@ export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promis
       WHERE skipped_in_lite_mode = TRUE
          OR filename LIKE '%[skipped: extension unavailable]%'
       ORDER BY version ASC
+      FOR UPDATE
     `);
 
     const versions = rows.map((row) => Number(row.version));
-    if (versions.length === 0) return [];
-
-    await client.query(
-      'DELETE FROM public.schema_migrations WHERE version = ANY($1::bigint[])',
-      [versions]
-    );
-
+    if (versions.length > 0) {
+      await client.query(
+        `DELETE FROM public.schema_migrations
+         WHERE version = ANY($1::bigint[])
+           AND (skipped_in_lite_mode = TRUE OR filename LIKE '%[skipped: extension unavailable]%')`,
+        [versions],
+      );
+    }
+    await client.query('COMMIT');
     return versions;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* preserve original failure */ }
+    throw error;
   } finally {
+    if (advisoryLockHeld) {
+      try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* session release clears it */ }
+    }
     client.release();
     if (ownPool) await pool.end();
   }
 }
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────
-const isDirectRun = typeof require !== 'undefined' && require.main === module;
+const isDirectRun = typeof require !== 'undefined'
+  && typeof module !== 'undefined'
+  && require.main === module;
 if (isDirectRun) {
   runPgMigrations()
     .then(() => {

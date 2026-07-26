@@ -95,6 +95,15 @@ describe('RunTranscript', () => {
     );
   });
 
+  it('lets an operator check again when a live structured generation has no events yet', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(page({ items: [], hasMore: false, nextCursor: null }) as never);
+    render(<RunTranscript runId={77} generationId={GENERATION_ID} available archiveAvailable={false} active />);
+    expect(await screen.findByText(/Waiting for the first structured transcript event/)).toBeInTheDocument();
+    const check = screen.getByRole('button', { name: 'Check for newer events' });
+    fireEvent.click(check);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+  });
+
   it('preserves the active cursor when a newer-events poll is empty', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(page({

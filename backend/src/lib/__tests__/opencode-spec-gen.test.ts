@@ -142,7 +142,7 @@ describe('isSpecError', () => {
           dependsOn: [],
         },
       ],
-      usage: { inputTokens: 0, outputTokens: 0 },
+      usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0 },
     };
     expect(isSpecError(success)).toBe(false);
   });

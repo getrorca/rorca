@@ -88,6 +88,7 @@ jest.mock('../../lib/pi-detector', () => ({
 jest.mock('../../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
   getBoss: jest.fn(() => mockBoss),
+  getPgBossSchemaSql: jest.fn(() => '"pgboss"'),
 }));
 
 jest.mock('../../lib/pty-manager', () => ({
@@ -222,6 +223,7 @@ jest.mock('../../lib/opencode-server', () => ({
 
 jest.mock('../../lib/auth-utils', () => ({
   authRequired: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireWorkspaceAdmin: () => (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
 
 jest.mock('../../worker', () => ({
@@ -241,7 +243,9 @@ let tmpDir = '';
 let wsDir = '';
 let nextRunId = 9000;
 let taskManifestReservations: JsonRecord[] = [];
+let taskManifestLineages: JsonRecord[] = [];
 let pipelineRunInserts: JsonRecord[] = [];
+let taskManifestPublications: JsonRecord[] = [];
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -309,10 +313,49 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
     return Promise.resolve({ rows: [] });
   }
   if (text.includes('FROM pipeline_runs') && text.includes('idempotency_key') && text.includes('FOR UPDATE')) {
-    return Promise.resolve({ rows: [] });
+    const run = taskManifestReservations.find((row) => row.workspaceId === params[0] && row.idempotencyKey === params[1]);
+    return Promise.resolve({ rows: run ? [{
+      id: run.id, spec_path: run.specPath, status: 'queued', queue_position: run.queuePosition,
+      triggered_via: run.triggeredVia, branch_name: run.branchName ?? null,
+      execution_worktree_path: run.executionWorktreePath ?? null,
+      idempotency_key: run.idempotencyKey, task_manifest_id: run.manifestId,
+      task_manifest_artifacts: run.artifacts, trigger_options: run.triggerOptions,
+      effective_options: run.effectiveOptions, task_manifest_authority_version: 1,
+    }] : [] });
   }
   if (text.includes('SELECT COUNT(*) as count FROM pipeline_runs')) {
     return Promise.resolve({ rows: [{ count: '0' }] });
+  }
+  if (text.includes('SELECT workspace_id, status, dispatch_request_hash FROM pipeline_runs')) {
+    const run = [...taskManifestReservations, ...pipelineRunInserts].find((row) => row.id === params[0]);
+    return Promise.resolve({ rows: run ? [{ workspace_id: run.workspaceId, status: 'queued', dispatch_request_hash: run.dispatchRequestHash ?? null }] : [] });
+  }
+  if (text.includes('FROM pipeline_run_cancellation_requests')) {
+    return Promise.resolve({ rows: [] });
+  }
+  if (text.includes('FROM pipeline_dispatch_publications') && text.includes('FOR UPDATE')) {
+    return Promise.resolve({ rows: taskManifestPublications.filter((row) => row.run_id === params[0]) });
+  }
+  if (text.includes('UPDATE pipeline_dispatch_publications') && text.includes("state = 'preparing'")) {
+    const publication = taskManifestPublications.find((row) => row.run_id === params[0]);
+    if (publication) {
+      publication.state = 'preparing';
+      publication.lease_owner = params[1];
+      publication.lease_expires_at = '2099-01-01T00:00:00.000Z';
+      publication.request_hash = publication.request_hash ?? params[2];
+    }
+    return Promise.resolve({ rows: [] });
+  }
+  if (text.includes('INSERT INTO task_manifest_run_lineage')) {
+    const row = {
+      run_id: params[0], workspace_id: params[1], root_run_id: params[2], parent_run_id: params[3],
+      lineage_depth: params[4], schema_version: params[5], manifest_id: params[6],
+      source_idempotency_key: params[7], manifest_hash: params[8], synthetic_spec_hash: params[9],
+      manifest_path: params[10], synthetic_spec_path: params[11], lineage_identity_hash: params[12],
+      provider_human_receipt_id: params[13] ?? null,
+    };
+    taskManifestLineages.push(row);
+    return Promise.resolve({ rows: [row] });
   }
   if (text.includes('INSERT INTO pipeline_runs') && text.includes('RETURNING id')) {
     const row = {
@@ -324,14 +367,28 @@ function transactionQuery(sql: unknown, params: unknown[] = []) {
       autoWorktree: params[4],
       mergeStrategy: params[5],
       terminalMode: params[6],
-      agentType: params[8],
+      includeGraph: params[7],
+      agentType: params[9],
       agentModel: params[10],
       idempotencyKey: params[11],
       manifestId: params[12],
       artifacts: jsonParam(params[13]),
       triggerOptions: jsonParam(params[14]),
+      effectiveOptions: jsonParam(params[15]),
+      dispatchRequestHash: params[16],
+      taskManifestAuthorityVersion: 1,
     };
     taskManifestReservations.push(row);
+    taskManifestPublications.push({
+      run_id: row.id,
+      workspace_id: row.workspaceId,
+      boss_job_id: `00000000-0000-5000-a000-${String(row.id).padStart(12, '0')}`,
+      state: 'reserved',
+      request_hash: row.dispatchRequestHash,
+      lease_owner: null,
+      lease_expires_at: null,
+      updated_at: '2000-01-01T00:00:00.000Z',
+    });
     return Promise.resolve({ rows: [{ id: row.id, queue_position: row.queuePosition }] });
   }
   return Promise.resolve({ rows: [] });
@@ -341,7 +398,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   nextRunId = 9000;
   taskManifestReservations = [];
+  taskManifestLineages = [];
   pipelineRunInserts = [];
+  taskManifestPublications = [];
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hermes-bridge-'));
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(wsDir, { recursive: true });
@@ -353,12 +412,26 @@ beforeEach(() => {
   execFileSync('git', ['commit', '-m', 'fixture'], { cwd: wsDir, stdio: 'ignore' });
 
   mockBoss.createQueue.mockResolvedValue(undefined);
-  mockBoss.send.mockResolvedValue('mock-job-id');
+  mockBoss.send.mockImplementation(async (_name: string, _payload: unknown, options?: { id?: string }) => options?.id ?? 'mock-job-id');
   mockSimpleGitBranchLocal.mockResolvedValue({ all: [] });
   mockSimpleGitRaw.mockImplementation(async (args: string[]) => (
     execFileSync('git', args, { cwd: wsDir, encoding: 'utf8' })
   ));
-  mockExecute.mockResolvedValue({ rowCount: 1 });
+  mockExecute.mockImplementation(async (sql: unknown, params: unknown[] = []) => {
+    const text = sqlText(sql);
+    if (text.includes("UPDATE pipeline_runs SET status = 'queued'") && text.includes('worktree_path')) {
+      const run = taskManifestReservations.find((row) => row.id === params[10]);
+      if (run) {
+        run.branchName = params[4];
+        run.worktreePath = params[5];
+        run.executionWorktreePath = params[5];
+        run.autoWorktree = params[8];
+        run.mergeStrategy = params[11];
+        run.terminalMode = params[12];
+      }
+    }
+    return { rowCount: 1 };
+  });
   mockAssertExecutionEnvironmentReadyForRun.mockResolvedValue({
     id: 'remote-rorca',
     label: 'Remote Rorca worker',
@@ -380,6 +453,53 @@ beforeEach(() => {
   });
   mockQueryOne.mockImplementation(async (sql: unknown, params: unknown[] = []) => {
     const text = sqlText(sql);
+    if (text.includes('FROM task_manifest_run_lineage WHERE run_id')) {
+      return taskManifestLineages.find((row) => row.run_id === params[0]);
+    }
+    if (text.includes('SELECT workspace_id, spec_path, status, effective_options') && text.includes('FROM pipeline_runs WHERE id = $1')) {
+      const run = taskManifestReservations.find((row) => row.id === params[0]);
+      return run ? {
+        workspace_id: run.workspaceId,
+        spec_path: run.specPath,
+        status: 'queued',
+        effective_options: run.effectiveOptions,
+      } : undefined;
+    }
+    if (text.includes('SELECT effective_options FROM pipeline_runs')) {
+      const run = taskManifestReservations.find((row) => row.id === params[0]);
+      return run ? { effective_options: run.effectiveOptions } : undefined;
+    }
+    if (text.includes('UPDATE pipeline_dispatch_publications') && text.includes('payload_hash = COALESCE')) {
+      const publication = taskManifestPublications.find((row) => row.run_id === params[0] && row.lease_owner === params[1]);
+      if (!publication) return undefined;
+      publication.request_hash = publication.request_hash ?? params[2];
+      publication.effective_options_hash = publication.effective_options_hash ?? params[3];
+      publication.payload_hash = publication.payload_hash ?? params[4];
+      publication.payload = publication.payload ?? jsonParam(params[5]);
+      return { boss_job_id: publication.boss_job_id };
+    }
+    if (text.includes('SELECT id::text FROM') && text.includes('.job WHERE id = $1')) {
+      return undefined;
+    }
+    if (text.includes('UPDATE pipeline_dispatch_publications') && text.includes("state = 'published'")) {
+      const publication = taskManifestPublications.find((row) => row.run_id === params[0]);
+      if (!publication) return undefined;
+      publication.state = 'published';
+      publication.lease_owner = null;
+      publication.lease_expires_at = null;
+      publication.updated_at = new Date().toISOString();
+      return { run_id: publication.run_id };
+    }
+    if (text.includes('FROM task_manifest_run_lineage lineage')) {
+      const lineage = taskManifestLineages.find((row) => row.run_id === params[0]);
+      const run = taskManifestReservations.find((row) => row.id === params[0]);
+      return lineage && run ? {
+        ...lineage,
+        task_manifest_id: run.manifestId,
+        task_manifest_artifacts: run.artifacts,
+        trigger_options: run.triggerOptions,
+      } : undefined;
+    }
     if (text.includes('SELECT * FROM workspaces WHERE id = $1')) {
       return { id: params[0] ?? 'ws-hermes', label: 'Hermes Test Workspace', path: wsDir, domain: 'test' };
     }
@@ -399,7 +519,15 @@ beforeEach(() => {
       return undefined;
     }
     if (text.includes('FROM pipeline_runs') && text.includes('idempotency_key = $2')) {
-      return undefined;
+      const run = taskManifestReservations.find((row) => row.workspaceId === params[0] && row.idempotencyKey === params[1]);
+      return run ? {
+        id: run.id, spec_path: run.specPath, status: 'queued', queue_position: run.queuePosition,
+        triggered_via: run.triggeredVia, branch_name: run.branchName ?? null,
+        execution_worktree_path: run.executionWorktreePath ?? null,
+        idempotency_key: run.idempotencyKey, task_manifest_id: run.manifestId,
+        task_manifest_artifacts: run.artifacts, trigger_options: run.triggerOptions,
+        effective_options: run.effectiveOptions, task_manifest_authority_version: 1,
+      } : undefined;
     }
     if (text.includes('SELECT pipeline_config FROM workspaces')) {
       return { pipeline_config: '{}' };
@@ -430,8 +558,19 @@ beforeEach(() => {
         manifestId: params[17],
         artifacts: params[18] ? jsonParam(params[18]) : null,
         triggerOptions: params[19] ? jsonParam(params[19]) : null,
+        dispatchRequestHash: params[20] ?? null,
       };
       pipelineRunInserts.push(row);
+      taskManifestPublications.push({
+        run_id: row.id,
+        workspace_id: row.workspaceId,
+        boss_job_id: `00000000-0000-5000-a000-${String(row.id).padStart(12, '0')}`,
+        state: 'reserved',
+        request_hash: row.dispatchRequestHash,
+        lease_owner: null,
+        lease_expires_at: null,
+        updated_at: '2000-01-01T00:00:00.000Z',
+      });
       return { id: row.id };
     }
     if (text.includes('INSERT INTO wal_events')) {
@@ -448,6 +587,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.RORCA_TASK_MANIFEST_FAILPOINT;
   if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -520,6 +660,11 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       mergeStrategy: 'draft-pr',
       idempotencyKey: manifest.idempotencyKey,
       manifestId: manifest.manifestId,
+      taskManifestAuthorityVersion: 1,
+      effectiveOptions: expect.objectContaining({
+        safety: expect.objectContaining({ deploy: false }),
+        merge: expect.objectContaining({ strategy: 'draft-pr', autoMerge: false }),
+      }),
     }));
     expect(taskManifestReservations[0].triggerOptions).toEqual(expect.objectContaining({
       source: 'task-manifest',
@@ -541,6 +686,86 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
     expect(mockBoss.send).not.toHaveBeenCalled();
   });
 
+  test('dispatches a non-dry-run synthetic manifest without applying approved-spec pass authority', async () => {
+    const app = makeApp();
+    const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;
+    (manifest.policy as JsonRecord).dryRun = false;
+
+    const response = await request(app)
+      .post('/api/pipeline/task-manifests/trigger')
+      .send({
+        workspaceId: 'ws-hermes',
+        idempotencyKey: manifest.idempotencyKey,
+        manifest,
+        queue: false,
+        autoWorktree: true,
+        mergeStrategy: 'draft-pr',
+        agentOverride: 'claude',
+      });
+
+    expect({ status: response.status, body: response.body }).toEqual({ status: 201, body: expect.objectContaining({
+      ok: true,
+      queued: true,
+      manifestId: manifest.manifestId,
+      idempotencyKey: manifest.idempotencyKey,
+      runId: expect.any(Number),
+    }) });
+    expect(taskManifestReservations).toHaveLength(1);
+    expect(mockBoss.send).toHaveBeenCalledTimes(1);
+  });
+
+  test('replays prepared-before-send loss to one run and one pg-boss publication', async () => {
+    const app = makeApp();
+    const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;
+    (manifest.policy as JsonRecord).dryRun = false;
+    const body = { workspaceId: 'ws-hermes', idempotencyKey: manifest.idempotencyKey, manifest, queue: false, autoWorktree: true, mergeStrategy: 'draft-pr', agentOverride: 'claude' };
+    process.env.RORCA_TASK_MANIFEST_FAILPOINT = 'after_preparation_before_send';
+    const lost = await request(app).post('/api/pipeline/task-manifests/trigger').send(body);
+    delete process.env.RORCA_TASK_MANIFEST_FAILPOINT;
+    expect(lost.status).toBeGreaterThanOrEqual(500);
+    expect(taskManifestReservations).toHaveLength(1);
+    expect(mockBoss.send).not.toHaveBeenCalled();
+    taskManifestPublications[0].lease_expires_at = '2000-01-01T00:00:00.000Z';
+
+    const replay = await request(app).post('/api/pipeline/task-manifests/trigger').send(body);
+    expect(replay.status).toBe(201);
+    expect(replay.body.runId).toBe(taskManifestReservations[0].id);
+    expect(mockBoss.send).toHaveBeenCalledTimes(1);
+    expect(taskManifestPublications[0].state).toBe('published');
+
+    const responseLostReplay = await request(app).post('/api/pipeline/task-manifests/trigger').send(body);
+    expect(responseLostReplay.status).toBe(200);
+    expect(responseLostReplay.body.runId).toBe(replay.body.runId);
+    expect(mockBoss.send).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects explicit local-user before workspace, reservation, artifact, or queue mutation', async () => {
+    const app = makeApp();
+    const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;
+    const execution = manifest.execution as JsonRecord;
+    execution.executionEnvironment = 'local-user';
+    execution.executionEnvironmentId = 'missing-local-bridge';
+    mockQuery.mockClear();
+    mockQueryOne.mockClear();
+    mockExecute.mockClear();
+    mockBoss.send.mockClear();
+
+    const response = await request(app).post('/api/pipeline/task-manifests/trigger').send({
+      workspaceId: 'ws-hermes', idempotencyKey: manifest.idempotencyKey, manifest,
+      executionEnvironment: 'local-user', executionEnvironmentId: 'missing-local-bridge',
+      autoWorktree: true, mergeStrategy: 'draft-pr',
+    });
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(mockAssertExecutionEnvironmentReadyForRun).not.toHaveBeenCalled();
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockQueryOne).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(taskManifestReservations).toHaveLength(0);
+    expect(pipelineRunInserts).toHaveLength(0);
+    expect(mockBoss.send).not.toHaveBeenCalled();
+  });
+
   test('accepts a Hermes manifest without optional executionEnvironment fields', async () => {
     const app = makeApp();
     const manifest = clone(hermesHrcTaskManifestWithoutExecutionEnvironment) as JsonRecord;
@@ -552,8 +777,8 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
         idempotencyKey: manifest.idempotencyKey,
         manifest,
         dryRun: true,
-        autoWorktree: false,
-        mergeStrategy: 'branch-only',
+        autoWorktree: true,
+        mergeStrategy: 'draft-pr',
       });
 
     expect(response.status).toBe(200);
@@ -564,7 +789,7 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       manifestId: manifest.manifestId,
       idempotencyKey: manifest.idempotencyKey,
       estimatedExecutionPlan: expect.objectContaining({
-        mergeStrategy: 'branch-only',
+        mergeStrategy: 'draft-pr',
         executionEnvironmentSupported: true,
         executionEnvironmentId: null,
       }),
@@ -575,8 +800,8 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
   test.each([
     ['missing idempotencyKey', (body: JsonRecord) => { delete body.idempotencyKey; }, 400, 'TASK_MANIFEST_IDEMPOTENCY_KEY_REQUIRED'],
     ['autoMerge=true', (body: JsonRecord) => { body.autoMerge = true; }, 422, 'TASK_MANIFEST_AUTO_MERGE_REJECTED'],
-    ['mergeStrategy=direct', (body: JsonRecord) => { body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_DIRECT_MERGE_REJECTED'],
-    ['autoMerge=true plus mergeStrategy=direct', (body: JsonRecord) => { body.autoMerge = true; body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR'],
+    ['mergeStrategy=direct', (body: JsonRecord) => { body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH'],
+    ['autoMerge=true plus mergeStrategy=direct', (body: JsonRecord) => { body.autoMerge = true; body.mergeStrategy = 'direct'; }, 422, 'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH'],
     ['high-risk direct-repair route', (body: JsonRecord) => { (body.manifest as JsonRecord).routeDecision = { route: 'hermes.direct-repair', reason: 'Bypass route' }; }, 400, 'TASK_MANIFEST_HIGH_RISK_ROUTE'],
     ['unsafe artifact path', (body: JsonRecord) => { ((body.manifest as JsonRecord).evidence as JsonRecord[])[0].path = '../dirty-artifacts/outside.patch'; }, 400, 'TASK_MANIFEST_UNSAFE_ARTIFACT_PATH'],
     ['oversized context', (body: JsonRecord) => {
@@ -592,8 +817,8 @@ describe('POST /api/pipeline/task-manifests/trigger Hermes compatibility', () =>
       workspaceId: 'ws-hermes',
       idempotencyKey: manifest.idempotencyKey,
       manifest,
-      autoWorktree: false,
-      mergeStrategy: 'branch-only',
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
     };
     mutate(body);
 
@@ -631,7 +856,7 @@ describe('POST /api/pipeline/trigger legacy Hermes compatibility guard', () => {
     expect(mockBoss.send).not.toHaveBeenCalled();
   });
 
-  test('normal full-spec run preserves request agent/model precedence and worktree PR behavior', async () => {
+  test('normal full-spec route rejects manifestless execution before worktree or dispatch', async () => {
     const app = makeApp();
     const specPath = seedNormalSpec('hermes-normal-spec');
 
@@ -648,41 +873,19 @@ describe('POST /api/pipeline/trigger legacy Hermes compatibility guard', () => {
         terminal_mode: 'ansi-html',
       });
 
-    expect(response.status).toBe(201);
-    expect(response.body).toEqual(expect.objectContaining({
-      ok: true,
-      queued: true,
-      runId: expect.any(Number),
-      branchName: 'feat/hermes-normal-spec',
-      agentType: 'opencode',
-      agentModel: 'openrouter/z-ai/glm-5',
-      terminalMode: 'ansi-html',
-    }));
-    expect(response.body.worktreePath).toContain('workspace-feat-hermes-normal-spec');
-    expect(mockSimpleGitRaw).toHaveBeenCalledWith(expect.arrayContaining(['worktree', 'add']));
-    expect(pipelineRunInserts[0]).toEqual(expect.objectContaining({
-      specPath,
-      workspaceId: 'ws-hermes',
-      agentType: 'opencode',
-      agentModel: 'openrouter/z-ai/glm-5',
-      autoWorktree: true,
-      autoMerge: false,
-      mergeStrategy: 'pr',
-    }));
-    expect(mockBoss.createQueue).toHaveBeenCalledWith('pipeline:run');
-    expect(mockBoss.send).toHaveBeenCalledWith(
-      'pipeline:run',
-      expect.objectContaining({
-        runId: response.body.runId,
-        specPath,
-        agent: 'opencode',
-        model: 'openrouter/z-ai/glm-5',
-        autoWorktree: true,
-        autoMerge: false,
-        mergeStrategy: 'pr',
-        agentOverride: 'opencode',
-      }),
-      expect.not.objectContaining({ id: expect.any(String) }),
-    );
+    expect(response.status).toBe(422);
+    expect(response.body).toMatchObject({
+      code: 'RELEASE_ONE_TASK_MANIFEST_REQUIRED',
+      details: {
+        profileId: 'release-1-supervised-core',
+        capabilityId: 'bounded_task_manifest',
+        endpoint: '/api/pipeline/task-manifests/trigger',
+      },
+    });
+    expect(pipelineRunInserts).toHaveLength(0);
+    expect(taskManifestReservations).toHaveLength(0);
+    expect(mockSimpleGitRaw).not.toHaveBeenCalled();
+    expect(mockBoss.createQueue).not.toHaveBeenCalled();
+    expect(mockBoss.send).not.toHaveBeenCalled();
   });
 });

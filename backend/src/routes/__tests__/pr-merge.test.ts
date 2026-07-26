@@ -9,12 +9,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createHmac } from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, execute } from '../../db/index';
+import { encryptToken } from '../../lib/auth-utils';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let _authToken: string;
 
@@ -75,33 +78,41 @@ function createSpecFile(stories: Array<{ id: string; title: string; passes?: boo
   return approvedDir;
 }
 
-beforeEach(async () => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pr-merge-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-_authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  _authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
 
-  await execute(`DELETE FROM wal_events`);
-
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'PR Merge Test', tmpDir]);
-
-  const authMod = require('../auth');
-  const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
-  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
+beforeEach(async () => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pr-merge-test-'));
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, 'PR Merge Test', tmpDir],
+  );
+  await execute(
+    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptToken(WEBHOOK_SECRET)],
+  );
 });
 
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 100));
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
 });
 
 // ─── extractStoryIds unit tests ─────────────────────────────────────────────
@@ -150,9 +161,9 @@ test('extractStoryIds: deduplicates across title and branch', () => {
   expect(ids).toEqual(['US-001']);
 });
 
-// ─── Integration: PR merge updates spec JSON ────────────────────────────────
+// ─── Release-1 provider merge observation is non-mutating ──────────────────
 
-test('merged PR marks matching stories as passed in spec JSON', async () => {
+test('merged PR observation does not grant story-pass authority', async () => {
   createSpecFile([
     { id: 'US-001', title: 'Story 1' },
     { id: 'US-002', title: 'Story 2' },
@@ -168,18 +179,13 @@ test('merged PR marks matching stories as passed in spec JSON', async () => {
   const specPath = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'approved', 'test-spec.json');
   const content = JSON.parse(fs.readFileSync(specPath, 'utf8'));
 
-  // US-001 should be marked passed with mergedVia
-  const us001 = content.userStories.find((s: any) => s.id === 'US-001');
-  expect(us001.passes).toBe(true);
-  expect(us001.mergedVia).toBe('https://github.com/acme/my-repo/pull/42');
-
-  // US-002 should remain unchanged
-  const us002 = content.userStories.find((s: any) => s.id === 'US-002');
-  expect(us002.passes).toBe(false);
-  expect(us002.mergedVia).toBeUndefined();
+  for (const story of content.userStories) {
+    expect(story.passes).toBe(false);
+    expect(story.mergedVia).toBeUndefined();
+  }
 });
 
-test('merged PR emits github_pr_merged WAL event', async () => {
+test('merged PR observation does not synthesize an authoritative merge WAL event', async () => {
   createSpecFile([
     { id: 'US-001', title: 'Story 1' },
   ]);
@@ -190,14 +196,7 @@ test('merged PR emits github_pr_merged WAL event', async () => {
 
   const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'`) as any[];
 
-  expect(events).toHaveLength(1);
-  expect(events[0].workspace_id).toBe(WORKSPACE_ID);
-
-  const walPayload = JSON.parse(events[0].payload);
-  expect(walPayload.pr_url).toBe('https://github.com/acme/my-repo/pull/42');
-  expect(walPayload.story_ids).toEqual(['US-001']);
-  expect(walPayload.merge_sha).toBe('abc123def456');
-  expect(walPayload.branch).toBe('feat/US-001-add-login');
+  expect(events).toHaveLength(0);
 });
 
 test('non-merged PR close does not update stories', async () => {
@@ -249,7 +248,7 @@ test('PR with no story IDs does not emit WAL event', async () => {
   expect(events).toHaveLength(0);
 });
 
-test('PR with multiple story IDs updates all matching stories', async () => {
+test('PR with multiple story IDs still cannot update stories without host closeout authority', async () => {
   createSpecFile([
     { id: 'US-001', title: 'Story 1' },
     { id: 'US-002', title: 'Story 2' },
@@ -272,13 +271,8 @@ test('PR with multiple story IDs updates all matching stories', async () => {
   const specPath = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'approved', 'test-spec.json');
   const content = JSON.parse(fs.readFileSync(specPath, 'utf8'));
 
-  expect(content.userStories.find((s: any) => s.id === 'US-001').passes).toBe(true);
-  expect(content.userStories.find((s: any) => s.id === 'US-002').passes).toBe(false);
-  expect(content.userStories.find((s: any) => s.id === 'US-003').passes).toBe(true);
+  expect(content.userStories.every((story: any) => story.passes === false)).toBe(true);
 
   const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'`) as any[];
-  const walPayload = JSON.parse(events[0].payload);
-  expect(walPayload.story_ids).toContain('US-001');
-  expect(walPayload.story_ids).toContain('US-003');
-  expect(walPayload.story_ids).not.toContain('US-002');
+  expect(events).toHaveLength(0);
 });

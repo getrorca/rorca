@@ -9,12 +9,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createHmac } from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { execute } from '../../db/index';
+import { encryptToken } from '../../lib/auth-utils';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 
@@ -83,36 +86,43 @@ function createSpecFile(
   );
 }
 
-beforeEach(async () => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-checks-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
+beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   process.env.AUTH_REQUIRED = 'true';
-
   const serverMod = require('../../server');
-  app = serverMod.default;
-  authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
 
-  await execute(`DELETE FROM wal_events`);
-
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'Checks Test', tmpDir]);
-
-  const authMod = require('../auth');
-  const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
-  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
+beforeEach(async () => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-checks-test-'));
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, 'Checks Test', tmpDir],
+  );
+  await execute(
+    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptToken(WEBHOOK_SECRET)],
+  );
 });
 
 afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 100));
+  await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
   delete process.env.NODE_ENV;
   delete process.env.AUTH_REQUIRED;
-  await execute('TRUNCATE users CASCADE').catch(() => {});
 });
 
 // ─── checkCriteriaCoverage unit tests ────────────────────────────────────────
@@ -184,7 +194,7 @@ test('manual check update rejects invalid SHA', async () => {
 
 test('manual check update rejects invalid state', async () => {
   const res = await request(app)
-    .post('/api/github/checks/abcdef1234567')
+    .post(`/api/github/checks/${'a'.repeat(40)}`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({ state: 'unknown', workspaceId: WORKSPACE_ID });
 
@@ -194,7 +204,7 @@ test('manual check update rejects invalid state', async () => {
 
 test('manual check update rejects missing workspaceId', async () => {
   const res = await request(app)
-    .post('/api/github/checks/abcdef1234567')
+    .post(`/api/github/checks/${'a'.repeat(40)}`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({ state: 'success' });
 
@@ -202,14 +212,14 @@ test('manual check update rejects missing workspaceId', async () => {
   expect(res.body.error).toMatch(/workspaceid/i);
 });
 
-test('manual check update returns 404 for workspace without GitHub connection', async () => {
+test('manual check update requires an exact canonical run identity before repository lookup', async () => {
   const res = await request(app)
-    .post('/api/github/checks/abcdef1234567')
+    .post(`/api/github/checks/${'a'.repeat(40)}`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({ state: 'success', workspaceId: 'nonexistent-ws' });
 
-  expect(res.status).toBe(404);
-  expect(res.body.error).toMatch(/no github connection/i);
+  expect(res.status).toBe(400);
+  expect(res.body.error).toMatch(/runId must be a positive safe integer/i);
 });
 
 test('manual check update requires authentication', async () => {

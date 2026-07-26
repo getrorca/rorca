@@ -189,4 +189,15 @@ test('dispatch claim has a deterministic single transaction ownership/capacity b
   assert.match(claim, /INSERT INTO wave_parallel_capacity_reservations/);
   assert.match(claim, /orchestration_mode = 'wave-parallel' AND status IN \('starting', 'running'\)/);
   assert.match(claim, /status = 'starting'/);
+  assert.match(claim, /worker_id = \$2::uuid/);
+  assert.match(claim, /dispatch_owner = \$2::text/);
+  assert.match(claim, /dispatch_lease_expires_at\.toISOString\(\)/);
+
+  const startingStatusMigration = fs.readFileSync(
+    path.join(repositoryRoot, 'backend/src/db/pg-migrations/20260720151000_wave_dispatch_starting_status.sql'),
+    'utf8',
+  );
+  assert.match(startingStatusMigration, /'queued', 'starting', 'release_pending'/);
+  assert.doesNotMatch(startingStatusMigration, /(?:UPDATE|DELETE FROM)\s+pipeline_runs/i);
+  assert.doesNotMatch(startingStatusMigration, /\bpgboss\b/i);
 });

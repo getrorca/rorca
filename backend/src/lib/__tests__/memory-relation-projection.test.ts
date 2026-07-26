@@ -80,7 +80,7 @@ describe('memory relation AGE projection', () => {
 
     const cypherSql = mockClientQuery.mock.calls
       .map(([sql]) => String(sql))
-      .find((sql) => sql.includes("cypher('rorca'"));
+      .find((sql) => sql.includes("cypher('rorca_v2'"));
 
     expect(cypherSql).toContain("MERGE (source)-[r:SUPERSEDES {key: 'memory-relation:ws-1::SUPERSEDES::8::3'}]->(target)");
     expect(cypherSql).toContain("source:Memory {key: 'memory:ws-1::8'}");
@@ -114,7 +114,7 @@ describe('memory relation AGE projection', () => {
 
     const cypherSql = mockClientQuery.mock.calls
       .map(([sql]) => String(sql))
-      .find((sql) => sql.includes("cypher('rorca'"));
+      .find((sql) => sql.includes("cypher('rorca_v2'"));
 
     expect(cypherSql).toContain("MERGE (source)-[r:CONFLICTS_WITH {key: 'memory-relation:ws-2::CONFLICTS_WITH::4::9'}]->(target)");
     expect(cypherSql).toContain('r.status = \'deleted\'');

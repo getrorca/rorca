@@ -8,12 +8,14 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 
@@ -35,25 +37,39 @@ function createSpecFile() {
   fs.writeFileSync(path.join(approvedDir, `${SPEC_ID}.json`), JSON.stringify(spec, null, 2));
 }
 
-beforeEach(async () => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-comments-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
 
-  await execute(`DELETE FROM wal_events`);
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'Comments Test', tmpDir]);
+beforeEach(async () => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-comments-test-'));
+  await execute('DELETE FROM notifications WHERE link LIKE $1', [`%${SPEC_ID}%`]);
+  await execute('DELETE FROM story_comments WHERE spec_id = $1', [SPEC_ID]);
+  await execute('DELETE FROM wal_events WHERE spec_id = $1', [SPEC_ID]);
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, 'Comments Test', tmpDir],
+  );
   createSpecFile();
 });
 
 afterEach(async () => {
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 100));
-fs.rmSync(tmpDir, { recursive: true, force: true });
+  await execute('DELETE FROM notifications WHERE link LIKE $1', [`%${SPEC_ID}%`]);
+  await execute('DELETE FROM story_comments WHERE spec_id = $1', [SPEC_ID]);
+  await execute('DELETE FROM wal_events WHERE spec_id = $1', [SPEC_ID]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  delete process.env.NODE_ENV;
 });
 
 describe('POST /api/specs/:specId/stories/:storyId/comments', () => {
@@ -101,7 +117,8 @@ describe('POST /api/specs/:specId/stories/:storyId/comments', () => {
     const walEvent = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'comment_added' AND spec_id = $1 AND story_id = $2`, [SPEC_ID, STORY_ID]) as { event_type: string; payload: string } | undefined;
 
     expect(walEvent).toBeDefined();
-    expect(JSON.parse(walEvent!.payload).commentId).toBeDefined();
+    const payload = typeof walEvent!.payload === 'string' ? JSON.parse(walEvent!.payload) : walEvent!.payload;
+    expect(payload.commentId).toBeDefined();
   });
 });
 
@@ -199,7 +216,8 @@ describe('POST /api/specs/:specId/stories/:storyId/comments/:commentId/resolve',
     const walEvent = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'comment_resolved' AND spec_id = $1 AND story_id = $2`, [SPEC_ID, STORY_ID]) as { event_type: string; payload: string } | undefined;
 
     expect(walEvent).toBeDefined();
-    expect(JSON.parse(walEvent!.payload).commentId).toBe(createRes.body.id);
+    const payload = typeof walEvent!.payload === 'string' ? JSON.parse(walEvent!.payload) : walEvent!.payload;
+    expect(payload.commentId).toBe(createRes.body.id);
   });
 });
 
@@ -249,14 +267,9 @@ describe('@mention notifications', () => {
   let mentionedUserId: string;
 
   beforeEach(async () => {
-    // Register a second user to be mentioned
-    await request(app).post('/api/auth/register').send({
-      email: 'mentioned@example.com',
-      password: 'SecurePass123',
-      displayName: 'Mentioned User',
-    });
-    const row = await queryOne(`SELECT id FROM users WHERE email = 'mentioned@example.com'`) as { id: string };
-    mentionedUserId = row.id;
+    const user = await ensureTestUser({ email: 'mentioned@example.com' });
+    mentionedUserId = user.id;
+    await execute('UPDATE users SET display_name = $1 WHERE id = $2', ['Mentioned User', mentionedUserId]);
   });
 
   it('creates a notification when a user is @mentioned', async () => {
@@ -290,13 +303,9 @@ describe('@mention notifications', () => {
   });
 
   it('creates separate notifications for multiple mentions', async () => {
-    // Register a third user
-    await request(app).post('/api/auth/register').send({
-      email: 'third@example.com',
-      password: 'SecurePass123',
-      displayName: 'Third User',
-    });
-    const thirdRow = await queryOne(`SELECT id FROM users WHERE email = 'third@example.com'`) as { id: string };
+    const thirdUser = await ensureTestUser({ email: 'third@example.com' });
+    await execute('UPDATE users SET display_name = $1 WHERE id = $2', ['Third User', thirdUser.id]);
+    const thirdRow = { id: thirdUser.id };
 
     const res = await request(app)
       .post(`/api/specs/${SPEC_ID}/stories/${STORY_ID}/comments`)

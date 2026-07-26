@@ -73,7 +73,7 @@ describe('checkpoint reconciliation attestation contract', () => {
   it('resolves only an existing trusted attestation without creating one', async () => {
     mockedQueryOne.mockResolvedValueOnce({
       id: ATTESTATION_ID, evidence_digest: DIGEST, validation_gate: 'ci',
-      expires_at: '2026-07-05T00:00:00.000Z',
+      passed_at: '2026-07-04T23:59:00.000Z', expires_at: '2026-07-05T00:00:00.000Z',
     });
     await expect(getCheckpointAttestationReference({
       workspaceId: input.workspaceId, runId: input.runId, storyId: input.storyId,

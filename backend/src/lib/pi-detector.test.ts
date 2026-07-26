@@ -1,87 +1,63 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
-import { spawnSync } from 'child_process';
+const mockProbeSync = jest.fn();
+const mockProbe = jest.fn();
+jest.mock('./autonomous-cli-probe', () => ({
+  probeAutonomousCliSync: (...args: unknown[]) => mockProbeSync(...args),
+  probeAutonomousCli: (...args: unknown[]) => mockProbe(...args),
+}));
 
-jest.mock('child_process');
+import { detectPi, detectPiAsync, detectPiAvailability, listPiModels, parsePiModelTable } from './pi-detector';
 
-const mockedSpawnSync = spawnSync as jest.MockedFunction<typeof spawnSync>;
+beforeEach(() => {
+  jest.clearAllMocks();
+  delete process.env.PI_BIN;
+  mockProbeSync.mockReturnValue({ status: 0, signal: null, stdout: '0.80.6\n', stderr: '' });
+  mockProbe.mockResolvedValue({ status: 0, signal: null, stdout: '0.80.6\n', stderr: '' });
+});
 
-describe('pi-detector', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    delete process.env.PI_BIN;
+test("parsePiModelTable('') returns [] and parses valid rows", () => {
+  expect(parsePiModelTable('')).toEqual([]);
+  const table = [
+    '│ Provider  Model              Context Tokens  Max Out Tokens  Thinking  Images │',
+    '│ openai    gpt-5              400000          128000          true      false  │',
+  ].join('\n');
+  expect(parsePiModelTable(table)).toEqual([{
+    provider: 'openai', model: 'gpt-5', contextTokens: 400000,
+    maxOutTokens: 128000, thinking: true, images: false,
+  }]);
+});
+
+test('availability is process-free and bad configured paths are unavailable', () => {
+  process.env.PI_BIN = process.execPath;
+  expect(detectPiAvailability()).toEqual({ piInstalled: true, piVersion: null, piBinPath: process.execPath });
+  expect(mockProbeSync).not.toHaveBeenCalled();
+  process.env.PI_BIN = '/definitely/missing/pi';
+  expect(detectPi()).toEqual({ piInstalled: false, piVersion: null, piBinPath: null });
+});
+
+test('sync and async version probes disable extensions/network and use the sandbox helper', async () => {
+  process.env.PI_BIN = process.execPath;
+  expect(detectPi()).toEqual({ piInstalled: true, piVersion: '0.80.6', piBinPath: process.execPath });
+  expect(await detectPiAsync()).toEqual({ piInstalled: true, piVersion: '0.80.6', piBinPath: process.execPath });
+  expect(mockProbeSync).toHaveBeenCalledWith(
+    process.execPath, ['--no-extensions', '--offline', '--version'], { timeoutMs: 2_000 },
+  );
+  expect(mockProbe).toHaveBeenCalledWith(
+    process.execPath, ['--no-extensions', '--offline', '--version'], { timeoutMs: 1_000 },
+  );
+});
+
+test('model listing cannot bypass the sandboxed probe helper', () => {
+  mockProbeSync.mockReturnValue({
+    status: 0, signal: null,
+    stdout: '│ openai  gpt-5  400000  128000  true  false │', stderr: '',
   });
-
-  it("parsePiModelTable('') returns []", () => {
-    const { parsePiModelTable } = require('./pi-detector') as typeof import('./pi-detector');
-    expect(parsePiModelTable('')).toEqual([]);
-  });
-
-  it('parsePiModelTable parses a valid ASCII table row', () => {
-    const { parsePiModelTable } = require('./pi-detector') as typeof import('./pi-detector');
-    const table = [
-      '│ Provider  Model              Context Tokens  Max Out Tokens  Thinking  Images │',
-      '│ openai    gpt-5              400000          128000          true      false  │',
-    ].join('\n');
-
-    expect(parsePiModelTable(table)).toEqual([
-      {
-        provider: 'openai',
-        model: 'gpt-5',
-        contextTokens: 400000,
-        maxOutTokens: 128000,
-        thinking: true,
-        images: false,
-      },
-    ]);
-  });
-
-  it('detectPi returns the missing-binary shape for a bad PI_BIN path', () => {
-    process.env.PI_BIN = '/definitely/missing/pi';
-    mockedSpawnSync.mockReturnValue({ status: 1, stdout: '', stderr: '' } as ReturnType<typeof spawnSync>);
-
-    const { detectPi } = require('./pi-detector') as typeof import('./pi-detector');
-
-    expect(detectPi()).toEqual({
-      piInstalled: false,
-      piVersion: null,
-      piBinPath: null,
-    });
-  });
-
-  it('detectPiAvailability checks the configured executable without spawning Pi', () => {
-    process.env.PI_BIN = process.execPath;
-
-    const { detectPiAvailability } = require('./pi-detector') as typeof import('./pi-detector');
-
-    expect(detectPiAvailability()).toEqual({
-      piInstalled: true,
-      piVersion: null,
-      piBinPath: process.execPath,
-    });
-    expect(mockedSpawnSync).not.toHaveBeenCalled();
-  });
-
-  it('detectPi disables extensions and network startup during its version probe', () => {
-    process.env.PI_BIN = '/usr/local/bin/pi';
-    mockedSpawnSync.mockReturnValue({ status: 0, stdout: '0.80.6\n', stderr: '' } as ReturnType<typeof spawnSync>);
-
-    const { detectPi } = require('./pi-detector') as typeof import('./pi-detector');
-
-    expect(detectPi()).toEqual({
-      piInstalled: true,
-      piVersion: '0.80.6',
-      piBinPath: '/usr/local/bin/pi',
-    });
-    expect(mockedSpawnSync).toHaveBeenCalledWith(
-      '/usr/local/bin/pi',
-      ['--no-extensions', '--offline', '--version'],
-      expect.objectContaining({ timeout: 2_000, killSignal: 'SIGKILL' }),
-    );
-  });
+  expect(listPiModels(process.execPath)).toHaveLength(1);
+  expect(mockProbeSync).toHaveBeenCalledWith(process.execPath, ['--list-models'], { timeoutMs: 10_000 });
 });

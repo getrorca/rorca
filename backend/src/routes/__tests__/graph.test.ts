@@ -8,42 +8,48 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Express } from 'express';
+import { randomUUID } from 'crypto';
+import type { Server } from 'http';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { execute } from '../../db/index';
+import { execute, queryOne } from '../../db/index';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let workspacePath: string;
 let authToken: string;
+const workspaceId = `ws-graph-${randomUUID()}`;
 
-beforeEach(async () => {
-  jest.resetModules();
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-graph-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-// Create a workspace with spec directories
   workspacePath = path.join(tmpDir, 'test-project');
   fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'pending'), { recursive: true });
   await execute(
-    `INSERT INTO workspaces (id, label, path)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, path = EXCLUDED.path`,
-    ['ws-1', 'Test', workspacePath],
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`,
+    [workspaceId, 'Graph route test', workspacePath],
   );
-  authToken = await getAuthToken(app);
+
+  const serverMod = require('../../server');
+  app = serverMod.default.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    app.once('listening', resolve);
+    app.once('error', reject);
+  });
+  authToken = await getAuthToken();
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+afterAll(async () => {
+  await execute('DELETE FROM retrieval_feedback WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM retrieval_telemetry_events WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)', [workspaceId]);
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 function writeSpec(slug: string, spec: object, status: 'pending' | 'approved' = 'approved') {
@@ -61,7 +67,7 @@ test('returns DAG with nodes, edges, and parallelGroups for a linear dependency 
     ],
   });
 
-  const res = await request(app).get('/api/specs/my-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/my-spec/graph?workspaceId=${workspaceId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.nodes).toHaveLength(3);
@@ -83,7 +89,7 @@ test('groups independent stories into the same parallel group', async () => {
     ],
   });
 
-  const res = await request(app).get('/api/specs/parallel-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/parallel-spec/graph?workspaceId=${workspaceId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   // US-001 and US-002 have no deps, should be in first group
@@ -103,7 +109,7 @@ test('detects circular dependencies and returns 422 with cycle path', async () =
     ],
   });
 
-  const res = await request(app).get('/api/specs/cycle-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/cycle-spec/graph?workspaceId=${workspaceId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(422);
   expect(res.body.error).toMatch(/[Cc]ircular dependency/);
@@ -123,12 +129,17 @@ test('includes story status from pipeline run when runId is provided', async () 
   });
 
   // Create a pipeline run and story results
-  await execute(`INSERT INTO pipeline_runs (id, workspace_id, spec_path, status, started_at) VALUES ($1, $2, $3, $4, NOW())`, [1, 'ws-1', 'forge/specs/approved/status-spec.json', 'running']);
+  const run = await queryOne<{ id: string }>(
+    `INSERT INTO pipeline_runs (workspace_id, spec_path, status, started_at)
+     VALUES ($1, $2, $3, NOW()) RETURNING id`,
+    [workspaceId, 'forge/specs/approved/status-spec.json', 'running'],
+  );
+  expect(run).toBeDefined();
 
-  await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [1, 'US-001', 'pass']);
-  await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [1, 'US-002', 'fail']);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [run!.id, 'US-001', 'pass']);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [run!.id, 'US-002', 'fail']);
 
-  const res = await request(app).get('/api/specs/status-spec/graph?workspaceId=ws-1&runId=1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/status-spec/graph?workspaceId=${workspaceId}&runId=${run!.id}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   const nodeMap = new Map<string, any>(res.body.nodes.map((n: any) => [n.id, n]));
@@ -144,7 +155,7 @@ test('returns 400 when workspaceId is missing', async () => {
 });
 
 test('returns 404 when spec does not exist', async () => {
-  const res = await request(app).get('/api/specs/nonexistent/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/nonexistent/graph?workspaceId=${workspaceId}`).set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(404);
   expect(res.body.error).toMatch(/not found/i);
 });
@@ -152,7 +163,7 @@ test('returns 404 when spec does not exist', async () => {
 test('returns empty graph for spec with no stories', async () => {
   writeSpec('empty-spec', { title: 'Empty', userStories: [] });
 
-  const res = await request(app).get('/api/specs/empty-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/empty-spec/graph?workspaceId=${workspaceId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.nodes).toEqual([]);
@@ -169,7 +180,7 @@ test('ignores dependsOn references to non-existent story IDs', async () => {
     ],
   });
 
-  const res = await request(app).get('/api/specs/dangling-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/dangling-spec/graph?workspaceId=${workspaceId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   // US-999 doesn't exist, so US-001 has no valid deps — it's in first group
@@ -188,7 +199,7 @@ test('reads spec from pending directory when not in approved', async () => {
     ],
   }, 'pending');
 
-  const res = await request(app).get('/api/specs/pending-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await request(app).get(`/api/specs/pending-spec/graph?workspaceId=${workspaceId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.nodes).toHaveLength(1);
@@ -200,7 +211,7 @@ test('returns retrieval telemetry, durable events, and feedback summaries for op
   clearRetrievalTelemetry();
 
   const event = recordRetrievalTelemetry({
-    workspaceId: 'ws-1',
+    workspaceId,
     queryPreview: 'Add auth guard',
     matchedSkills: ['Auth Security'],
     selectedCandidateKeys: ['memory:42'],
@@ -269,8 +280,8 @@ test('returns retrieval telemetry, durable events, and feedback summaries for op
           finalPosition: 1,
           rerankedBy: 'graph',
           tieBreak: {
-            canonicalKey: 'memory:ws-1::42',
-            sourceStoryKey: 'story:ws-1::spec-graph::US-001',
+            canonicalKey: `memory:${workspaceId}::42`,
+            sourceStoryKey: `story:${workspaceId}::spec-graph::US-001`,
             storySlug: 'US-001',
             candidateId: '42',
           },
@@ -289,15 +300,15 @@ test('returns retrieval telemetry, durable events, and feedback summaries for op
        success_count, failure_count, observation_count, usefulness_score,
        last_seen_at, updated_at
      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
-    ['ws-1', 'memory:42', 'memory', 'Auth Security', 3, 1, 4, 0.8],
+    [workspaceId, 'memory:42', 'memory', 'Auth Security', 3, 1, 4, 0.8],
   );
 
   const res = await request(app)
-    .get('/api/graph/retrieval-telemetry?workspaceId=ws-1&limit=5')
+    .get(`/api/graph/retrieval-telemetry?workspaceId=${workspaceId}&limit=5`)
     .set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.workspaceId).toBe('ws-1');
+  expect(res.body.workspaceId).toBe(workspaceId);
   expect(res.body.events).toHaveLength(1);
   expect(res.body.events[0].selectedCandidateKeys).toContain('memory:42');
   expect(res.body.events[0].scoringVersion).toBe('v2');

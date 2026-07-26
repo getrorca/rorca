@@ -6,6 +6,7 @@
  */
 
 import crypto from 'crypto';
+import nodeFs from 'node:fs';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -137,7 +138,7 @@ function assertContainedPath(candidate: string, root: string): void {
 
 export function resolveTaskManifestArtifactPaths(workspacePath: string, manifestId: string): TaskManifestArtifactPaths {
   const safeManifestId = validateTaskManifestId(manifestId);
-  const workspaceRoot = path.resolve(workspacePath);
+  const workspaceRoot = nodeFs.realpathSync(workspacePath);
   const artifactRoot = path.resolve(workspaceRoot, TASK_MANIFEST_ARTIFACT_ROOT);
   const artifactDir = path.resolve(artifactRoot, safeManifestId);
 
@@ -405,14 +406,57 @@ export function renderTaskManifestTasksMarkdown(manifest: TaskManifest): string 
   return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
 }
 
+async function ensureSafeArtifactDirectory(paths: TaskManifestArtifactPaths): Promise<void> {
+  const components = [
+    path.join(paths.workspacePath, 'forge'),
+    paths.artifactRoot,
+    paths.artifactDir,
+  ];
+  for (const component of components) {
+    try {
+      const stat = await fs.lstat(component);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new ConflictError('Task manifest artifact directory contains a symlink or non-directory component');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await fs.mkdir(component);
+      const created = await fs.lstat(component);
+      if (created.isSymbolicLink() || !created.isDirectory()) {
+        throw new ConflictError('Task manifest artifact directory creation lost its filesystem authority');
+      }
+    }
+  }
+  const realArtifactDir = await fs.realpath(paths.artifactDir);
+  assertContainedPath(realArtifactDir, paths.artifactRoot);
+}
+
 async function readExistingManifest(manifestPath: string): Promise<unknown | null> {
   try {
-    return JSON.parse(await fs.readFile(manifestPath, 'utf8')) as unknown;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null;
+    const stat = await fs.lstat(manifestPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new ConflictError('Task manifest authority file must be a regular non-symlink file');
     }
+    const handle = await fs.open(manifestPath, nodeFs.constants.O_RDONLY | (nodeFs.constants.O_NOFOLLOW ?? 0));
+    try { return JSON.parse(await handle.readFile('utf8')) as unknown; }
+    finally { await handle.close(); }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
+  }
+}
+
+async function writeExclusiveArtifact(filePath: string, content: string): Promise<void> {
+  const handle = await fs.open(
+    filePath,
+    nodeFs.constants.O_WRONLY | nodeFs.constants.O_CREAT | nodeFs.constants.O_EXCL | (nodeFs.constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    await handle.writeFile(content, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
   }
 }
 
@@ -442,6 +486,7 @@ export async function writeTaskManifestArtifact(input: WriteTaskManifestArtifact
   const paths = resolveTaskManifestArtifactPaths(input.workspacePath, manifest.manifestId);
   const manifestJson = canonicalTaskManifestJson(manifest);
   const manifestHash = sha256(manifestJson);
+  await ensureSafeArtifactDirectory(paths);
   const existing = await readExistingManifest(paths.manifestPath);
 
   if (existing) {
@@ -459,11 +504,9 @@ export async function writeTaskManifestArtifact(input: WriteTaskManifestArtifact
     throw conflictForExistingManifest(manifest, existing, existingHash, manifestHash);
   }
 
-  await fs.mkdir(paths.artifactDir, { recursive: true });
-
   try {
-    await fs.writeFile(paths.tasksMdPath, renderTaskManifestTasksMarkdown(manifest), { flag: 'wx' });
-    await fs.writeFile(paths.manifestPath, manifestJson, { flag: 'wx' });
+    await writeExclusiveArtifact(paths.tasksMdPath, renderTaskManifestTasksMarkdown(manifest));
+    await writeExclusiveArtifact(paths.manifestPath, manifestJson);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       const racedManifest = await readExistingManifest(paths.manifestPath);

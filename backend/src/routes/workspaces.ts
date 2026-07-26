@@ -19,10 +19,12 @@ import {
   getLatestHash,
 } from '../lib/git-hydrator';
 import { autoHydrateWorkspaceContext, buildContextHealthSummary } from '../lib/auto-memory';
+import { parseGitReduceYaml } from '../lib/git-yaml-parser';
 import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { echolocate, computeHealthReport, discoverMonorepo, generateMonorepoCLAUDESection, inferSkillsFromStack } from '../lib/workspace-echolocation';
+import { RORCA_GRAPH_NAME } from '../lib/graph-contract';
 import { graphStats } from '../lib/knowledge-graph';
 import { getEmbeddingCounts } from '../lib/embedding-pipeline';
 import { loadRorcaConfig, writeRorcaConfig, hasRorcaDir, ensureRorcaDirStructure, defaultRorcaConfig } from '../lib/rorca-config';
@@ -78,6 +80,8 @@ function parseWorkspace(row: WorkspaceRow) {
  * @swagger
  * /api/workspaces:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Register a new workspace
  *     operationId: createWorkspace
@@ -112,25 +116,6 @@ function parseWorkspace(row: WorkspaceRow) {
  *                 workspace: { $ref: '#/components/schemas/Workspace' }
  *       400: { description: "Missing fields or path not found" }
  *       409: { description: "Workspace already exists" }
- *   get:
- *     tags: [Workspaces]
- *     summary: List all registered workspaces
- *     operationId: listWorkspaces
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only workspace discovery is required by the standalone capture sidecar to resolve a local repo to a Rorca workspace via the stable API-only contract."
- *     x-rorca-public-api: true
- *     description: Returns a paginated list of all registered workspaces ordered by creation date descending.
- *     responses:
- *       200:
- *         description: List of workspaces
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 workspaces:
- *                   type: array
- *                   items: { $ref: '#/components/schemas/Workspace' }
  */
 const CreateWorkspaceSchema = z.object({
   id: z.string().min(1),
@@ -405,7 +390,7 @@ router.get('/:id/status', async (req, res, next) => {
         graphMode: databaseCapability.graphMode,
         vertexCount: stats.vertexCount,
         edgeCount: stats.edgeCount,
-        graphName: 'rorca',
+        graphName: RORCA_GRAPH_NAME,
         lastPopulatedAt: lastEvent?.ts ?? null,
         warnings: databaseCapability.warnings,
       },
@@ -419,6 +404,8 @@ router.get('/:id/status', async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}/context:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Get workspace hydrated context (schema + git)
  *     operationId: getWorkspaceContext
@@ -467,6 +454,8 @@ router.get('/:id/context', async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}/hydrate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Hydrate workspace context (schema and/or git)
  *     operationId: hydrateWorkspaceContext
@@ -595,8 +584,17 @@ router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
           return;
         }
 
-        // git_memory column was dropped (migration 075) — knowledge now lives in memories table.
-        // _gitMemory is intentionally retained only for local flow symmetry and future response hooks.
+        // git_memory column was dropped (migration 075). Persist each bounded
+        // reduced rule in the canonical memories table before advancing the
+        // hydration cursor so a successful response cannot discard knowledge.
+        for (const entry of parseGitReduceYaml(_gitMemory)) {
+          await execute(
+            `INSERT INTO memories
+               (workspace_id, category, content, confidence, related_files, source_type, source)
+             VALUES ($1, $2, $3, 'medium', '[]'::jsonb, 'import', 'git_hydration')`,
+            [id, entry.category, `${entry.title}: ${entry.rule}`],
+          );
+        }
       } else {
         _gitMemory = '';
       }
@@ -632,6 +630,8 @@ router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}/files:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Check which files exist in a workspace
  *     operationId: checkWorkspaceFiles
@@ -739,47 +739,6 @@ router.get('/:id/files', async (req, res, next) => {
  *               properties:
  *                 workspace: { $ref: '#/components/schemas/Workspace' }
  *       404: { description: "Workspace not found" }
- *   patch:
- *     tags: [Workspaces]
- *     summary: Update workspace settings
- *     operationId: updateWorkspace
- *     description: >
- *       Updates one or more workspace fields (label, path, domains, pr_template).
- *       Only provided fields are updated; omitted fields remain unchanged.
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               pr_template: { type: string, nullable: true }
- *     responses:
- *       200:
- *         description: Updated workspace
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 workspace: { $ref: '#/components/schemas/Workspace' }
- *       404: { description: "Workspace not found" }
- *   delete:
- *     tags: [Workspaces]
- *     summary: Delete a workspace
- *     operationId: deleteWorkspace
- *     description: Deletes a workspace record by ID and emits a workspace_delete WAL event.
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       204: { description: "Deleted" }
  */
 router.get('/:id', async (req, res, next) => {
   try {
@@ -934,6 +893,8 @@ router.patch('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}/pipeline-config:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Get pipeline configuration for a workspace
  *     operationId: getWorkspacePipelineConfig
@@ -993,6 +954,8 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}/pipeline-config:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Update pipeline configuration for a workspace
  *     operationId: updateWorkspacePipelineConfig
@@ -1311,6 +1274,8 @@ router.get('/:id/team-members', async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}/scan-direction:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Scan repo and generate draft direction layers
  *     operationId: scanWorkspaceDirection
@@ -1640,6 +1605,8 @@ router.get('/:id/health', async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}/echolocate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Scan workspace to detect tech stack, context files, and compute health score
  *     operationId: echolocateWorkspace
@@ -1737,6 +1704,8 @@ router.post('/:id/echolocate', requireWorkspaceAdmin(), async (req, res, next) =
  * @swagger
  * /api/workspaces/{id}/monorepo/discover:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Discover monorepo structure and generate per-app scopes + AGENTS.md
  *     operationId: discoverMonorepo
@@ -1869,6 +1838,8 @@ router.post('/:id/monorepo/discover', requireWorkspaceAdmin(), async (req, res, 
  * @swagger
  * /api/workspaces/{id}/scaffold:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Generate or write context/intent scaffolding for a workspace
  *     operationId: scaffoldWorkspace
@@ -2019,6 +1990,8 @@ router.post('/:id/scaffold', requireWorkspaceAdmin(), async (req, res, next) => 
  * @swagger
  * /api/workspaces/{id}/bootstrap:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Chain all workspace intelligence into one call
  *     operationId: bootstrapWorkspace
@@ -2272,6 +2245,8 @@ router.post('/:id/bootstrap', requireWorkspaceAdmin(), async (req, res, next) =>
  * @swagger
  * /api/workspaces/{id}/bootstrap/commit:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Commit bootstrap wizard results to DB
  *     operationId: commitBootstrapResults
@@ -2496,6 +2471,8 @@ ${dirListing.join('\n') || '(empty)'}
  * @swagger
  * /api/workspaces/{id}/context-health:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Get context readiness indicators for the Spec Forge pre-flight checklist
  *     operationId: getWorkspaceContextHealth
@@ -2604,6 +2581,8 @@ router.get('/:id/context-health', async (req, res, next) => {
  * @swagger
  * /api/workspaces/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Workspaces]
  *     summary: Delete a workspace
  *     operationId: deleteWorkspace

@@ -26,8 +26,6 @@ import { subscribe, broadcastAll, type WalEvent } from '../sse-hub';
 import { queryOne, query, execute } from '../../db/index';
 import { getBoss } from '../pg-boss';
 import { logger } from '../logger';
-import { decryptToken } from '../../lib/auth-utils';
-import { githubRateLimiter } from '../github-rate-limiter';
 import type { CiCheckFailure, CiAnnotation } from './webhook-handler';
 import type { AgentType } from '../config';
 
@@ -57,15 +55,6 @@ interface CiAutofixRunRow {
   check_run_name: string;
   run_id: number;
   agent_type: string;
-}
-
-interface GitHubWebhookRow {
-  repo_owner: string;
-  repo_name: string;
-}
-
-interface GitHubConnectionRow {
-  encrypted_token: string;
 }
 
 interface StoryResultRow {
@@ -337,7 +326,7 @@ async function handleCiCheckFailed(event: WalEvent): Promise<void> {
  * When a pipeline run triggered by CI autofix completes, close the feedback loop:
  * 1. Look up ci_autofix_runs row by run_id
  * 2. Determine outcome from pipeline_runs.status and story_results
- * 3. Post GitHub commit status on the original SHA
+ * 3. Record local/WAL completion only (automatic provider status is disabled)
  * 4. Update ci_autofix_runs row with final status
  * 5. Emit ci_autofix_completed WAL event
  */
@@ -388,62 +377,9 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
 
   const finalStatus = success ? 'completed' : 'failed';
 
-  // 3. Post GitHub commit status
-  const repoInfo = await queryOne<GitHubWebhookRow>(
-    'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1',
-    [autofixRow.workspace_id],
-  );
-
-  if (repoInfo) {
-    const token = await getGithubTokenForWorkspace();
-    if (token) {
-      const state = success ? 'success' : 'failure';
-      const description = success
-        ? `Rorca autofix: all errors in ${autofixRow.check_run_name} resolved`
-        : `Rorca autofix: could not resolve all errors in ${autofixRow.check_run_name} — manual fix required`;
-
-      const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:5210';
-      const targetUrl = `${baseUrl}/runs/${runId}`;
-
-      const url = `https://api.github.com/repos/${repoInfo.repo_owner}/${repoInfo.repo_name}/statuses/${autofixRow.head_sha}`;
-      try {
-        const res = await githubRateLimiter.execute(() =>
-          fetch(url, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: 'application/vnd.github+json',
-              'Content-Type': 'application/json',
-              'X-GitHub-Api-Version': '2022-11-28',
-            },
-            body: JSON.stringify({
-              state,
-              context: 'Rorca CI Autofix',
-              description: description.slice(0, 140),
-              target_url: targetUrl,
-            }),
-          }),
-        );
-
-        if (!res.ok) {
-          const text = await res.text();
-          logger.warn({ status: res.status, text }, '[CI Autofix] GitHub commit status API error');
-        } else {
-          logger.info(
-            `[CI Autofix] Posted ${state} commit status for ${autofixRow.head_sha.slice(0, 7)} (${autofixRow.check_run_name})`,
-          );
-        }
-      } catch (err) {
-        logger.warn({ err }, '[CI Autofix] Failed to post GitHub commit status');
-      }
-    } else {
-      logger.warn('[CI Autofix] No GitHub token available — skipping commit status post');
-    }
-  } else {
-    logger.warn(
-      `[CI Autofix] No GitHub connection for workspace ${autofixRow.workspace_id} — skipping commit status post`,
-    );
-  }
+  // Automatic provider status mutation is deliberately disabled. CI autofix
+  // records durable local/WAL outcome only; terminal GitHub projection remains
+  // owned by the exact run release/Check Run reconciler.
 
   // 4. Update ci_autofix_runs row
   await execute(
@@ -478,15 +414,6 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
   logger.info(
     `[CI Autofix] Feedback loop complete for run #${runId}: ${finalStatus} (${passed.length} passed, ${failed.length} failed)`,
   );
-}
-
-/** Get GitHub token (workspace-agnostic, single-user mode). */
-async function getGithubTokenForWorkspace(): Promise<string | null> {
-  const row = await queryOne<GitHubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1',
-  );
-  if (!row) return null;
-  return decryptToken(row.encrypted_token);
 }
 
 // ─── Startup ────────────────────────────────────────────────────────────────

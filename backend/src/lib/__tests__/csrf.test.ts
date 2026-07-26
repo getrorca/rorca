@@ -5,6 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import express from 'express';
+import request from 'supertest';
 import { csrfProtection, generateCsrfToken, setCsrfCookie } from '../csrf';
 import { CsrfError } from '../errors';
 import type { Request, Response, NextFunction } from 'express';
@@ -98,15 +100,88 @@ describe('csrfProtection middleware', () => {
 
   // ─── Exempt paths ───
 
-  test('webhook paths are exempt', () => {
+  test('exact provider callback paths are exempt', () => {
     const req = mockReq({
       method: 'POST',
       originalUrl: '/api/webhooks/github',
-      headers: {},
+      headers: { origin: 'https://rorca.example' },
     });
     const res = mockRes();
     csrfProtection(req, res, next);
     expect(next).toHaveBeenCalled();
+  });
+
+  test('webhook administration replay remains CSRF protected without Origin', () => {
+    const req = mockReq({
+      method: 'POST',
+      originalUrl: '/api/webhooks/dlq/7/retry',
+      headers: {},
+    });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    '/api/webhooks/dlq/%31/retry',
+    '/API/WEBHOOKS/DLQ/1/RETRY',
+    '/api//webhooks///dlq//1//retry',
+    '/api/webhooks/dlq/1/retry?source=operator',
+    '/api/webhooks/dlq/1/retry/',
+  ])('mounted replay variant %s cannot use the no-Origin bypass', async (pathname) => {
+    const app = express();
+    app.use(csrfProtection);
+    app.post('/api/webhooks/dlq/:id/retry', (_req, res) => res.json({ ok: true }));
+    app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      const candidate = error as { statusCode?: number; message?: string };
+      res.status(candidate.statusCode ?? 500).json({ error: candidate.message });
+    });
+    const response = await request(app).post(pathname);
+    expect(response.status).toBe(403);
+    expect(response.body.error).toContain('Missing CSRF cookie');
+  });
+
+  test.each([
+    '/api/webhooks/dlq/%ZZ/retry',
+    '/api/%2fwebhooks/dlq/%ZZ/retry',
+    '/api/%252fwebhooks/dlq/%ZZ/retry',
+    '/api/%25252fwebhooks/dlq/1/retry',
+    '/api/webhooks/dlq/1/retry%00',
+    '/api/webhooks/ignored/%2e%2e/dlq/1/retry',
+  ])('malformed API path %s fails closed without Origin', (pathname) => {
+    const req = mockReq({ method: 'POST', originalUrl: pathname, headers: {} });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    '/api//webhooks/github',
+    '/api/webhooks/%67ithub',
+    '/api/webhooks/github/',
+    '/API/WEBHOOKS/GITHUB',
+  ])('provider callback lookalike %s is not an exact CSRF exemption', (pathname) => {
+    const req = mockReq({
+      method: 'POST', originalUrl: pathname, headers: { origin: 'https://attacker.example' },
+    });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('callback-prefix lookalikes are not CSRF exempt', () => {
+    const req = mockReq({
+      method: 'POST',
+      originalUrl: '/api/webhooks/github/extra',
+      headers: { origin: 'https://attacker.example' },
+    });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test.each(['/mcp-evil', '/api/healthcheck', '/api/docs-private'])('%s is not a prefix-lookalike exemption', (pathname) => {
+    const req = mockReq({
+      method: 'POST', originalUrl: pathname, headers: { origin: 'https://attacker.example' },
+    });
+    expect(() => csrfProtection(req, mockRes(), next)).toThrow('Missing CSRF cookie');
+    expect(next).not.toHaveBeenCalled();
   });
 
   test('health check is exempt', () => {
@@ -157,7 +232,7 @@ describe('csrfProtection middleware', () => {
     const req = mockReq({
       method: 'POST',
       originalUrl: '/api/specs/generate',
-      headers: {},
+      headers: { origin: 'https://rorca.example' },
     });
     const res = mockRes();
     expect(() => csrfProtection(req, res, next)).toThrow(CsrfError);
@@ -171,7 +246,7 @@ describe('csrfProtection middleware', () => {
     const req = mockReq({
       method: 'POST',
       originalUrl: '/api/specs/generate',
-      headers: { cookie: `_csrf=${token}` },
+      headers: { cookie: `_csrf=${token}`, origin: 'https://rorca.example' },
     });
     const res = mockRes();
     expect(() => csrfProtection(req, res, next)).toThrow(CsrfError);
@@ -189,6 +264,7 @@ describe('csrfProtection middleware', () => {
       headers: {
         cookie: `_csrf=${token}`,
         'x-csrf-token': 'wrong-token-value',
+        origin: 'https://rorca.example',
       },
     });
     const res = mockRes();
@@ -285,6 +361,7 @@ describe('csrfProtection middleware', () => {
       headers: {
         cookie: `_csrf=${token}`,
         'x-csrf-token': 'short',
+        origin: 'https://rorca.example',
       },
     });
     const res = mockRes();

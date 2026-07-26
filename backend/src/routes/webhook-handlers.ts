@@ -28,10 +28,11 @@ import * as path from 'path';
 import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
-import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
 import { logger } from '../lib/logger';
-import { decryptToken } from '../lib/auth-utils';
+import { resolveWorkspaceGitHubToken } from '../lib/github-token-resolver';
+import { githubRepoApiUrl } from '../lib/github-repository-authority';
+import { fetchGithubWithTimeout } from '../lib/github-app-credential-provider';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -381,11 +382,11 @@ export function handlePullRequestCheck(
   const [owner, repo] = repoFullName.split('/');
   if (!owner || !repo) return;
 
-  // Fire and forget — the check is posted asynchronously
-  evaluatePrAndPostCheck(owner, repo, prNumber, headSha, prTitle, branchName, workspaceId)
-    .catch(err => {
-      logger.error(`[Webhook] Check evaluation failed for PR #${prNumber}:`, err);
-    });
+  // Provider status mutation from PR webhooks is intentionally disabled. The
+  // signed event remains local evidence; only the durable exact run Check Run
+  // reconciler may project an automatic provider outcome.
+  logger.info({ owner, repo, prNumber, headSha, prTitle, branchName, workspaceId },
+    '[Webhook] PR update recorded without automatic provider status mutation');
 }
 
 // ─── Push spec discovery handler ────────────────────────────────────────────
@@ -405,23 +406,20 @@ const SpecFileSchema = z.object({
   userStories: z.array(SpecUserStorySchema).min(1),
 });
 
-interface GithubConnectionRow {
-  encrypted_token: string;
-}
-
 /**
  * Fetch raw file content from GitHub API.
  * Returns null if the file cannot be fetched.
  */
 async function fetchGithubFileContent(
-  repoFullName: string,
+  owner: string,
+  repo: string,
   filePath: string,
   ref: string,
   token: string,
 ): Promise<string | null> {
   try {
-    const url = `https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(ref)}`;
-    const resp = await fetch(url, {
+    const url = githubRepoApiUrl(owner, repo, `/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(ref)}`);
+    const resp = await fetchGithubWithTimeout(fetch, url, {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/vnd.github.v3.raw',
@@ -429,7 +427,7 @@ async function fetchGithubFileContent(
       },
     });
     if (!resp.ok) {
-      logger.warn(`[Webhook] GitHub API ${resp.status} fetching ${filePath} from ${repoFullName}`);
+      logger.warn(`[Webhook] GitHub API ${resp.status} fetching ${filePath} from ${owner}/${repo}`);
       return null;
     }
     return await resp.text();
@@ -484,17 +482,19 @@ export async function handlePushSpecDiscovery(
   const allSpecPaths = new Set([...addedPaths, ...modifiedPaths]);
   if (allSpecPaths.size === 0) return;
 
-  // Resolve GitHub token
-  const conn = await queryOne<GithubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1'
-  );
-  if (!conn) {
-    logger.warn('[Webhook] No GitHub connection found — cannot fetch spec files');
+  const repoFullName: string = payload.repository?.full_name ?? '';
+  const [repoOwner, repoName] = repoFullName.split('/');
+  if (!repoOwner || !repoName) return;
+  const resolved = await resolveWorkspaceGitHubToken(workspaceId, {
+    repository: { owner: repoOwner, name: repoName },
+    purpose: 'repository-read',
+  });
+  if (!resolved) {
+    logger.warn('[Webhook] No workspace GitHub credential found — cannot fetch spec files');
     return;
   }
-  const token = decryptToken(conn.encrypted_token);
+  const token = resolved.token;
 
-  const repoFullName: string = payload.repository?.full_name ?? '';
   const ref: string = payload.after ?? payload.ref?.replace('refs/heads/', '') ?? 'main';
 
   for (const filePath of allSpecPaths) {
@@ -502,7 +502,7 @@ export async function handlePushSpecDiscovery(
     const isNew = addedPaths.has(filePath);
 
     // Fetch file content from GitHub
-    const content = await fetchGithubFileContent(repoFullName, filePath, ref, token);
+    const content = await fetchGithubFileContent(repoOwner, repoName, filePath, ref, token);
     if (!content) continue;
 
     // Parse JSON

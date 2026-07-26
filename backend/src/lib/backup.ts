@@ -26,8 +26,10 @@ function buildPgDumpEnv(): Record<string, string> {
   const env: Record<string, string> = { ...process.env as Record<string, string> };
 
   if (process.env.DATABASE_URL) {
-    // pg_dump can read DATABASE_URL directly via PGDATABASE or connection string
-    // We pass it as the first positional arg instead
+    // Keep credentials out of argv and child-process error messages. libpq accepts
+    // a connection URI through PGDATABASE, so pg_dump still uses the pool's exact
+    // database identity without exposing it in process listings or logs.
+    env.PGDATABASE = process.env.DATABASE_URL;
   } else {
     env.PGHOST = process.env.PGHOST || 'localhost';
     env.PGPORT = process.env.PGPORT || '5432';
@@ -53,10 +55,6 @@ export async function createBackup(): Promise<{ filename: string; path: string; 
   const backupPath = path.join(backupDir, filename);
 
   const args: string[] = ['--format=custom', '--file', backupPath];
-
-  if (process.env.DATABASE_URL) {
-    args.push(process.env.DATABASE_URL);
-  }
 
   const pgDumpBin = process.env.PG_DUMP_BIN || 'pg_dump';
   await execFileAsync(pgDumpBin, args, {
@@ -90,7 +88,7 @@ export function listBackups(): BackupInfo[] {
       return {
         filename,
         size: stat.size,
-        createdAt: stat.birthtime.toISOString(),
+        createdAt: stat.mtime.toISOString(),
       };
     })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -113,7 +111,7 @@ export function pruneOldBackups(): number {
   for (const filename of files) {
     const filePath = path.join(backupDir, filename);
     const stat = fs.statSync(filePath);
-    if (stat.birthtimeMs < cutoff) {
+    if (stat.mtimeMs < cutoff) {
       fs.unlinkSync(filePath);
       deleted++;
     }

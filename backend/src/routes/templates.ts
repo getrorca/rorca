@@ -135,6 +135,8 @@ async function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  * @swagger
  * /api/templates:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Templates]
  *     summary: Create a template from an approved spec
  *     operationId: createTemplate
@@ -161,26 +163,6 @@ async function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Template' }
  *       400: { description: "Missing required fields" }
- *   get:
- *     tags: [Templates]
- *     summary: List templates
- *     operationId: listTemplates
- *     description: Returns paginated templates filtered by scope (all, personal, or team) with ratings and author info.
- *     parameters:
- *       - in: query
- *         name: scope
- *         schema: { type: string, enum: [all, personal, team], default: all }
- *     responses:
- *       200:
- *         description: List of templates
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 templates:
- *                   type: array
- *                   items: { $ref: '#/components/schemas/Template' }
  */
 router.post('/', async (req: Request, res: Response) => {
   try {
@@ -240,6 +222,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/templates:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Templates]
  *     summary: List templates
  *     operationId: listTemplates
@@ -339,6 +323,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/templates/{id}/rate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Templates]
  *     summary: Rate a template (1-5)
  *     operationId: rateTemplate
@@ -416,6 +402,8 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
  * @swagger
  * /api/templates/{id}/use:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Templates]
  *     summary: Record template usage
  *     operationId: recordTemplateUsage
@@ -472,6 +460,8 @@ router.post('/:id/use', async (req: Request, res: Response) => {
  * @swagger
  * /api/templates/{id}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Templates]
  *     summary: Get a single template
  *     operationId: getTemplate
@@ -487,19 +477,6 @@ router.post('/:id/use', async (req: Request, res: Response) => {
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Template' }
- *       404: { description: "Template not found" }
- *   delete:
- *     tags: [Templates]
- *     summary: Delete a template
- *     operationId: deleteTemplate
- *     description: Permanently deletes the specified template and its associated ratings.
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       204: { description: "Deleted" }
  *       404: { description: "Template not found" }
  */
 router.get('/:id', async (req: Request, res: Response) => {
@@ -539,6 +516,8 @@ router.get('/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/templates/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Templates]
  *     summary: Delete a template
  *     operationId: deleteTemplate

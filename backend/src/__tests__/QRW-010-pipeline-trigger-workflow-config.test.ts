@@ -6,22 +6,24 @@
  */
 
 /**
- * QRW-010: Backend integration — pipeline trigger uses resolveWorkflowConfig
+ * QRW-010: Backend integration — TaskManifest broker resolves workflow config
  *
- * Verifies that POST /api/pipeline/trigger handler:
- *   1. Calls resolveWorkflowConfig('pipeline_execution') instead of reading RORCA_AGENT directly
- *   2. Uses wfConfig.runtime as the resolved agent type (not raw RORCA_AGENT)
- *   3. Preserves the model chain: request body override > specJson.model > wfConfig.model
- *   4. Injects wfConfig.apiKey into the subprocess env vars for the correct provider
- *   5. Has no direct process.env.RORCA_AGENT reads in the trigger critical path
- *      (the resolution is delegated to resolveWorkflowConfig)
+ * Verifies that canonical POST /api/pipeline/task-manifests/trigger execution:
+ *   1. Calls resolveWorkflowConfig('pipeline_execution') rather than reading RORCA_AGENT directly
+ *   2. Uses wfConfig.runtime as the resolved agent type when no higher authority overrides it
+ *   3. Preserves the model chain: request override > manifest/spec metadata > wfConfig.model
+ *   4. Persists only opaque execution-boundary credential references in pg-boss payloads
+ *   5. Creates isolated worktree/PR execution jobs under immutable TaskManifest lineage
  */
 
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import { createServer, type Server } from 'node:http';
 import type { Express } from 'express';
-import request from 'supertest';
+import supertest from 'supertest';
 import { getAuthToken } from '../routes/__tests__/helpers/auth-helper';
 import { query, queryOne, execute } from '../db/index';
 
@@ -39,26 +41,46 @@ jest.mock('../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
+jest.mock('../lib/opencode-detector', () => ({
+  detectOpenCode: jest.fn().mockReturnValue({
+    opencodeInstalled: true,
+    opencodePath: process.execPath,
+    opencodeVersion: '1.0.0',
+  }),
+}));
+
 // Mock pg-boss so pipeline trigger doesn't fail with "getBoss() called before initBoss()"
 jest.mock('../lib/pg-boss', () => ({
   initBoss: jest.fn().mockResolvedValue(undefined),
   getBoss: jest.fn().mockReturnValue({
-    send: jest.fn().mockResolvedValue('mock-job-id'),
+    send: jest.fn().mockImplementation(async (_name: string, _data: unknown, options?: { id?: string }) => options?.id ?? 'mock-job-id'),
     work: jest.fn(),
     stop: jest.fn().mockResolvedValue(undefined),
   }),
 }));
 
 let app: Express;
+let httpServer: Server;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
+const ORIGINAL_PATH = process.env.PATH;
+const ORIGINAL_OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   const serverMod = require('../server');
   app = serverMod.default;
   authToken = await getAuthToken(app);
+  httpServer = createServer(app);
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    httpServer.once('error', onError);
+    httpServer.listen(0, '127.0.0.1', () => {
+      httpServer.off('error', onError);
+      resolve();
+    });
+  });
 
   await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
   await execute(
@@ -80,11 +102,23 @@ beforeEach(async () => {
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'pending'), { recursive: true });
+  execSync('git init -b main', { cwd: wsDir, stdio: 'pipe' });
+  execSync('git config user.email "qrw010@example.test"', { cwd: wsDir, stdio: 'pipe' });
+  execSync('git config user.name "QRW010 Test"', { cwd: wsDir, stdio: 'pipe' });
+  fs.writeFileSync(path.join(wsDir, 'README.md'), '# QRW010\n');
+  execSync('git add README.md && git commit -m "fixture"', { cwd: wsDir, stdio: 'pipe' });
+  const fixtureBinDir = path.join(tmpDir, 'bin');
+  fs.mkdirSync(fixtureBinDir, { recursive: true });
+  fs.writeFileSync(path.join(fixtureBinDir, 'opencode'), '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(path.join(fixtureBinDir, 'opencode'), 0o755);
+  process.env.PATH = `${fixtureBinDir}${path.delimiter}${ORIGINAL_PATH ?? ''}`;
+  process.env.OPENAI_API_KEY = 'test-only-readiness-marker';
 
   // Clean DB state
   await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-qrw010')`);
   await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-qrw010')`);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-qrw010'`);
+  await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = COALESCE(finished_at, NOW())
+    WHERE workspace_id = 'ws-qrw010' AND status NOT IN ('done', 'failed', 'cancelled')`);
   await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-qrw010'`);
 
   // Clear agent_config and workflow_configs so env vars are used as the resolution source.
@@ -119,9 +153,17 @@ afterEach(async () => {
   // Restore any env vars mutated in tests
   delete process.env.RORCA_AGENT;
   delete process.env.RORCA_MODEL;
+  process.env.PATH = ORIGINAL_PATH;
+  if (ORIGINAL_OPENAI_API_KEY === undefined) delete process.env.OPENAI_API_KEY;
+  else process.env.OPENAI_API_KEY = ORIGINAL_OPENAI_API_KEY;
 });
 
 afterAll(async () => {
+  if (httpServer?.listening) {
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((error) => error ? reject(error) : resolve());
+    });
+  }
   delete process.env.NODE_ENV;
 });
 
@@ -147,6 +189,46 @@ function seedSpec(slug: string, overrides: Record<string, unknown> = {}) {
 function getMockSend(): jest.Mock {
   const pgBossMock = jest.requireMock('../lib/pg-boss');
   return pgBossMock.getBoss().send as jest.Mock;
+}
+
+function releaseOneTaskManifestRequest(legacyBody: Record<string, any>): Record<string, any> {
+  const fixturePath = path.join(__dirname, '..', 'lib', '__tests__', 'fixtures', 'hermes-task-manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Record<string, any>;
+  manifest.manifestId = crypto.randomUUID();
+  manifest.idempotencyKey = crypto.randomUUID();
+  manifest.workspaceId = legacyBody.workspaceId;
+  manifest.source = { rorca: { specPath: legacyBody.specPath } };
+  manifest.boundedScope.allowedPaths = [...new Set([
+    ...manifest.boundedScope.allowedPaths,
+    legacyBody.specPath,
+  ])];
+  manifest.tasks[0].targetPaths = [legacyBody.specPath];
+  const sourceSpec = JSON.parse(fs.readFileSync(path.join(wsDir, legacyBody.specPath), 'utf8')) as Record<string, unknown>;
+  if (typeof sourceSpec.agentOverride === 'string') manifest.execution.agentOverride = sourceSpec.agentOverride;
+  else delete manifest.execution.agentOverride;
+  if (typeof sourceSpec.model === 'string') manifest.execution.modelOverride = sourceSpec.model;
+  else delete manifest.execution.modelOverride;
+  manifest.execution.mergeStrategy = 'draft-pr';
+  return {
+    ...legacyBody,
+    manifest,
+    idempotencyKey: manifest.idempotencyKey,
+    autoWorktree: true,
+    autoMerge: false,
+    mergeStrategy: 'draft-pr',
+  };
+}
+
+/** Preserve the integration assertions while routing every mutation through the canonical Release-1 TaskManifest ingress. */
+function request(_target: Express) {
+  return {
+    post: (_legacyPath: string) => {
+      const test = supertest(httpServer).post('/api/pipeline/task-manifests/trigger');
+      const send = test.send.bind(test);
+      test.send = ((body: Record<string, any>) => send(releaseOneTaskManifestRequest(body))) as typeof test.send;
+      return test;
+    },
+  };
 }
 
 // ─── resolveWorkflowConfig is called (not direct env var reads) ───────────────
@@ -384,10 +466,10 @@ describe('QRW-010: model resolution chain in trigger', () => {
   });
 });
 
-// ─── wfConfig.apiKey injection into subprocess env ───────────────────────────
+// ─── Credential references remain opaque in the durable job ─────────────────
 
-describe('QRW-010: wfConfig.apiKey injected into job envOverrides', () => {
-  test('anthropic API key from vault is injected as ANTHROPIC_API_KEY in job envOverrides', async () => {
+describe('QRW-010: workflow provider credentials use execution-boundary references', () => {
+  test('anthropic vault material is not persisted in pg-boss envOverrides', async () => {
     // We mock getVaultKey so we can control what the vault returns
     // without needing real encrypted vault entries
     const vaultMod = require('../routes/vault');
@@ -431,15 +513,19 @@ describe('QRW-010: wfConfig.apiKey injected into job envOverrides', () => {
 
     expect(mockSend).toHaveBeenCalled();
     const jobPayload = mockSend.mock.calls[0][1];
-    // ANTHROPIC_API_KEY must be present in envOverrides when vault returns an anthropic key
     expect(jobPayload.envOverrides).toBeDefined();
-    expect(jobPayload.envOverrides).toHaveProperty('ANTHROPIC_API_KEY', 'sk-ant-vault-test-key');
+    expect(jobPayload.envOverrides).not.toHaveProperty('ANTHROPIC_API_KEY');
+    expect(JSON.stringify(jobPayload)).not.toContain('sk-ant-vault-test-key');
+    expect(jobPayload.secretReferences).toEqual(expect.objectContaining({
+      workspaceId: 'ws-qrw010',
+      providers: expect.arrayContaining(['anthropic']),
+    }));
 
     vaultSpy.mockRestore();
     await execute(`DELETE FROM workflow_configs WHERE workflow_id = 'pipeline_execution'`).catch(() => {});
   });
 
-  test('openrouter API key from vault is injected as OPENROUTER_API_KEY in job envOverrides', async () => {
+  test('openrouter vault material is not persisted in pg-boss envOverrides', async () => {
     const vaultMod = require('../routes/vault');
     const vaultSpy = jest.spyOn(vaultMod, 'getVaultKey').mockImplementation(
       async (...args: unknown[]) => {
@@ -480,7 +566,12 @@ describe('QRW-010: wfConfig.apiKey injected into job envOverrides', () => {
     expect(mockSend).toHaveBeenCalled();
     const jobPayload = mockSend.mock.calls[0][1];
     expect(jobPayload.envOverrides).toBeDefined();
-    expect(jobPayload.envOverrides).toHaveProperty('OPENROUTER_API_KEY', 'sk-or-vault-test-key');
+    expect(jobPayload.envOverrides).not.toHaveProperty('OPENROUTER_API_KEY');
+    expect(JSON.stringify(jobPayload)).not.toContain('sk-or-vault-test-key');
+    expect(jobPayload.secretReferences).toEqual(expect.objectContaining({
+      workspaceId: 'ws-qrw010',
+      providers: expect.arrayContaining(['openrouter']),
+    }));
 
     vaultSpy.mockRestore();
     await execute(`DELETE FROM workflow_configs WHERE workflow_id = 'pipeline_execution'`).catch(() => {});
@@ -684,7 +775,7 @@ describe('QRW-010: pg-boss job payload reflects wfConfig values', () => {
 
     expect(mockSend).toHaveBeenCalled();
     const jobPayload = mockSend.mock.calls[0][1];
-    expect(jobPayload.specPath).toBe('forge/specs/approved/job-payload-paths.json');
+    expect(jobPayload.specPath).toMatch(/^forge\/task-manifests\/[0-9a-f-]+\/hermes-task-manifest-[0-9a-f-]+\.json$/);
     expect(jobPayload.workspacePath).toBe(wsDir);
   });
 });

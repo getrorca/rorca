@@ -1,0 +1,269 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/** Exact immutable identity and local fencing for every release actuator. */
+
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { queryOne, withPgAdvisoryLock } from '../db/index';
+import { assertCanonicalRunCheckout } from './run-git-authority';
+import {
+  getGithubRepositoryAuthority,
+  type GithubRepositoryAuthority,
+} from './github-repository-authority';
+import { isGitSha } from './git-sha';
+import {
+  resolveWorkspaceGitHubToken,
+  type GithubCredentialPurpose,
+  type ResolvedGitHubToken,
+} from './github-token-resolver';
+
+const LOCK_WAIT_MS = 10_000;
+
+export interface RunReleaseIdentity {
+  runId: number;
+  workspaceId: string;
+  specId: string;
+  authorizedSha: string;
+  branchName: string;
+  workspaceRealpath: string;
+  worktreeRealpath: string;
+  baseBranch: string;
+  baseSha: string;
+  providerReleaseRef: string | null;
+  integrationCheckoutPath: string;
+  repository: {
+    owner: string;
+    name: string;
+    source: 'github-app-installation' | 'pat-oauth-fallback';
+    bindingId: string | null;
+    installationId: number | null;
+    repositoryId: number | null;
+  } | null;
+}
+
+interface FrozenRunRow {
+  workspace_id: string;
+  spec_path: string;
+  branch_name: string | null;
+  worktree_path: string | null;
+  execution_workspace_path: string | null;
+  execution_worktree_path: string | null;
+  terminal_checkout_sha: string | null;
+  base_branch: string | null;
+  base_sha: string | null;
+  provider_release_ref: string | null;
+  integration_checkout_path: string | null;
+}
+
+function sameRepository(
+  expected: NonNullable<RunReleaseIdentity['repository']>,
+  actual: GithubRepositoryAuthority,
+): boolean {
+  return expected.owner.toLowerCase() === actual.owner.toLowerCase()
+    && expected.name.toLowerCase() === actual.name.toLowerCase()
+    && expected.source === actual.source
+    && expected.bindingId === actual.bindingId
+    && expected.installationId === actual.installationId
+    && expected.repositoryId === actual.repositoryId;
+}
+
+function credentialMatchesRepository(
+  expected: NonNullable<RunReleaseIdentity['repository']>,
+  credential: ResolvedGitHubToken,
+): boolean {
+  if (expected.source === 'github-app-installation') {
+    const metadata = credential.source === 'github-app-installation' ? credential.metadata : null;
+    return Boolean(metadata && 'bindingId' in metadata
+      && metadata.bindingId === expected.bindingId
+      && metadata.installationId === expected.installationId
+      && metadata.repositoryId === expected.repositoryId
+      && metadata.repository.owner.toLowerCase() === expected.owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === expected.name.toLowerCase());
+  }
+  const metadata = credential.metadata;
+  return ['workspace-oauth', 'workspace-pat'].includes(credential.source)
+    && Boolean(metadata && 'fallback' in metadata
+      && metadata.repository.owner.toLowerCase() === expected.owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === expected.name.toLowerCase());
+}
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function lockPaths(identity: RunReleaseIdentity): string[] {
+  // Every release takes the local repository lock. Provider-backed releases
+  // additionally take an owner/name lock, so aliases/clones serialize too.
+  // Sorted acquisition avoids deadlock. runId is deliberately excluded.
+  const keys = [`local:${identity.workspaceRealpath}`];
+  if (identity.repository) {
+    keys.push(`provider:${identity.repository.owner.toLowerCase()}/${identity.repository.name.toLowerCase()}`);
+  }
+  return keys.map((key) => {
+    const digest = crypto.createHash('sha256').update(key).digest('hex');
+    return path.join(os.tmpdir(), `rorca-release-${digest}.lock`);
+  }).sort();
+}
+
+async function acquireTarget(target: string, identity: RunReleaseIdentity): Promise<() => void> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (true) {
+    try {
+      const fd = fs.openSync(target, 'wx', 0o600);
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, runId: identity.runId }));
+      fs.closeSync(fd);
+      return () => {
+        try { fs.unlinkSync(target); } catch { /* already released */ }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      try {
+        const holder = JSON.parse(fs.readFileSync(target, 'utf8')) as { pid?: number };
+        if (!Number.isSafeInteger(holder.pid) || !processAlive(Number(holder.pid))) {
+          fs.unlinkSync(target);
+          continue;
+        }
+      } catch {
+        // The owner may be between O_EXCL creation and writing its PID. Never
+        // delete a fresh unreadable lock; only reclaim a clearly stale file.
+        try {
+          if (Date.now() - fs.statSync(target).mtimeMs > 30_000) fs.unlinkSync(target);
+        } catch { /* contender or owner changed it */ }
+      }
+      if (Date.now() >= deadline) throw new Error('release actuation lock is busy');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+}
+
+export async function withGithubRepositoryAuthorityLock<T>(
+  workspaceId: string,
+  owner: string,
+  name: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  // Workspace scope deliberately excludes owner/name: repository replacement
+  // A→B must serialize with A's in-flight provider actuation across API/worker containers.
+  void owner;
+  void name;
+  return withPgAdvisoryLock(`github-authority:${workspaceId}`, operation);
+}
+
+export async function withRunReleaseLock<T>(
+  identity: RunReleaseIdentity,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withPgAdvisoryLock(`github-authority:${identity.workspaceId}`, async () => {
+    const releases: Array<() => void> = [];
+    try {
+      for (const target of lockPaths(identity)) releases.push(await acquireTarget(target, identity));
+      return await operation();
+    } finally {
+      for (const release of releases.reverse()) release();
+    }
+  });
+}
+
+/** Re-read DB paths and prove the exact canonical branch/HEAD while locked. */
+export async function revalidateRunReleaseIdentity(
+  identity: RunReleaseIdentity,
+  options: { requireLiveCheckout?: boolean } = { requireLiveCheckout: true },
+): Promise<void> {
+  if (!Number.isSafeInteger(identity.runId) || identity.runId <= 0
+    || !isGitSha(identity.authorizedSha)
+    || !isGitSha(identity.baseSha)
+    || !identity.baseBranch
+    || !path.isAbsolute(identity.integrationCheckoutPath)) throw new Error('release identity is invalid');
+  const run = await queryOne<FrozenRunRow>(`
+    SELECT pr.workspace_id, pr.spec_path, pr.branch_name, pr.worktree_path,
+           pr.execution_workspace_path, pr.execution_worktree_path, pr.terminal_checkout_sha,
+           ri.base_branch, ri.base_sha, ri.provider_release_ref, ri.integration_checkout_path
+      FROM pipeline_runs pr
+      LEFT JOIN pipeline_run_release_intents ri ON ri.run_id = pr.id
+     WHERE pr.id = $1
+  `, [identity.runId]);
+  if (!run
+    || run.workspace_id !== identity.workspaceId
+    || path.basename(run.spec_path, '.json') !== identity.specId
+    || run.branch_name !== identity.branchName
+    || run.execution_workspace_path !== identity.workspaceRealpath
+    || run.execution_worktree_path !== identity.worktreeRealpath
+    || (run.base_branch != null && run.base_branch !== identity.baseBranch)
+    || (run.base_sha != null && run.base_sha.toLowerCase() !== identity.baseSha)
+    || (run.provider_release_ref != null && run.provider_release_ref !== identity.providerReleaseRef)
+    || (run.integration_checkout_path != null && run.integration_checkout_path !== identity.integrationCheckoutPath)) {
+    throw new Error('release identity differs from DB-frozen run authority');
+  }
+  if (options.requireLiveCheckout !== false) {
+    const checkout = assertCanonicalRunCheckout({
+      cwd: identity.worktreeRealpath,
+      repositoryTopLevel: identity.workspaceRealpath,
+      branchName: identity.branchName,
+      expectedHead: identity.authorizedSha,
+    });
+    if (checkout.headSha !== identity.authorizedSha) throw new Error('release HEAD advanced after authorization');
+  } else if (run.terminal_checkout_sha?.toLowerCase() !== identity.authorizedSha) {
+    throw new Error('immutable terminal checkout attestation differs from release SHA');
+  }
+}
+
+export interface GithubReleaseActuationContext {
+  identity: RunReleaseIdentity;
+  authority: GithubRepositoryAuthority;
+  credential: ResolvedGitHubToken;
+}
+
+/**
+ * Canonical external-effect boundary. It holds repository-wide local/provider locks,
+ * reacquires exact repository authority, resolves a purpose token last, then
+ * repeats HEAD validation immediately before handing control to the actuator.
+ */
+export async function withGithubReleaseActuation<T>(
+  identity: RunReleaseIdentity,
+  purpose: GithubCredentialPurpose,
+  actuator: (context: GithubReleaseActuationContext) => Promise<T>,
+): Promise<T> {
+  return withRunReleaseLock(identity, async () => {
+    await revalidateRunReleaseIdentity(identity);
+    if (!identity.repository) throw new Error('release has no frozen repository authority');
+    {
+        const authority = await getGithubRepositoryAuthority(identity.workspaceId, {
+          requireActive: true,
+          expectedRepository: identity.repository!,
+        });
+        if (!authority || !sameRepository(identity.repository!, authority)) {
+          throw new Error('canonical repository authority changed after release authorization');
+        }
+        const credential = await resolveWorkspaceGitHubToken(identity.workspaceId, {
+          repository: { owner: authority.owner, name: authority.name },
+          purpose,
+        });
+        if (!credential) throw new Error('purpose-scoped release credential is unavailable');
+        if (identity.repository!.source === 'github-app-installation'
+          && credential.source !== 'github-app-installation') {
+          throw new Error('GitHub App release authority cannot downgrade to legacy credentials');
+        }
+        if (identity.repository!.source === 'pat-oauth-fallback'
+          && !['workspace-oauth', 'workspace-pat'].includes(credential.source)) {
+          throw new Error('legacy credential was not explicitly selected by repository authority');
+        }
+        const postTokenAuthority = await getGithubRepositoryAuthority(identity.workspaceId, {
+          requireActive: true,
+          expectedRepository: identity.repository!,
+        });
+        if (!postTokenAuthority || !sameRepository(identity.repository!, postTokenAuthority)
+          || !credentialMatchesRepository(identity.repository!, credential)) {
+          throw new Error('GitHub credential metadata or canonical authority changed during token resolution');
+        }
+        await revalidateRunReleaseIdentity(identity);
+        return actuator({ identity, authority: postTokenAuthority, credential });
+    }
+  });
+}

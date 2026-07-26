@@ -28,8 +28,9 @@ import {
   listAutonomousPrDeliveries,
   queueAutonomousPrDeliveryForRun,
 } from '../lib/autonomous-pr-delivery';
+import { requireProviderMutationAuthority } from '../lib/provider-mutation-authority';
 
-const router = Router();
+const router = Router({ strict: true, caseSensitive: true });
 
 const FORBIDDEN_AUTHORITY_FIELDS = [
   'actor', 'actorId', 'principal', 'principalId', 'authority', 'role',
@@ -121,7 +122,7 @@ router.get('/:id/github/delivery-policies', requireWorkspaceAdmin(), async (req,
  *       400: { description: Invalid or unsafe policy }
  *       409: { description: Idempotency or immutable policy conflict }
  */
-router.post('/:id/github/delivery-policies', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/delivery-policies', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectAuthorityClaims(body);
@@ -175,7 +176,7 @@ router.post('/:id/github/delivery-policies', requireWorkspaceAdmin(), async (req
  *       409: { description: Policy digest/state conflict }
  *       422: { description: Policy expired }
  */
-router.post('/:id/github/delivery-policies/:policyId/activate', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/delivery-policies/:policyId/activate', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectAuthorityClaims(body);
@@ -225,7 +226,7 @@ router.post('/:id/github/delivery-policies/:policyId/activate', requireWorkspace
  *       400: { description: Invalid revocation rationale }
  *       409: { description: Policy already revoked by another request }
  */
-router.post('/:id/github/delivery-policies/:policyId/revoke', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/delivery-policies/:policyId/revoke', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectAuthorityClaims(body);
@@ -250,6 +251,11 @@ router.post('/:id/github/delivery-policies/:policyId/revoke', requireWorkspaceAd
  *     operationId: observeGithubPrDeliveryEvidence
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Provider observation writes immutable release evidence and must remain an operator-only, non-MCP action."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *     requestBody:
  *       required: true
  *       content:
@@ -266,7 +272,7 @@ router.post('/:id/github/delivery-policies/:policyId/revoke', requireWorkspaceAd
  *       409: { description: Repository, branch, PR, or head SHA changed }
  *       422: { description: Canonical PR binding or workspace GitHub credential unavailable }
  */
-router.post('/:id/github/delivery-evidence', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/delivery-evidence', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectAuthorityClaims(body);
@@ -292,6 +298,10 @@ router.post('/:id/github/delivery-evidence', requireWorkspaceAdmin(), async (req
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "PR review/check evidence is release-governance metadata and intentionally remains operator-only."
  *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
  *       - in: query
  *         name: runId
  *         schema: { type: integer }
@@ -354,7 +364,7 @@ router.get('/:id/github/delivery-evidence', requireWorkspaceAdmin(), async (req,
  *       200: { description: Run is ineligible or an exact delivery already exists }
  *       409: { description: Existing immutable delivery policy or run binding conflicts }
  */
-router.post('/:id/github/autonomous-deliveries', requireWorkspaceAdmin(), async (req, res, next) => {
+router.post('/:id/github/autonomous-deliveries', requireProviderMutationAuthority, requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const body = bodyObject(req);
     rejectAuthorityClaims(body);

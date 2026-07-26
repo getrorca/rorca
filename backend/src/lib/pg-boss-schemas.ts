@@ -41,7 +41,7 @@ const ExecutionSecretReferencesSchema = z.object({
  *   - direct:      merge to main + push (maximum velocity, default)
  *   - pr:          push branch + create PR (CI-gated)
  *   - draft-pr:    push branch + create Draft PR (review-first)
- *   - branch-only: push branch to remote, no PR, no merge (manual control)
+ *   - branch-only: preserve the isolated run branch; external push requires separate authority
  */
 export const MergeStrategyEnum = z.enum(['direct', 'pr', 'draft-pr', 'branch-only']);
 export type MergeStrategy = z.infer<typeof MergeStrategyEnum>;
@@ -88,7 +88,9 @@ export const WavePolicyEnvelopeSchema = z.object({
 
 export const PipelineRunJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
+  workspaceId: z.string().min(1).optional(),
   specPath: z.string().min(1),
+  runSpecPath: z.string().min(1),
   workspacePath: z.string().min(1),
   agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),
@@ -115,7 +117,7 @@ export const PipelineRunJobPayload = z.object({
   specificStory: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional().default('sequential'),
-  parallelism: z.number().int().min(1).max(10).optional().default(1),
+  parallelism: z.number().int().min(1).max(4).optional().default(1),
   includeGraph: z.boolean().optional().default(false),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
@@ -126,6 +128,7 @@ export const PipelineRunJobPayload = z.object({
   manifestId: z.string().optional(),
   taskManifestArtifacts: z.record(z.string(), z.unknown()).optional(),
   taskManifestArtifactRefs: z.array(z.record(z.string(), z.unknown())).optional(),
+  commandDenylist: z.array(z.string().min(1).max(512)).max(50).optional(),
   // Persisted request metadata is supplied by the pipeline route for worker
   // correlation. It is not an execution authority, but strict schema parsing
   // must preserve it rather than rejecting an otherwise valid run job.
@@ -149,10 +152,12 @@ export const PipelineRetryJobPayload = z.object({
   previewHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   approvedPreview: z.record(z.string(), z.unknown()),
   generatedPlanHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  taskManifestLineageHash: z.string().regex(/^sha256:[0-9a-f]{64}$/).nullable().default(null),
   /** Exact Rorca-owned idempotency, lineage, revision, manifest, and lease authority. */
   dispatchIdentity: z.record(z.string(), z.unknown()),
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
+  runSpecPath: z.string().min(1),
   retrySpecPath: z.string().min(1),
   agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),
@@ -166,7 +171,7 @@ export const PipelineRetryJobPayload = z.object({
   includeGraph: z.boolean().optional().default(false),
   terminalMode: TerminalModeSchema.optional().default('ansi-html'),
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional().default('sequential'),
-  parallelism: z.number().int().min(1).max(10).optional().default(1),
+  parallelism: z.number().int().min(1).max(4).optional().default(1),
   triggerOptions: z.record(z.string(), z.unknown()).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
@@ -214,7 +219,7 @@ export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload
 /** One bounded observation/actuation step for an existing reviewed PR. */
 export const AutonomousPrDeliveryJobPayload = z.object({
   deliveryId: z.string().uuid(),
-  expectedHeadSha: z.string().regex(/^[0-9a-f]{40,64}$/),
+  expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/),
 }).strict();
 
 export type AutonomousPrDeliveryJobPayloadType = z.infer<typeof AutonomousPrDeliveryJobPayload>;

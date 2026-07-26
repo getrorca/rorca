@@ -23,12 +23,15 @@
  *   (12) Selective stage repair via stages param
  */
 
+import crypto from 'crypto';
+import { once } from 'events';
 import * as fs from 'fs';
+import type { Server } from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
 import { queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
@@ -65,11 +68,21 @@ jest.mock('../../lib/pg-boss', () => {
   };
 });
 
-let app: Express;
+let app: Server;
 let mockBossSend: jest.Mock;
 let authToken: string;
+let fixtureUserId: string;
+let workspaceDir: string;
 
-const WORKSPACE_ID = 'ws-repair-test';
+const fixtureId = crypto.randomUUID();
+const WORKSPACE_ID = `ws-repair-${fixtureId}`;
+const LEGACY_WORKSPACE_ID = 'ws-repair-test';
+const FIXTURE_SPEC_IDS = [
+  'batch-repair-spec', 'blocked-spec', 'dryrun-spec', 'failed-enrich-spec',
+  'failed-match-spec', 'healthy-spec', 'idem-spec', 'legacy-backfill-spec',
+  'no-ctx-spec', 'no-log-spec', 'readiness-surface-spec', 'selective-spec',
+  'stage-retry-spec', 'workflow-surface-spec',
+];
 
 function specsDirs(workspacePath: string) {
   return {
@@ -78,8 +91,8 @@ function specsDirs(workspacePath: string) {
   };
 }
 
-function writeSpecFile(workspacePath: string, specId: string, content: Record<string, unknown> = {}) {
-  const { pendingDir } = specsDirs(workspacePath);
+function writeSpecFile(_workspacePath: string, specId: string, content: Record<string, unknown> = {}) {
+  const { pendingDir } = specsDirs(workspaceDir);
   fs.mkdirSync(pendingDir, { recursive: true });
   const specContent = {
     title: content.title ?? 'Test Spec',
@@ -134,10 +147,18 @@ async function seedGenerationLog(specId: string, options: {
     ...(contextCaptureStatus ? { contextCaptureStatus } : {}),
   };
 
-  await execute(
+  const inserted = await queryOne<{ id: number }>(
     `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, enriched, retrieval_method, context_summary_json, status)
-     VALUES ($1, 'claude-sonnet-4-5-20250929', 'api', 0, 'test', false, 'none', $2, 'persisted')`,
+     VALUES ($1, 'claude-sonnet-4-5-20250929', 'api', 0, 'test', false, 'none', $2, 'persisted')
+     RETURNING id`,
     [specId, JSON.stringify(summaryJson)],
+  );
+  if (!inserted) throw new Error(`failed to seed generation log for ${specId}`);
+  await execute(
+    `UPDATE spec_generation_logs
+     SET save_generation = $2, context_summary_json = $3::jsonb
+     WHERE id = $1`,
+    [inserted.id, inserted.id, JSON.stringify({ ...summaryJson, saveGeneration: inserted.id })],
   );
 }
 
@@ -200,10 +221,68 @@ async function seedDurableWorkflowRun(specId: string, stages: {
   }
 }
 
+async function cleanFixtureDatabase(): Promise<void> {
+  const workspaceIds = [WORKSPACE_ID, LEGACY_WORKSPACE_ID];
+  await execute(
+    `DELETE FROM spec_post_save_workflow_runs
+     WHERE workspace_id = ANY($1::text[]) OR spec_id = ANY($2::text[])`,
+    [workspaceIds, FIXTURE_SPEC_IDS],
+  );
+  await execute(
+    `DELETE FROM spec_jobs
+     WHERE workspace_id = ANY($1::text[]) OR spec_id = ANY($2::text[])`,
+    [workspaceIds, FIXTURE_SPEC_IDS],
+  );
+  await execute(
+    `DELETE FROM story_results result USING pipeline_runs run
+     WHERE result.run_id = run.id AND run.workspace_id = ANY($1::text[])`,
+    [workspaceIds],
+  );
+  await execute(
+    `DELETE FROM story_commits commit_row USING pipeline_runs run
+     WHERE commit_row.run_id = run.id AND run.workspace_id = ANY($1::text[])`,
+    [workspaceIds],
+  );
+  await execute('DELETE FROM pipeline_runs WHERE workspace_id = ANY($1::text[])', [workspaceIds]);
+  await execute(
+    `DELETE FROM wal_events
+     WHERE workspace_id = ANY($1::text[]) OR spec_id = ANY($2::text[])`,
+    [workspaceIds, FIXTURE_SPEC_IDS],
+  );
+  await execute('DELETE FROM spec_search_index WHERE workspace_id = ANY($1::text[]) OR spec_slug = ANY($2::text[])', [workspaceIds, FIXTURE_SPEC_IDS]);
+  await execute('DELETE FROM spec_versions WHERE spec_slug = ANY($1::text[])', [FIXTURE_SPEC_IDS]);
+  await execute('DELETE FROM spec_generation_logs WHERE spec_slug = ANY($1::text[])', [FIXTURE_SPEC_IDS]);
+  await execute('DELETE FROM workspace_context WHERE workspace_id = ANY($1::text[])', [workspaceIds]);
+  await execute('DELETE FROM direction_layers WHERE workspace_id = ANY($1::text[])', [workspaceIds]);
+}
+
+function cleanFixtureFiles(): void {
+  fs.rmSync(path.join(workspaceDir, 'forge', 'specs'), { recursive: true, force: true });
+}
+
 beforeAll(async () => {
   process.env.NODE_ENV = 'test';
+  workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-spec-repair-'));
+  const authId = crypto.randomUUID();
+  const fixtureUser = await ensureTestUser({
+    email: `spec-repair-${fixtureId}@test.rorca.local`,
+    authId,
+    role: 'admin',
+    plan: 'pro',
+  });
+  fixtureUserId = fixtureUser.id;
+
   const serverMod = require('../../server');
-  app = serverMod.default;
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: fixtureUser.email,
+    authId,
+    role: 'admin',
+    displayName: 'Spec Repair Test Admin',
+  });
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+
   const pgBoss = require('../../lib/pg-boss');
   mockBossSend = pgBoss.getBoss().send;
 });
@@ -215,36 +294,28 @@ beforeEach(async () => {
   mockBossSend = pgBossMod.getBoss().send;
   mockBossSend.mockClear();
 
-  const tablesToClean = [
-    'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
-    'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
-    'workspace_context', 'direction_layers', 'batch_spec_generation',
-    'spec_post_save_stage_dependencies', 'spec_post_save_workflow_stages', 'spec_post_save_workflow_runs',
-    'spec_jobs',
-  ];
-  for (const t of tablesToClean) {
-    await execute(`TRUNCATE ${t} CASCADE`).catch(() => {});
-  }
-
+  await cleanFixtureDatabase();
+  cleanFixtureFiles();
   await execute(
-    `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Repair Test WS', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
-    [WORKSPACE_ID, os.tmpdir()],
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Repair Test WS', $2)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, workspaceDir],
   );
-
-  // Clean up spec files from prior tests
-  const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
-  if (fs.existsSync(specsRoot)) {
-    fs.rmSync(specsRoot, { recursive: true, force: true });
-  }
-
-  authToken = await getAuthToken(app);
 });
 
 afterEach(async () => {
-  const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
-  if (fs.existsSync(specsRoot)) {
-    fs.rmSync(specsRoot, { recursive: true, force: true });
-  }
+  await cleanFixtureDatabase();
+  cleanFixtureFiles();
+});
+
+afterAll(async () => {
+  await cleanFixtureDatabase();
+  await execute('DELETE FROM workspaces WHERE id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM users WHERE id = $1', [fixtureUserId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  fs.rmSync(workspaceDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 describe('PSE-005: POST /api/specs/:specId/repair', () => {

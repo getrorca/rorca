@@ -1013,6 +1013,8 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/entry:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Update an existing memory entry
  *     operationId: updateMemoryEntry
@@ -1074,6 +1076,8 @@ router.put('/entry', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/entry:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Delete a memory entry by date + title
  *     operationId: deleteMemoryEntry
@@ -1122,6 +1126,8 @@ router.delete('/entry', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/proposals:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: List memory proposals for a workspace
  *     operationId: listMemoryProposals
@@ -1228,6 +1234,8 @@ router.get('/proposals', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/proposals:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Approve, reject, or edit memory proposals
  *     operationId: resolveMemoryProposals
@@ -1482,6 +1490,8 @@ router.post('/proposals', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/proposals/dismiss:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Dismiss memory proposals
  *     operationId: dismissMemoryProposals
@@ -1533,6 +1543,8 @@ router.post('/proposals/dismiss', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/proposals/undismiss:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Restore dismissed proposals back to pending
  *     operationId: undismissMemoryProposals
@@ -1593,6 +1605,8 @@ router.post('/proposals/undismiss', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/rejected:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: List rejected memory entries
  *     operationId: listRejectedMemoryEntries
@@ -1998,6 +2012,8 @@ router.get('/categories', (_req: Request, res: Response) => {
  * @swagger
  * /api/memory/archive/count:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Get archived entry count for a workspace
  *     operationId: getMemoryArchiveCount
@@ -2034,6 +2050,8 @@ router.get('/archive/count', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/rotate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Rotate old memory entries to archive
  *     operationId: rotateMemoryEntries
@@ -2086,21 +2104,26 @@ router.post('/rotate', async (req: Request, res: Response) => {
 
 /**
  * @swagger
- * /api/memory/synthesize-from-run/{runId}:
+ * /api/memory/synthesize:
  *   post:
  *     tags: [Memory]
- *     summary: Synthesize memory proposals from a pipeline run
- *     operationId: synthesizeMemoryFromRun
+ *     summary: Synthesize memory proposals from recent workspace runs
+ *     operationId: synthesizeWorkspaceMemory
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Synthesis creates durable workspace-scoped proposals and WAL evidence, so it remains an operator-owned mutation."
  *     description: |
- *       Analyzes WAL events for the specified run and generates candidate memory entries.
+ *       Analyzes recent WAL events for a workspace and generates candidate memory entries.
  *       Entries are deduplicated against existing memory, persisted as proposals in the
  *       memory_proposals table, and broadcast via SSE. User can then approve/reject proposals.
- *     parameters:
- *       - name: runId
- *         in: path
- *         required: true
- *         schema: { type: integer }
- *         description: Pipeline run ID to analyze
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
  *     responses:
  *       200:
  *         description: Generated proposals
@@ -2123,8 +2146,7 @@ router.post('/rotate', async (req: Request, res: Response) => {
  *                       source: { type: string }
  *                       status: { type: string }
  *                 total: { type: integer }
- *       400: { description: "Invalid runId" }
- *       404: { description: "Run not found" }
+ *       400: { description: "workspaceId is required" }
  */
 // POST /api/memory/synthesize — synthesize memory proposals from all recent runs for a workspace
 router.post('/synthesize', async (req: Request, res: Response) => {
@@ -2193,6 +2215,8 @@ router.post('/synthesize', async (req: Request, res: Response) => {
  *     tags: [Context Files]
  *     summary: Synthesize memory proposals from a pipeline run
  *     operationId: synthesizeMemoryFromRun
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Run synthesis writes durable memory proposals and WAL evidence, so it remains an operator-owned mutation."
  *     description: >
  *       Analyzes WAL events and story results from a completed pipeline run and
  *       generates memory proposals (structured entries for MEMORY.md). Proposals
@@ -2323,6 +2347,8 @@ router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) =
  * @swagger
  * /api/memory/deduplicate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Deduplicate memory entries using embedding similarity
  *     operationId: deduplicateMemory
@@ -2850,6 +2876,8 @@ router.get('/items', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/items/{id}:
  *   patch:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Update a memory entry (content, pinned status)
  *     operationId: updateMemoryItem
@@ -2953,6 +2981,8 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/items/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Soft-delete a memory entry
  *     operationId: deleteMemoryItem
@@ -2992,6 +3022,8 @@ router.delete('/items/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/items/{id}/undelete:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Restore a soft-deleted memory entry
  *     operationId: undeleteMemoryItem
@@ -3031,6 +3063,8 @@ router.post('/items/:id/undelete', async (req: Request, res: Response) => {
  * @swagger
  * /api/memory/items/bulk:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Memory]
  *     summary: Bulk operations on memory items (delete, pin, unpin)
  *     operationId: bulkMemoryAction

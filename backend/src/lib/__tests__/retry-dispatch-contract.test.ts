@@ -16,6 +16,7 @@ const migration = [
   fs.readFileSync(path.join(srcRoot, 'db', 'pg-migrations', '20260715170000_retry_preview_governance.sql'), 'utf8'),
   fs.readFileSync(path.join(srcRoot, 'db', 'pg-migrations', '20260715190000_lifecycle_mutation_apis.sql'), 'utf8'),
   fs.readFileSync(path.join(srcRoot, 'db', 'pg-migrations', '20260719107000_governed_retry_publication_cancellation.sql'), 'utf8'),
+  fs.readFileSync(path.join(srcRoot, 'db', 'pg-migrations', '20260720148000_governed_retry_terminalization.sql'), 'utf8'),
 ].join('\n');
 
 function retryRouteSource(): string {
@@ -58,6 +59,19 @@ describe('governed retry dispatch contract', () => {
     expect(queueCreation).toBeGreaterThan(preview);
     expect(publicationSource).toContain("state = 'cancelled'");
     expect(publicationSource).toContain("event_type, workspace_id, payload, ingest_key");
+  });
+
+  test('running, stale, crash, and orphan paths converge through one application terminalizer', () => {
+    expect(publicationSource).toContain('export async function terminalizeGovernedRetryRun');
+    expect(publicationSource).toContain('terminalizePreparedHostRunCloseout(client, preparedCloseout)');
+    expect(publicationSource).toContain("state IN ('prepared','dispatched','claimed','executing')");
+    expect(workerSource.match(/terminalizeGovernedRetryRun\(\{/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    expect(workerSource).toContain('governed_retry_dispatches retry');
+    expect(workerSource).toContain('Governed retries delegate process termination and terminal state');
+    expect(workerSource).toContain("getBoss().cancel('pipeline:retry', governedTerminal.bossJobId)");
+    expect(migration).toContain("WHEN 'claimed' THEN NEW.state IN ('executing', 'failed', 'cancelled')");
+    expect(migration).toContain("WHEN 'committed' THEN NEW.state IN ('integrating', 'failed', 'manual_review_required')");
+    expect(migration).not.toMatch(/(?:CREATE|ALTER|DROP|DELETE FROM|UPDATE)\s+(?:TABLE\s+)?pgboss\./i);
   });
 
   test('queue unavailability refuses the owned preparation and queued run', () => {
@@ -105,11 +119,31 @@ describe('governed retry dispatch contract', () => {
     expect(handler).not.toContain('retry_preview_not_authorized');
   });
 
+  test.each(['direct', 'pr', 'draft-pr', 'branch-only'])('successful %s retry closes through the identical durable release seam', (strategy) => {
+    const handler = workerSource.slice(workerSource.indexOf('async function handlePipelineRetry'), workerSource.indexOf('// ── Job handler: pipeline:cancel'));
+    expect(handler).toContain('prepareRunReleaseIntent({');
+    expect(handler).toContain('reconcileRunReleaseIntent(runId');
+    expect(handler).toContain('mergeStrategy: approvedPreview.options.merge.strategy');
+    expect(handler).toContain('autoMerge: approvedPreview.options.merge.autoMerge');
+    expect(handler).toContain('externalSend: approvedPreview.options.safety.externalSend');
+    expect(['direct', 'pr', 'draft-pr', 'branch-only']).toContain(strategy);
+  });
+
+  test('legacy retry-merge conflicts before DB state mutation or queue dispatch', () => {
+    const start = pipelineSource.indexOf("router.post('/runs/:runId/retry-merge'");
+    const end = pipelineSource.indexOf("router.post('/runs/:runId/pause'", start);
+    const retired = pipelineSource.slice(start, end);
+    expect(retired).toContain('Manual retry-merge is retired');
+    expect(retired).not.toContain('UPDATE pipeline_runs');
+    expect(retired).not.toContain("boss.send('pipeline:merge'");
+  });
+
   test('destructive capabilities require explicit approval and policy defaults are host enforced', () => {
-    expect(route).toContain('approvedPreview.requiresApproval && !approvalToken');
+    expect(route).toContain('approvedPreview.requiresApproval && !approvalReceipt');
     expect(route).toContain('resolvePiRunSafetyOptions(originalRun.spec_path, sourceSpecJson');
     expect(route).toContain("? { strategy: 'branch-only', autoMerge: false }");
-    expect(route).toContain('deploy: enforceSafeRetry ? false : retrySafety.deploy');
+    expect(route).toContain('deploy: taskManifestSynthetic || enforceSafeRetry ? false : retrySafety.deploy');
+    expect(route).toContain("terminalMode: enforceSafeRetry ? 'ansi-html' : originalRun.terminal_mode");
     expect(route).toContain('externalSend: enforceSafeRetry ? false : retrySafety.externalSend');
     expect(route).not.toMatch(/sourceSpecJson\._notes/);
   });

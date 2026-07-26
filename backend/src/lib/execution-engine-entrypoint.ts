@@ -19,6 +19,17 @@ function resolveCandidateOrder(baseDir: string): Array<'.js' | '.ts'> {
 }
 
 export function resolveExecutionEngineEntrypoint(baseDir: string): ExecutionEngineEntrypoint {
+  const testOverride = process.env.NODE_ENV === 'test'
+    ? process.env.RORCA_TEST_EXECUTION_ENGINE_ENTRYPOINT?.trim()
+    : undefined;
+  if (testOverride) {
+    const resolved = path.resolve(testOverride);
+    const extension = path.extname(resolved);
+    if ((extension !== '.js' && extension !== '.ts') || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+      throw new Error('RORCA_TEST_EXECUTION_ENGINE_ENTRYPOINT must name an existing .js or .ts file');
+    }
+    return { path: resolved, exists: true, extension } as ExecutionEngineEntrypoint;
+  }
   const order = resolveCandidateOrder(baseDir);
   for (const extension of order) {
     const candidate = path.join(baseDir, 'lib', `execution-engine${extension}`);

@@ -41,13 +41,13 @@ import * as http from 'http';
 import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // ── Test DB URL ────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
+const BOSS_SCHEMA = pgBossTestSchema('restart');
 
 // ── Binary / file paths ────────────────────────────────────────────────────────
 
@@ -97,6 +97,7 @@ function spawnServer(): ChildProcess {
     {
       env: {
         DATABASE_URL: DB_URL,
+        PGBOSS_TEST_SCHEMA: BOSS_SCHEMA,
         PORT: String(TEST_PORT),
         PATH: process.env.PATH ?? '',
       },
@@ -331,6 +332,7 @@ async function handlePipelineRunInProcess(
 beforeAll(async () => {
   // 1. Connect pool for direct DB assertions + worker queries
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // 2. Ensure schema is current
   const { runPgMigrations } = await import('../db/pg-index');
@@ -339,7 +341,7 @@ beforeAll(async () => {
   // 3. Start pg-boss for the in-process worker
   boss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 1,
   });
   boss.on('error', () => { /* suppress noise */ });

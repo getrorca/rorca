@@ -113,7 +113,7 @@ The broader app settings also support other provider/model sources for non-execu
 - **Skills-first public surface:** the launch UI now uses Skills terminology end-to-end instead of Marketplace labels.
 - **Spec-Centric Memory Relevance Graph:** run-time and pre-flight context graph views make retrieval explainability visible in the product.
 - **Memory provenance cleanup:** imported / provenance-poor memories now have a separate review lane instead of being hidden inside stale review.
-- **GitHub integration polish:** the dashboard and docs now focus on repo wiring, webhooks, workflow dispatch, and PR automation.
+- **GitHub integration polish:** the dashboard and docs focus on repository wiring, signed webhooks, exact-SHA PR/release automation, and hard-disabled workflow/deployment dispatch.
 
 ## The mental model
 
@@ -246,6 +246,10 @@ Rorca is easiest to understand as **three local processes**:
 - **backend** — the Express API, MCP surface, and retrieval control plane
 - **worker** — the separate pg-boss job runner that executes queued pipeline/spec jobs
 
+Production Linux has a fourth **security boundary, not an orchestrator**: API drafting CLIs and worker model/workspace processes launch through `bubblewrap` with separate PID/proc/user/mount/network namespaces. They receive only curated tools, an exact workspace/Git mount when required, private HOME/tmp, masked credential files, and a reconstructed environment. Model inference can leave only through a process-owned exact-host CONNECT broker; PostgreSQL, GitHub, localhost/control-plane, credential homes, and trusted API/worker/engine ancestors remain unreachable. Missing kernel/runtime support fails before launch (and before a run becomes running) and prevents host release.
+
+Every model CLI, workspace hook/tool, and workspace-controlled validation requires `RORCA_AUTONOMOUS_ISOLATION=linux-bwrap`; there is no raw local-development bypass. On hosts without the Linux namespace boundary, use a non-tool HTTP SDK provider or fail closed. API-side drafting CLIs and worker agents use separate trusted exact-host inference brokers, but children receive only model credentials and cannot reach DB, vault, GitHub, localhost, credential homes, or arbitrary egress. Legacy `/api/pipeline/quick-run` is retired with HTTP 409; persist, approve, and trigger through the canonical worker path. Trusted server/worker HTTP also requires an independent unpredictable `RORCA_INTERNAL_SERVICE_TOKEN` (at least 32 bytes); internal principals cannot mutate providers.
+
 #### Start the full dev stack
 
 ```bash
@@ -334,7 +338,12 @@ contract). You can also pick a mode explicitly in the onboarding wizard and in
 #### Docker Postgres with AGE (recommended)
 
 The smoothest path to Full Graph. The bundled `docker-compose.yml` builds a
-PostgreSQL 16 image with Apache AGE compiled in.
+PostgreSQL 16 image with Apache AGE compiled in. AGE PG16 1.5.0 is built in a
+separate stage from Apache's immutable commit
+`0048900f372d4dfd5c236f78b8a8453bcdbb458e`; the TLS-fetched source archive and
+generated extension SQL are SHA-256 pinned, and compiler dependencies do not
+enter the runtime image. Keeping extension version 1.5.0 also preserves
+compatibility with existing managed clusters created by earlier Rorca images.
 
 ```bash
 rorca db start        # provision/start the managed Docker Postgres (AGE included)

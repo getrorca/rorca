@@ -8,30 +8,39 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, execute } from '../../db/index';
 
-let app: Express;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
 
-beforeEach(async () => {
-  jest.resetModules();
+beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sse-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-sse-1'");
+  await execute("DELETE FROM pipeline_runs WHERE workspace_id = 'ws-sse-1'");
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  await execute("DELETE FROM wal_events WHERE workspace_id = 'ws-sse-1'");
+  await execute("DELETE FROM pipeline_runs WHERE workspace_id = 'ws-sse-1'");
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 async function createWorkspace(id = 'ws-sse-1') {
@@ -67,8 +76,10 @@ test('POST /api/pipeline/runs creates run and broadcasts WAL event to subscriber
   expect(received[0].event_type).toBe('run_started');
   expect(received[0].workspace_id).toBe('ws-sse-1');
 
-  const payload = JSON.parse(received[0].payload);
-  expect(payload.run_id).toBe(res.body.run.id);
+  const payload = typeof received[0].payload === 'string'
+    ? JSON.parse(received[0].payload)
+    : received[0].payload;
+  expect(Number(payload.run_id)).toBe(Number(res.body.run.id));
   expect(payload.spec_path).toBe('specs/pending/test-spec.json');
 
   unsubscribe();
@@ -147,12 +158,17 @@ test('POST /api/pipeline/runs persists run_started WAL event in wal_events table
     .set('Authorization', `Bearer ${authToken}`)
     .send({ specPath: 'specs/pending/wal-check.json', workspaceId: 'ws-sse-1' });
 
-  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'run_started'`) as any[];
+  const events = await query(
+    `SELECT * FROM wal_events WHERE event_type = 'run_started' AND workspace_id = $1`,
+    ['ws-sse-1'],
+  ) as any[];
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe('ws-sse-1');
 
-  const payload = JSON.parse(events[0].payload);
+  const payload = typeof events[0].payload === 'string'
+    ? JSON.parse(events[0].payload)
+    : events[0].payload;
   expect(payload.spec_path).toBe('specs/pending/wal-check.json');
 });
 

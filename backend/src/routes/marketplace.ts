@@ -60,6 +60,8 @@ async function ensureTable(): Promise<void> {
  * @swagger
  * /api/marketplace/preview-sanitize:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Marketplace]
  *     summary: Preview PII/secret sanitization of a spec before publishing
  *     operationId: previewSanitize
@@ -363,6 +365,8 @@ router.post('/:id/fork', async (req: Request, res: Response) => {
  * @swagger
  * /api/marketplace/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Marketplace]
  *     summary: Soft-delete a published spec (sets deleted_at)
  *     operationId: unpublishSpec
@@ -417,6 +421,8 @@ router.delete('/:id', async (req: Request, res: Response) => {
  * @swagger
  * /api/marketplace:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Marketplace]
  *     summary: Check if a spec is published to the community marketplace
  *     operationId: checkSpecPublication
@@ -494,6 +500,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/marketplace/my:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Marketplace]
  *     summary: Get all specs published by the current user
  *     operationId: myPublications
@@ -538,6 +546,8 @@ router.get('/my', async (req: Request, res: Response) => {
  * @swagger
  * /api/marketplace/popular:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Marketplace]
  *     summary: Get top 20 specs by download count
  *     operationId: popularSpecs
@@ -580,6 +590,8 @@ router.get('/popular', async (req: Request, res: Response) => {
  * @swagger
  * /api/marketplace/search:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Marketplace]
  *     summary: Full-text search for published specs
  *     operationId: searchMarketplace
@@ -719,6 +731,8 @@ router.get('/search', async (req: Request, res: Response) => {
  * @swagger
  * /api/marketplace/{id}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Marketplace]
  *     summary: Get full publication detail including sanitized spec JSON
  *     operationId: getPublication

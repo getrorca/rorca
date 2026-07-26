@@ -88,6 +88,7 @@ import {
 } from './run-pty-store';
 import { attachRunPtyLifecycle, transitionRunLifecycle } from './run-lifecycle';
 import { openRawPtyArchive, type RawPtyArchiveWriter } from './pty-raw-archive';
+import { recordPtyByteTelemetry } from './pty-operational-telemetry';
 import { PtyTranscriptRecorder } from './pty-transcript-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
@@ -145,9 +146,27 @@ import { calculateCost } from './model-pricing';
 import {
   CoalescingPostQueue,
   retryPost,
+  retryPostWithOutcome,
   writeFallbackResult,
   type FallbackResultEntry,
 } from './resilient-post';
+import {
+  persistTrustedWalEvent,
+  relayTrustedWalEvent,
+  type TrustedWalReference,
+} from './trusted-wal';
+import {
+  createEngineResultDeliveryContext,
+  deliverEngineStoryResult,
+  isRetryableStoryResultPersistenceError,
+  type EngineResultDeliveryContext,
+} from './engine-result-delivery';
+import type {
+  CanonicalStoryResultInput,
+  CanonicalStoryResultOutcome,
+} from './story-result-persistence';
+import { durableAtomicWriteFile } from './run-spec-snapshot';
+import { assertCanonicalRunCheckout } from './run-git-authority';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -207,6 +226,8 @@ import {
   type StoryWorktreeOwnership,
 } from './story-worktree-lifecycle';
 import { createAutonomousCommandGuard } from './autonomous-command-guard';
+import { prepareAutonomousSandboxLaunch } from './autonomous-sandbox';
+import { ensureAutonomousModelEgress } from './autonomous-model-egress';
 import { resolveMergeConflict, resolvePostureConsensus, type MergeResolutionPosture } from './merge-conflict-resolver';
 import { runGitReinsJudge } from './gitreins-runner';
 import { appendGitReinsEvidence } from './gitreins-evidence-store';
@@ -227,9 +248,10 @@ import {
 import { runHostValidationRequirement } from './story-host-validation';
 import {
   rollbackRejectedWaveTarget,
+  WaveConflictAbort,
   WaveIntegrationLedger,
-  waveIntegrationLedgerKey,
   type WaveContributionIdentity,
+  type WaveIntegrationRecord,
 } from './wave-integration-protocol';
 import {
   WaveDeadline,
@@ -239,6 +261,8 @@ import {
 import {
   advanceDurableWaveIntegration,
   failDurableWaveIntegration,
+  markDurableWaveConflicted,
+  markDurableWaveConflictAborted,
   prepareDurableWaveIntegration,
   readDurableWaveIntegration,
   type DurableWaveIntegrationIdentity,
@@ -316,7 +340,7 @@ interface SpecJson {
    *   - direct:      merge to main + push (maximum velocity, default)
    *   - pr:          push branch + create PR (CI-gated)
    *   - draft-pr:    push branch + create Draft PR (review-first)
-   *   - branch-only: push branch to remote, no PR, no merge (manual control)
+   *   - branch-only: preserve the isolated run branch; push only with separate external-send authority
    * If unset, falls back to workspace pipeline_config.mergeStrategy, then 'direct'.
    */
   mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
@@ -548,17 +572,11 @@ function resolveNoopRecoveryEngine(
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PLAYWRIGHT_MCP_PORT = 4040;
-const PLAYWRIGHT_MCP_URL = `http://localhost:${PLAYWRIGHT_MCP_PORT}/mcp`;
 let _playwrightMcpServerPid: number | null = null;
-let _playwrightMcpReady = false;
 
 // Chrome DevTools MCP — stdio→HTTP bridge running on port 4041.
 // Attaches to the user's existing Chrome via CDP (--remote-debugging-port=9222).
-const CHROME_MCP_PORT = 4041;
-const CHROME_MCP_URL = `http://localhost:${CHROME_MCP_PORT}/mcp`;
 let _chromeMcpProxyPid: number | null = null;
-let _chromeMcpReady = false;
 // Resolved chrome-devtools-mcp binary info for writing stdio MCP configs.
 let _chromeMcpCmd: string | null = null;
 let _chromeMcpArgs: string[] = [];
@@ -712,276 +730,15 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
  * Idempotent — starts at most once per engine process.
  * Returns the server URL on success, null on failure (caller handles gracefully — never throws).
  */
-async function ensurePlaywrightMcpServer(headless = true): Promise<string | null> {
-  // Health-check: if we think the server is ready, verify it's still alive.
-  if (_playwrightMcpReady) {
-    try {
-      const probe = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(2000) });
-      if (probe.status < 500) return PLAYWRIGHT_MCP_URL;
-    } catch { /* server died — fall through to restart */ }
-    process.stdout.write(`[BrowserMCP] Playwright MCP server died — restarting...\n`);
-    _playwrightMcpReady = false;
-    _playwrightMcpServerPid = null;
-  }
-
-  // Check if port is already occupied (e.g. another story in a parallel run already started it)
-  try {
-    const probe = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(1000) });
-    if (probe.status < 500) {
-      _playwrightMcpReady = true;
-      return PLAYWRIGHT_MCP_URL;
-    }
-  } catch {
-    // Port not occupied — fall through to spawn
-  }
-
-  try {
-    const mcpProc = spawn(
-      'npx',
-      ['@playwright/mcp', '--port', String(PLAYWRIGHT_MCP_PORT), ...(headless ? ['--headless'] : [])],
-      { detached: true, stdio: 'ignore', env: buildCleanEnv() },
-    );
-    mcpProc.unref();
-    _playwrightMcpServerPid = mcpProc.pid ?? null;
-
-    // Poll for readiness up to 10s
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 300));
-      try {
-        const check = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(500) });
-        if (check.status < 500) {
-          _playwrightMcpReady = true;
-          process.stdout.write(`[BrowserMCP] @playwright/mcp ready at ${PLAYWRIGHT_MCP_URL}\n`);
-          return PLAYWRIGHT_MCP_URL;
-        }
-      } catch { /* not ready yet */ }
-    }
-
-    process.stdout.write(`[BrowserMCP] WARNING: @playwright/mcp did not become ready within 10s — browser tools unavailable for this story\n`);
-    return null;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stdout.write(`[BrowserMCP] WARNING: Failed to start @playwright/mcp: ${msg} — browser tools unavailable\n`);
-    return null;
-  }
+async function ensurePlaywrightMcpServer(_headless = true): Promise<string | null> {
+  process.stdout.write('[BrowserMCP] Disabled: autonomous namespaces cannot access a local browser control plane.\n');
+  return null;
 }
 
-/**
- * Ensure chrome-devtools-mcp is running as an HTTP MCP server on port 4041.
- *
- * chrome-devtools-mcp is a stdio-only process. We bridge it to HTTP using a
- * lightweight in-process proxy built on the @modelcontextprotocol/sdk:
- *   - Spawn `chrome-devtools-mcp --browser-url http://127.0.0.1:9222
- *            --no-usage-statistics --no-performance-crux` as a child process
- *   - The SDK StdioClientTransport connects to it over stdin/stdout
- *   - An Express server + StreamableHTTPServerTransport exposes it on port 4041
- *
- * CDP port: reads RORCA_CDP_PORT env var (default 9222). Chrome must be running
- * with --remote-debugging-port=<CDP_PORT> for this to work.
- *
- * Idempotent — starts at most once per engine process.
- * Returns the server URL on success, null on failure (never throws).
- */
 async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
-  // Health-check: if we think the server is ready, verify it's still alive.
-  // Processes can die between stories — reset state and restart if needed.
-  if (_chromeMcpReady) {
-    try {
-      const probe = await fetch(CHROME_MCP_URL, { signal: AbortSignal.timeout(2000) });
-      if (probe.status < 500) return CHROME_MCP_URL;
-    } catch { /* server died — fall through to restart */ }
-    process.stdout.write(`[ChromeMCP] Proxy server died — restarting...\n`);
-    _chromeMcpReady = false;
-    _chromeMcpProxyPid = null;
-    // Close stale HTTP server reference if it exists.
-    const staleServer = (global as Record<string, unknown>).__rorcaChromeMcpHttpServer as
-      { close: (cb?: () => void) => void } | undefined;
-    if (staleServer) { try { staleServer.close(); } catch { /* already dead */ } }
-  }
-
-  // Check if port is already occupied (another process started it)
-  try {
-    const probe = await fetch(CHROME_MCP_URL, { signal: AbortSignal.timeout(1000) });
-    if (probe.status < 500) {
-      _chromeMcpReady = true;
-      return CHROME_MCP_URL;
-    }
-  } catch {
-    // Port not occupied — fall through to spawn
-  }
-
-  const cdpPort = process.env.RORCA_CDP_PORT ?? '9222';
-  const browserUrl = `http://127.0.0.1:${cdpPort}`;
-
-  // Helper: probe CDP endpoint, return version string or null.
-  async function probeCdp(): Promise<string | null> {
-    try {
-      const r = await fetch(`${browserUrl}/json/version`, { signal: AbortSignal.timeout(2000) });
-      if (!r.ok) return null;
-      const v = await r.json() as Record<string, string>;
-      return v['Browser'] ?? 'unknown version';
-    } catch {
-      return null;
-    }
-  }
-
-  // First: check if Chrome is already running with CDP enabled.
-  let chromeVersion = await probeCdp();
-
-  if (!chromeVersion) {
-    // Chrome not reachable — try to launch it automatically.
-    process.stdout.write(`[ChromeMCP] Chrome not found at ${browserUrl} — attempting to launch Chrome with --remote-debugging-port=${cdpPort}...\n`);
-
-    // Resolve Chrome binary path (macOS, Linux, Windows).
-    const chromeCandidates = [
-      process.env.RORCA_CHROME_BIN,
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/chromium',
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    ].filter(Boolean) as string[];
-
-    const chromeBin = chromeCandidates.find(p => {
-      try { return fs.existsSync(p); } catch { return false; }
-    });
-
-    if (!chromeBin) {
-      process.stdout.write(
-        `[ChromeMCP] WARNING: Chrome binary not found. Set RORCA_CHROME_BIN env var or install Chrome.\n`,
-      );
-      return null;
-    }
-
-    // Use a dedicated user-data-dir so we don't stomp on the user's real profile.
-    const userDataDir = path.join(os.tmpdir(), `rorca-chrome-${cdpPort}`);
-    fs.mkdirSync(userDataDir, { recursive: true });
-
-    const chromeProc = spawn(
-      chromeBin,
-      [
-        `--remote-debugging-port=${cdpPort}`,
-        `--user-data-dir=${userDataDir}`,
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-extensions',
-        '--disable-translate',
-        '--disable-features=TranslateUI',
-      ],
-      { detached: true, stdio: 'ignore' },
-    );
-    chromeProc.unref();
-    process.stdout.write(`[ChromeMCP] Chrome launched (PID ${chromeProc.pid ?? 'unknown'}) — waiting for CDP...\n`);
-
-    // Poll for CDP readiness up to 15s.
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 500));
-      chromeVersion = await probeCdp();
-      if (chromeVersion) break;
-    }
-
-    if (!chromeVersion) {
-      process.stdout.write(`[ChromeMCP] WARNING: Chrome did not become ready within 15s — chrome-devtools-mcp unavailable.\n`);
-      return null;
-    }
-  }
-
-  process.stdout.write(`[ChromeMCP] Chrome ready at ${browserUrl} — ${chromeVersion}\n`);
-
-  // Resolve chrome-devtools-mcp binary — prefer local node_modules over global npx.
-  // Store in module-level vars so spawnClaude can write stdio MCP configs.
-  const localBin = path.join(path.dirname(require.resolve('chrome-devtools-mcp/package.json')), 'build/src/bin/chrome-devtools-mcp.js');
-  const chromeMcpCmd = fs.existsSync(localBin) ? process.execPath : 'node';
-  const chromeMcpArgs = fs.existsSync(localBin)
-    ? [localBin, `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux']
-    : [require.resolve('chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js'), `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux'];
-  _chromeMcpCmd = chromeMcpCmd;
-  _chromeMcpArgs = chromeMcpArgs;
-
-  try {
-    // Lazy-load MCP SDK to avoid importing at module level (keeps startup fast when not needed).
-    const { Client } = runtimeRequire('@modelcontextprotocol/sdk/client/index.js') as typeof import('@modelcontextprotocol/sdk/client/index.js');
-    const { StdioClientTransport } = runtimeRequire('@modelcontextprotocol/sdk/client/stdio.js') as typeof import('@modelcontextprotocol/sdk/client/stdio.js');
-    const { Server } = runtimeRequire('@modelcontextprotocol/sdk/server/index.js') as typeof import('@modelcontextprotocol/sdk/server/index.js');
-    const { StreamableHTTPServerTransport } = runtimeRequire('@modelcontextprotocol/sdk/server/streamableHttp.js') as typeof import('@modelcontextprotocol/sdk/server/streamableHttp.js');
-    const { CallToolRequestSchema, ListToolsRequestSchema } = runtimeRequire('@modelcontextprotocol/sdk/types.js') as typeof import('@modelcontextprotocol/sdk/types.js');
-    const expressLib = runtimeRequire('express') as typeof import('express');
-
-    // 1. Connect to chrome-devtools-mcp via stdio
-    const stdioTransport = new StdioClientTransport({
-      command: chromeMcpCmd,
-      args: chromeMcpArgs,
-      env: buildCleanEnv(),
-    });
-    const client = new Client({ name: 'rorca-chrome-bridge', version: '1.0.0' });
-    await client.connect(stdioTransport);
-    _chromeMcpProxyPid = (stdioTransport as unknown as { _process?: { pid?: number } })._process?.pid ?? null;
-    process.stdout.write(`[ChromeMCP] chrome-devtools-mcp connected (PID ${_chromeMcpProxyPid ?? 'unknown'})\n`);
-
-    // 2. List tools from the upstream server so we can re-expose them.
-    const { tools: upstreamTools } = await client.listTools();
-
-    // 3. Create a transparent proxy MCP server using the low-level Server class.
-    //    This avoids McpServer's Zod schema requirement — we forward tool calls as-is.
-    const proxyServer = new Server(
-      { name: 'rorca-chrome-devtools-proxy', version: '1.0.0' },
-      { capabilities: { tools: {} } },
-    );
-
-    proxyServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: upstreamTools,
-    }));
-
-    proxyServer.setRequestHandler(CallToolRequestSchema, async (req) => {
-      const result = await client.callTool({
-        name: req.params.name,
-        arguments: (req.params.arguments ?? {}) as Record<string, unknown>,
-      });
-      return result;
-    });
-
-    // 4. Expose the proxy server over HTTP on CHROME_MCP_PORT via Express.
-    const app = expressLib();
-    app.use(expressLib.json());
-
-    // Each request gets its own StreamableHTTPServerTransport (stateless — suitable for MCP).
-    app.all('/mcp', async (req, res) => {
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      res.on('close', () => { transport.close().catch(() => {}); });
-      await proxyServer.connect(transport);
-      await transport.handleRequest(req, res, req.body as Record<string, unknown>);
-    });
-
-    const httpServer = app.listen(CHROME_MCP_PORT, '127.0.0.1', () => {
-      _chromeMcpReady = true;
-      process.stdout.write(`[ChromeMCP] Proxy ready at ${CHROME_MCP_URL} (${upstreamTools.length} tools forwarded)\n`);
-    });
-
-    // Store reference so we can close on SIGINT/SIGTERM.
-    (global as Record<string, unknown>).__rorcaChromeMcpHttpServer = httpServer;
-
-    // Wait for the server to become ready (listen callback fires async).
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline) {
-      if (_chromeMcpReady) return CHROME_MCP_URL;
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    process.stdout.write(`[ChromeMCP] WARNING: Proxy HTTP server did not become ready within 5s\n`);
-    return null;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stdout.write(`[ChromeMCP] WARNING: Failed to start chrome-devtools-mcp bridge: ${msg}\n`);
-    return null;
-  }
+  process.stdout.write('[ChromeMCP] Disabled: autonomous namespaces cannot access a local browser control plane.\n');
+  return null;
 }
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getStories(spec: SpecJson): UserStory[] {
   if (spec.userStories) return spec.userStories;
@@ -1102,9 +859,9 @@ function getNextStory(stories: UserStory[]): UserStory | null {
   return null;
 }
 
-/** Stable run root for fallback writes; never point this at ephemeral story worktrees. */
-let _fallbackCwd: string | null = null;
-let _fallbackRunId = 0;
+/** Immutable per-process run context; the worker starts one engine process per run. */
+let _runFallbackContext: Readonly<{ cwd: string; runId: number }> | null = null;
+let _resultDeliveryContext: EngineResultDeliveryContext | null = null;
 let _walTelemetryQueue: CoalescingPostQueue | null = null;
 const _tokenAccumulators = new Map<string, {
   baseInput: number;
@@ -1117,19 +874,26 @@ const _tokenAccumulators = new Map<string, {
   sequence: number;
 }>();
 
-function setFallbackContext(cwd: string, runId: number): void {
-  _fallbackCwd = cwd;
-  _fallbackRunId = runId;
-  if (!_walTelemetryQueue) {
-    _walTelemetryQueue = new CoalescingPostQueue({
-      maxPending: 64,
-      concurrency: 2,
-      timeoutMs: 750,
-      maxRetries: 1,
-      failureCooldownMs: 2_000,
-      persistFallback: entry => writeFallbackResult(cwd, entry),
-    });
+function initializeRunFallbackContext(cwd: string, runId: number, workspaceId: string | null): void {
+  const stableCwd = path.resolve(cwd);
+  if (_runFallbackContext) {
+    if (_runFallbackContext.cwd !== stableCwd || _runFallbackContext.runId !== runId) {
+      throw new Error('Execution-engine fallback context cannot be rebound after run initialization');
+    }
+    return;
   }
+  _runFallbackContext = Object.freeze({ cwd: stableCwd, runId });
+  if (workspaceId) {
+    _resultDeliveryContext = createEngineResultDeliveryContext(runId, workspaceId, stableCwd);
+  }
+  _walTelemetryQueue = new CoalescingPostQueue({
+    maxPending: 64,
+    concurrency: 2,
+    timeoutMs: 750,
+    maxRetries: 1,
+    failureCooldownMs: 2_000,
+    persistFallback: entry => writeFallbackResult(stableCwd, entry),
+  });
 }
 
 function tokenTelemetryKey(runId: number, storyId: string): string {
@@ -1165,6 +929,35 @@ function engineMcpEndpoint(port: number): string {
   return `${root}/mcp`;
 }
 
+async function relayOrJournalTrustedWal(reference: TrustedWalReference): Promise<void> {
+  try {
+    await relayTrustedWalEvent(reference);
+  } catch (error) {
+    // Exact identity/authority conflicts are permanent and must never be
+    // disguised as transport fallback success.
+    if (!isRetryableStoryResultPersistenceError(error)) throw error;
+    const runContext = _runFallbackContext;
+    if (!runContext
+      || runContext.runId !== reference.runId
+      || _resultDeliveryContext?.workspaceId !== reference.workspaceId) {
+      throw error;
+    }
+    const entry: FallbackResultEntry = {
+      type: 'wal',
+      storyId: reference.storyId,
+      status: reference.eventType,
+      runId: reference.runId,
+      retries: 1,
+      ts: new Date().toISOString(),
+      idempotencyKey: reference.ingestKey,
+      payload: { trusted_relay: reference },
+    };
+    if (!await writeFallbackResult(runContext.cwd, entry)) {
+      throw new Error(`Trusted WAL relay fallback persistence failed for ${reference.eventType}`, { cause: error });
+    }
+  }
+}
+
 async function emitWalEvent(
   port: number,
   eventType: string,
@@ -1175,7 +968,29 @@ async function emitWalEvent(
   idempotencyKeyOverride?: string,
 ): Promise<void> {
   const occurredAt = new Date().toISOString();
-  const idempotencyKey = idempotencyKeyOverride ?? `wal:${_fallbackRunId}:${randomUUID()}`;
+  const runContext = _runFallbackContext;
+
+  // Governing story events are host-authored directly. Caller/API WAL remains
+  // untrusted and can never be promoted by fallback replay.
+  if (storyId && ['story_started', 'story_failed', 'story_skipped'].includes(eventType)) {
+    if (!runContext || runContext.runId !== Number(payload.run_id)) {
+      throw new Error(`Trusted WAL run context is unavailable for ${eventType}`);
+    }
+    const trusted = await persistTrustedWalEvent({
+      eventType,
+      workspaceId,
+      runId: runContext.runId,
+      storyId,
+      specId,
+      source: 'execution-engine',
+      payload,
+      occurredAt,
+    });
+    await relayOrJournalTrustedWal(trusted.reference);
+    return;
+  }
+
+  const idempotencyKey = idempotencyKeyOverride ?? `wal:${runContext?.runId ?? 0}:${randomUUID()}`;
   const body = {
     event_type: eventType,
     workspace_id: workspaceId,
@@ -1186,24 +1001,28 @@ async function emitWalEvent(
     occurred_at: occurredAt,
   };
 
-  const ok = await retryPost(
+  const outcome = await retryPostWithOutcome(
     engineApiEndpoint(port, '/api/wal'),
     body,
     `WAL:${eventType}`,
   );
 
-  if (!ok && _fallbackCwd) {
+  if (outcome.kind === 'permanent_rejection') {
+    throw new Error(`WAL delivery permanently rejected for ${eventType}: HTTP ${outcome.status}`);
+  }
+  if (outcome.kind === 'retryable_exhausted') {
+    if (!runContext) throw new Error(`WAL delivery failed before run fallback initialization for ${eventType}`);
     const entry: FallbackResultEntry = {
       type: 'wal',
       storyId: storyId ?? null,
       status: eventType,
-      runId: _fallbackRunId,
-      retries: 3,
+      runId: runContext.runId,
+      retries: outcome.attempts,
       ts: occurredAt,
       idempotencyKey,
       payload: body,
     };
-    if (!await writeFallbackResult(_fallbackCwd, entry)) {
+    if (!await writeFallbackResult(runContext.cwd, entry)) {
       throw new Error(`WAL fallback persistence failed for ${eventType}`);
     }
   }
@@ -1257,62 +1076,70 @@ async function emitContextTrace(
 }
 
 class WaveFinalizationQueuedError extends Error {
-  constructor(storyId: unknown) {
-    super(`Wave integration finalization is durably queued for recovery but not yet committed for ${String(storyId ?? 'unknown')}`);
+  constructor(storyId: unknown, options?: ErrorOptions) {
+    super(`Wave integration finalization is durably queued for recovery but not yet committed for ${String(storyId ?? 'unknown')}`, options);
     this.name = 'WaveFinalizationQueuedError';
   }
 }
 
-/** POST a story result to the backend with retry + fallback. */
+/** Persist a story result through the host process's canonical DB transaction. */
 async function postStoryResult(
-  port: number,
+  _port: number,
   body: Record<string, unknown>,
-): Promise<void> {
-  const requestedIdempotencyKey = typeof body.idempotencyKey === 'string'
+  callerIdempotencyKey?: string,
+): Promise<CanonicalStoryResultOutcome> {
+  const context = _resultDeliveryContext;
+  if (!context) throw new Error('Canonical story-result delivery context is unavailable');
+  if (Number(body.runId) !== context.runId) throw new Error('Story-result run identity does not match the engine run');
+  const bodyKey = typeof body.idempotencyKey === 'string'
     && /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/.test(body.idempotencyKey)
     ? body.idempotencyKey
-    : null;
-  const idempotencyKey = requestedIdempotencyKey ?? `story-result:${_fallbackRunId}:${randomUUID()}`;
-  const deliveryBody = { ...body, idempotencyKey };
-  const ok = await retryPost(
-    engineApiEndpoint(port, '/api/pipeline/story-result'),
-    deliveryBody,
-    `story-result:${body.storyId ?? 'unknown'}`,
-  );
-
-  if (!ok && _fallbackCwd) {
-    const entry: FallbackResultEntry = {
-      type: 'story_result',
-      storyId: (body.storyId as string) ?? null,
-      status: (body.status as string) ?? null,
-      runId: _fallbackRunId,
-      retries: 3,
-      ts: new Date().toISOString(),
+    : undefined;
+  if (body.idempotencyKey !== undefined && !bodyKey) throw new Error('Invalid story-result idempotency key');
+  if (callerIdempotencyKey && bodyKey && callerIdempotencyKey !== bodyKey) {
+    throw new Error('Conflicting story-result idempotency identities');
+  }
+  const idempotencyKey = callerIdempotencyKey ?? bodyKey ?? `story-result:${context.runId}:${randomUUID()}`;
+  const { runId: _runId, idempotencyKey: _bodyKey, ...payload } = body;
+  try {
+    return await deliverEngineStoryResult(context, {
+      ...(payload as unknown as Omit<CanonicalStoryResultInput, 'runId' | 'expectedWorkspaceId'>),
       idempotencyKey,
-      payload: deliveryBody,
-    };
-    if (!await writeFallbackResult(_fallbackCwd, entry)) {
-      throw new Error(`Story-result fallback persistence failed for ${String(body.storyId ?? 'unknown')}`);
+    });
+  } catch (error) {
+    if (body.integrationFinalization && isRetryableStoryResultPersistenceError(error)) {
+      throw new WaveFinalizationQueuedError(body.storyId, { cause: error });
     }
-    // Wave integration finalization is an atomic backend DB boundary. A local
-    // fallback preserves the packet for recovery but cannot authorize the spec,
-    // WAL, or filesystem ledger projections in this process.
-    if (body.integrationFinalization) {
-      throw new WaveFinalizationQueuedError(body.storyId);
-    }
+    throw error;
   }
 }
+
+const HOST_ONLY_AGENT_ENV_VARS = new Set([
+  'DATABASE_URL', 'DATABASE_URL_TEST', 'PGHOST', 'PGPORT', 'PGUSER',
+  'PGPASSWORD', 'PGDATABASE', 'PGOPTIONS', 'PGSSLMODE', 'PGSSLROOTCERT',
+  'RORCA_PROCESS_ROLE',
+]);
 
 function buildCleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined
       && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)
+      && !HOST_ONLY_AGENT_ENV_VARS.has(k)
+      && !k.startsWith('PG')
+      && !k.startsWith('RORCA_WAL_TRUST_')
       && k !== 'RORCA_QUALIFICATION_TRUSTED_ISSUERS_JSON'
       && k !== 'RORCA_WAVE_PRODUCTION_ACTIVATION_KEY') {
       env[k] = v;
     }
   }
+  // Host-owned Git must never execute hooks written from the autonomous
+  // worktree or consult credential helpers. Sandboxed Git is networkless too.
+  env.GIT_CONFIG_COUNT = '2';
+  env.GIT_CONFIG_KEY_0 = 'core.hooksPath';
+  env.GIT_CONFIG_VALUE_0 = os.devNull;
+  env.GIT_CONFIG_KEY_1 = 'credential.helper';
+  env.GIT_CONFIG_VALUE_1 = '';
   return env;
 }
 
@@ -1320,7 +1147,29 @@ function buildGuardedAgentEnv(cwd: string, baseEnv: Record<string, string> = bui
   const profile = baseEnv.RORCA_AUTONOMOUS_GUARD_PROFILE === 'conflict-resolution'
     ? 'conflict-resolution' as const
     : 'general' as const;
-  return createAutonomousCommandGuard({ cwd, env: baseEnv, profile }).env;
+  let commandDenylist: string[] = [];
+  const serializedDenylist = baseEnv.RORCA_TASK_MANIFEST_COMMAND_DENYLIST_JSON;
+  if (serializedDenylist) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(serializedDenylist) as unknown; }
+    catch { throw new Error('TaskManifest command denylist environment is invalid'); }
+    if (!Array.isArray(parsed) || parsed.length > 50
+      || parsed.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 512)) {
+      throw new Error('TaskManifest command denylist environment is invalid');
+    }
+    commandDenylist = parsed as string[];
+  }
+  return createAutonomousCommandGuard({ cwd, env: baseEnv, profile, commandDenylist }).env;
+}
+
+function isolatedAgentLaunch(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env: Record<string, string>,
+  modelCredentials = true,
+) {
+  return prepareAutonomousSandboxLaunch({ command, args, cwd, env, modelCredentials });
 }
 
 function serializeJsonLine(value: unknown): string {
@@ -1410,9 +1259,10 @@ async function startPiRpcServer(
   if (mcpServers?.playwright) env.RORCA_PI_PLAYWRIGHT_MCP_URL = mcpServers.playwright;
   if (mcpServers?.['chrome-devtools']) env.RORCA_PI_CHROME_MCP_URL = mcpServers['chrome-devtools'];
   const detachedProcessGroup = process.platform !== 'win32';
-  const child = spawn(PI_BIN, args, {
-    cwd,
-    env,
+  const launch = isolatedAgentLaunch(PI_BIN, args, cwd, env);
+  const child = spawn(launch.command, launch.args, {
+    cwd: launch.cwd,
+    env: launch.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: detachedProcessGroup,
   });
@@ -2185,8 +2035,9 @@ export function buildPtyCommand(
           void url;
         }
         if (hasStdioServers) {
-          mcpConfigPath = path.join(os.tmpdir(), `rorca-claude-mcp-${Date.now()}.json`);
-          fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+          mcpConfigPath = path.join(cwd, '.rorca', 'runtime', `rorca-claude-mcp-${Date.now()}.json`);
+          fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
+          fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
         }
       }
       return {
@@ -2260,16 +2111,17 @@ export function buildPtyCommand(
       const compatibility = requireCapabilities(agentModel ? ['model'] : []);
       const env = buildGuardedAgentEnv(cwd);
       // Do not mutate the user's global Codex MCP registry for a run-scoped
-      // PTY. The generated Rorca HTTP endpoint requires bearer auth, while
-      // `codex mcp add --url` without token metadata stalls startup and can
-      // discard the injected prompt. Story context is already in the prompt.
+      // PTY. The generated Rorca HTTP endpoint requires bearer auth, and
+      // global registry mutation can stall startup or discard the injected
+      // prompt. Story context is already in the prompt.
       void mcpServers;
       return {
         command: compatibility.binaryPath!,
-        // Codex 0.132+ rejects the old --approval-mode auto-edit spelling.
-        // Only add options that its own --help probe advertised.
+        // Autonomous PTY workers have no operator attached to answer approval
+        // dialogs. Never let a bounded story turn into a timeout waiting for
+        // input; commands outside the sandbox must fail immediately instead.
         args: [
-          ...(compatibility.capabilities.askForApproval ? ['--ask-for-approval', 'on-request'] : []),
+          ...(compatibility.capabilities.askForApproval ? ['--ask-for-approval', 'never'] : []),
           ...(compatibility.capabilities.noAltScreen ? ['--no-alt-screen'] : []),
           ...(agentModel ? ['--model', agentModel] : []),
         ],
@@ -2595,12 +2447,13 @@ async function spawnAgentViaPty(
         storyId: storyIdForMarker,
       });
       const nodePty = loadNodePty();
-      pty = nodePty.spawn(ptyCommand.command, ptyCommand.args, {
+      const launch = isolatedAgentLaunch(ptyCommand.command, ptyCommand.args, cwd, ptyCommand.env);
+      pty = nodePty.spawn(launch.command, launch.args, {
         name: 'xterm-256color',
         cols: ptyOptions.cols,
         rows: ptyOptions.rows,
-        cwd,
-        env: ptyCommand.env,
+        cwd: launch.cwd,
+        env: launch.env,
         encoding: null,
       });
       await updateRunPtyChildPid(generationRef, pty.pid);
@@ -2753,12 +2606,25 @@ async function spawnAgentViaPty(
             rawArchiveWriter.append(buf);
           } catch (err: unknown) {
             rawArchiveWriteFailed = true;
+            if (generationRef) recordPtyByteTelemetry(
+              { ...generationRef, storyId: storyIdForMarker },
+              'unrecoverable',
+              'archive',
+              buf.length,
+            );
             transcriptRecorder?.recordError(
               'raw_archive_write_failed',
               'Exact raw PTY archive write failed; earlier verified segments remain available.',
             );
             logRunPtyStoreError('Failed to append exact raw PTY archive bytes', ptyOptions.runId, err);
           }
+        } else if (generationRef) {
+          recordPtyByteTelemetry(
+            { ...generationRef, storyId: storyIdForMarker },
+            'unrecoverable',
+            'archive',
+            buf.length,
+          );
         }
         transcriptRecorder?.recordModelBytes(buf);
         // node-pty is push-only. The bounded replay-ring writer batches durable
@@ -3102,15 +2968,15 @@ function spawnClaude(
       }
 
       if (hasStdioServers) {
-        mcpConfigPath = path.join(os.tmpdir(), `rorca-claude-mcp-${Date.now()}.json`);
-        fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+        mcpConfigPath = path.join(cwd, '.rorca', 'runtime', `rorca-claude-mcp-${Date.now()}.json`);
+        fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
+        fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
       }
     }
 
     // Pipe prompt via stdin — positional args silently fail for large prompts (>~32KB).
     const claudeCliModel = resolveClaudeCliModelId(agentModel);
     const args = [
-      '--dangerously-skip-permissions',
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
@@ -3121,9 +2987,10 @@ function spawnClaude(
     ];
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd,
-      env,
+    const launch = isolatedAgentLaunch(CLAUDE_BIN, args, cwd, env);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -3379,9 +3246,10 @@ function spawnOpenCode(
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     // stdin: pipe (to send prompt), stdout: pipe (tee to log + process.stdout), stderr: pipe (capture)
-    const child = spawn(bin, args, {
-      cwd,
-      env,
+    const launch = isolatedAgentLaunch(bin, args, cwd, env);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -3533,7 +3401,7 @@ function spawnOpenCode(
 }
 
 /**
- * Spawn `codex exec --dangerously-bypass-approvals-and-sandbox`.
+ * Spawn `codex exec` inside the mandatory outer autonomous sandbox.
  * Prompt is passed via stdin (codex exec reads stdin when no prompt arg given).
  */
 function spawnCodex(
@@ -3543,35 +3411,22 @@ function spawnCodex(
   logFile: string,
   model?: string | null,
   _onTokenUpdate?: TokenUpdateCallback,
-  mcpServers?: Record<string, string>,
+  _mcpServers?: Record<string, string>,
   outputAdmission?: WaveOutputAdmission,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildGuardedAgentEnv(cwd);
     const startTime = Date.now();
 
-    const codexMcpRegisteredNames: string[] = [];
-    if (mcpServers && Object.keys(mcpServers).length > 0) {
-      for (const [name, url] of Object.entries(mcpServers)) {
-        try {
-          execFileSync(CODEX_BIN, ['mcp', 'add', name, '--url', url], { stdio: 'pipe' });
-          codexMcpRegisteredNames.push(name);
-          process.stdout.write(`[BrowserMCP] Registered ${name} MCP in codex config\n`);
-        } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e);
-          process.stdout.write(`[BrowserMCP] WARNING: Failed to register ${name} MCP in codex: ${msg}\n`);
-        }
-      }
-    }
-
-    const args: string[] = ['exec', '--dangerously-bypass-approvals-and-sandbox'];
+    const args: string[] = ['exec'];
     if (model) args.push('--model', model);
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     // stdin: pipe (to send prompt), stdout: pipe (tee to log + process.stdout), stderr: pipe (capture)
-    const child = spawn(CODEX_BIN, args, {
-      cwd,
-      env,
+    const launch = isolatedAgentLaunch(CODEX_BIN, args, cwd, env);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -3638,11 +3493,7 @@ function spawnCodex(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
-      for (const name of codexMcpRegisteredNames) {
-        try {
-          execFileSync(CODEX_BIN, ['mcp', 'remove', name], { stdio: 'pipe' });
-        } catch { /* ignore if already gone */ }
-      }
+
       if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
@@ -3720,9 +3571,13 @@ async function spawnPiRpc(
     });
   }
 
+  // Keep Pi's structured session inside the isolated worktree. Linux bwrap
+  // mounts this path and Darwin Seatbelt grants only this scoped writable root;
+  // a host os.tmpdir() path is intentionally unavailable to the child.
   const sessionDirectory = createPiSessionDirectory(
     piSessionOptions?.runId ?? process.pid,
     piSessionOptions?.storyId ?? 'story',
+    path.join(cwd, '.rorca', 'ordinary-local-pi-tmp'),
   );
   const logStream = fs.createWriteStream(logFile, { flags: 'a' });
   const mappedEvent = (event: unknown, stream: 'stdout' | 'stderr'): void => {
@@ -4355,6 +4210,9 @@ export async function markStoryPassed(jsonPath: string, storyId: string): Promis
     const raw = fs.readFileSync(jsonPath, 'utf8');
     const spec: SpecJson = JSON.parse(raw);
     const stories = getStories(spec);
+    if (stories.filter(story => story.id === storyId).length > 1) {
+      throw new Error(`Spec contains duplicate story identity ${storyId}`);
+    }
 
     for (const s of stories) {
       if (s.id !== storyId) continue;
@@ -4371,7 +4229,7 @@ export async function markStoryPassed(jsonPath: string, storyId: string): Promis
     }
 
     if (result.changed) {
-      fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+      durableAtomicWriteFile(jsonPath, JSON.stringify(spec, null, 2) + '\n');
       logger.info(`Marked ${storyId} as passed`);
     }
   });
@@ -4549,7 +4407,7 @@ function getGitHead(cwd: string): string | null {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
-    return /^[0-9a-f]{40}$/i.test(head) ? head : null;
+    return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) ? head : null;
   } catch {
     return null;
   }
@@ -4669,12 +4527,9 @@ function gitCommitStory(
       'commit', '-m', `${prefix}(${storyId}): ${storyTitle}\n\nAutomated by Rorca engine.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`,
     ], { cwd, env, stdio: 'pipe' });
 
-    try {
-      execSync('git push origin HEAD', { cwd, env, stdio: 'pipe', timeout: 60_000 });
-    } catch {
-      logger.info('  Push failed (will retry next iteration)');
-    }
-
+    // Story commits are intentionally local. Only the host-owned release seam
+    // may resolve repository authority and perform a remote effect after the
+    // complete run has exact durable authority.
     return {
       committed: true,
       meaningfulFiles: stagedFiles,
@@ -4740,7 +4595,10 @@ function runGate(
     } else {
       logger.info('  [gate] Running tsc --noEmit...');
       try {
-        execSync('npx tsc --noEmit', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
+        const launch = isolatedAgentLaunch('npx', ['tsc', '--noEmit'], cwd, buildGuardedAgentEnv(cwd, env), false);
+        execFileSync(launch.command, launch.args, {
+          cwd: launch.cwd, env: launch.env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS,
+        });
         logger.info('  [gate] tsc passed');
       } catch (err: unknown) {
         const stderr = (err as { stderr?: Buffer })?.stderr?.toString('utf8') ?? '';
@@ -5013,8 +4871,8 @@ interface PendingIntegratedPass {
     costUsd: number;
   };
   graphHits?: number;
-  commitSha: string | null;
-  commitBranch: string | null;
+  originCommitSha: string | null;
+  originBranch: string | null;
   completionPacket?: PiCompletionPacket;
 }
 
@@ -5114,12 +4972,93 @@ function validateIntegratedWorktree(cwd: string, candidateFiles = getIntegration
   return { ok: true, files: [] };
 }
 
+interface IntegratedRunHead {
+  sha: string;
+  branch: string;
+}
+
+/** Stable logical identity for replaying one integrated-pass result delivery. */
+export function deriveIntegratedPassStoryResultIdempotencyKey(input: {
+  workspaceId: string;
+  runId: number;
+  storyId: string;
+  integratedSha: string;
+}): string {
+  const digest = createHash('sha256').update(JSON.stringify({
+    contractVersion: 'integrated-pass-story-result-v1',
+    workspaceId: input.workspaceId,
+    runId: input.runId,
+    storyId: input.storyId,
+    integratedSha: input.integratedSha.toLowerCase(),
+  })).digest('hex');
+  return `story-result:integrated-pass-v1:${digest}`;
+}
+
+export function resolveIntegratedRunHead(
+  config: Pick<EngineConfig, 'cwd' | 'workspacePath' | 'branchName'>,
+): IntegratedRunHead {
+  if (!config.branchName) throw new Error('pipeline run has no canonical branch authority');
+  const checkout = assertCanonicalRunCheckout({
+    cwd: config.cwd,
+    repositoryTopLevel: config.workspacePath ?? config.cwd,
+    branchName: config.branchName,
+  });
+  return { sha: checkout.headSha, branch: checkout.branchName };
+}
+
+interface IntegratedCheckpointAttestation {
+  id: string;
+  evidenceDigest: string;
+  passedAt: string;
+  expiresAt: string;
+}
+
 /**
  * Production-only canonical wave integration seam. It deliberately uses the
  * same durable ledger state machine as the qualification harness: prepare →
  * integrate → validate → final pass projection → finalize. No legacy merge
  * helper may manufacture a target commit or accept a dirty target here.
  */
+/** Persist the exact filesystem-ledger conflict/abort pair used by the production catch path. */
+export async function persistDurableWaveConflictAbortFromRecord(input: {
+  identity: WaveContributionIdentity;
+  durableIdentity: DurableWaveIntegrationIdentity;
+  record: WaveIntegrationRecord | null | undefined;
+}): Promise<void> {
+  const { identity, durableIdentity, record } = input;
+  if (!record?.conflictEvidence || record.state !== 'aborted'
+    || !record.failureReason || !record.conflictEvidence.postAbortHead
+    || record.runId !== identity.runId || record.storyId !== identity.storyId
+    || record.attempt !== identity.attempt || record.sourceCommit !== durableIdentity.sourceCommit
+    || record.sourceBaseCommit !== durableIdentity.sourceBaseCommit
+    || record.expectedParentHead !== durableIdentity.expectedParentHead
+    || record.frozenManifestHash !== durableIdentity.frozenManifestHash) {
+    throw new Error('[wave-integration] filesystem conflict evidence is incomplete after abort');
+  }
+  const conflictedEvidence = { ...record.conflictEvidence, postAbortHead: null };
+  const durable = await readDurableWaveIntegration({
+    runId: durableIdentity.runId,
+    storyId: durableIdentity.storyId,
+    attempt: durableIdentity.attempt,
+  });
+  if (!durable || !['integrating', 'conflicted', 'aborted'].includes(durable.state)) {
+    throw new Error('[wave-integration] durable conflict restart state is missing or invalid');
+  }
+  if (durable.state !== 'aborted') {
+    await markDurableWaveConflicted({
+      identity: durableIdentity,
+      evidence: conflictedEvidence,
+      reason: record.failureReason,
+    });
+  }
+  await markDurableWaveConflictAborted({
+    identity: durableIdentity,
+    priorEvidence: conflictedEvidence,
+    evidence: record.conflictEvidence,
+    reason: record.failureReason,
+  });
+}
+
 async function integrateAndFinalizeWaveContribution(
   config: EngineConfig,
   workspaceId: string | null,
@@ -5130,11 +5069,12 @@ async function integrateAndFinalizeWaveContribution(
   deadline: WaveDeadline,
 ): Promise<void> {
   deadline.assertActive();
+  if (!workspaceId) throw new Error('[wave-integration] workspace identity is required for durable production integration');
   const manifest = config.executionManifests.get(wt.storyId);
   if (!manifest || !config.executionManifestBundlePath || !config.executionManifestBundleHash) {
     throw new Error('[wave-integration] guarded production integration requires a frozen execution manifest bundle');
   }
-  const sourceCommit = pending.commitSha;
+  const sourceCommit = pending.originCommitSha;
   if (!sourceCommit || !/^[0-9a-f]{40}$/i.test(sourceCommit)) {
     throw new Error('[wave-integration] accepted story has no immutable source commit');
   }
@@ -5185,6 +5125,10 @@ async function integrateAndFinalizeWaveContribution(
   const integrated = ledger.integrate(identity);
   if (!integrated.resultingHead) throw new Error('[wave-integration] integration produced no target revision');
   integratedHead = integrated.resultingHead;
+  const canonicalHead = resolveIntegratedRunHead(config);
+  if (canonicalHead.sha !== integrated.resultingHead) {
+    throw new Error('[wave-integration] durable resulting head differs from canonical run checkout');
+  }
   await advanceDurableWaveIntegration({
     identity: durableIdentity,
     from: 'integrating',
@@ -5221,15 +5165,10 @@ async function integrateAndFinalizeWaveContribution(
     })).digest('hex'),
   };
   ledger.markIntegratedValidated(identity, validationIdentity);
-  await advanceDurableWaveIntegration({
-    identity: durableIdentity,
-    from: 'integrated',
-    to: 'integrated_validated',
-    resultingHead: integrated.resultingHead,
-    validationIdentity,
-  });
 
-  const idempotencyKey = `${waveIntegrationLedgerKey(identity)}:finalize`;
+  const idempotencyKey = deriveIntegratedPassStoryResultIdempotencyKey({
+    workspaceId, runId: config.runId, storyId: wt.storyId, integratedSha: integrated.resultingHead,
+  });
   const finalizationIdentity = {
     idempotencyKey,
     revision: integrated.resultingHead,
@@ -5244,10 +5183,23 @@ async function integrateAndFinalizeWaveContribution(
   await finalizeIntegratedStoryPass(config, workspaceId, pending, {
     attempt: manifest.identity.attempt,
     resultingHead: integrated.resultingHead,
+    validationIdentity,
     finalizationIdentity,
   });
   ledger.finalize(identity, () => finalizationIdentity);
   } catch (error) {
+    if (error instanceof WaveConflictAbort) {
+      try {
+        await persistDurableWaveConflictAbortFromRecord({
+          identity, durableIdentity, record: ledger.get(identity),
+        });
+      } catch (persistenceError) {
+        throw new Error('[wave-integration] failed to persist exact conflict abort evidence', {
+          cause: persistenceError,
+        });
+      }
+      throw error;
+    }
     // The atomic backend finalization packet was persisted locally for replay.
     // Keep the database state at integrated_validated so the replay endpoint can
     // commit it; terminalizing it here would destroy the only safe recovery path.
@@ -5283,49 +5235,58 @@ async function recordIntegratedCheckpointAttestation(
   config: EngineConfig,
   workspaceId: string,
   pending: PendingIntegratedPass,
-): Promise<void> {
-  if (config.dryRun) return;
-  try {
-    const checkpointSha = getGitHead(config.cwd);
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd: config.cwd,
-      env: buildCleanEnv(),
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-    if (typeof checkpointSha !== 'string' || !/^[0-9a-f]{40}$/i.test(checkpointSha) || !/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(branch)) {
-      throw new Error('integrated branch identity is unavailable');
-    }
-    const passedAt = new Date();
-    const evidenceDigest = createHash('sha256').update(JSON.stringify({
-      contractVersion: 'checkpoint-validation-v1',
-      gate: 'execution-engine',
-      outcome: 'passed',
-      workspaceId,
-      runId: config.runId,
-      storyId: pending.story.id,
-      branch,
-      checkpointSha,
-      agentType: pending.agentType,
-    })).digest('hex');
-    const { recordCheckpointValidationAttestation } = await import('./checkpoint-reconciliation');
-    await recordCheckpointValidationAttestation({
-      id: randomUUID(),
-      workspaceId,
-      runId: config.runId,
-      storyId: pending.story.id,
-      branch,
-      checkpointSha,
-      validationGate: 'execution-engine',
-      evidenceDigest,
-      passedAt: passedAt.toISOString(),
-      expiresAt: new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    });
-  } catch (error: unknown) {
-    // The current story can still complete normally; the missing attestation only
-    // removes the crash-recovery shortcut and therefore fails closed on recovery.
-    logger.warn({ err: error, runId: config.runId, storyId: pending.story.id }, '[checkpoint] Failed to persist trusted integrated-worktree attestation');
+  integratedHead: IntegratedRunHead,
+): Promise<IntegratedCheckpointAttestation | null> {
+  if (config.dryRun) return null;
+  const checkpointSha = integratedHead.sha;
+  const branch = integratedHead.branch;
+  const passedAt = new Date();
+  const evidenceDigest = createHash('sha256').update(JSON.stringify({
+    contractVersion: 'checkpoint-validation-v1',
+    gate: 'execution-engine',
+    outcome: 'passed',
+    workspaceId,
+    runId: config.runId,
+    storyId: pending.story.id,
+    branch,
+    checkpointSha,
+    agentType: pending.agentType,
+  })).digest('hex');
+  const id = randomUUID();
+  const passedAtIso = passedAt.toISOString();
+  const expiresAt = new Date(passedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const {
+    getCheckpointAttestationReference,
+    recordCheckpointValidationAttestation,
+  } = await import('./checkpoint-reconciliation');
+  await recordCheckpointValidationAttestation({
+    id,
+    workspaceId,
+    runId: config.runId,
+    storyId: pending.story.id,
+    branch,
+    checkpointSha,
+    validationGate: 'execution-engine',
+    evidenceDigest,
+    passedAt: passedAtIso,
+    expiresAt,
+  });
+  const persisted = await getCheckpointAttestationReference({
+    workspaceId,
+    runId: config.runId,
+    storyId: pending.story.id,
+    branch,
+    checkpointSha,
+  });
+  if (!persisted || persisted.validationGate !== 'execution-engine') {
+    throw new Error('exact integrated checkpoint attestation is unavailable');
   }
+  return {
+    id: persisted.attestationId,
+    evidenceDigest: persisted.attestationDigest,
+    passedAt: persisted.passedAt,
+    expiresAt: persisted.expiresAt,
+  };
 }
 
 async function finalizeIntegratedStoryPass(
@@ -5335,6 +5296,7 @@ async function finalizeIntegratedStoryPass(
   integrationFinalization?: {
     attempt: number;
     resultingHead: string;
+    validationIdentity: Record<string, unknown>;
     finalizationIdentity: {
       idempotencyKey: string;
       revision: string;
@@ -5342,40 +5304,32 @@ async function finalizeIntegratedStoryPass(
     };
   },
 ): Promise<void> {
+  // Resolve and validate the immutable run-branch HEAD after every merge and
+  // integration validation, before any canonical pass mutation. Never reuse the
+  // story worktree parent as integrated evidence.
+  const integratedHead = resolveIntegratedRunHead(config);
+  const resultIdempotencyKey = workspaceId
+    ? deriveIntegratedPassStoryResultIdempotencyKey({
+      workspaceId,
+      runId: config.runId,
+      storyId: pending.story.id,
+      integratedSha: integratedHead.sha,
+    })
+    : undefined;
+  if (integrationFinalization && (
+    integrationFinalization.resultingHead !== integratedHead.sha
+    || integrationFinalization.finalizationIdentity.revision !== integratedHead.sha
+    || integrationFinalization.finalizationIdentity.idempotencyKey !== resultIdempotencyKey
+  )) throw new Error('Wave finalization identity differs from the canonical integrated run head');
+
   // Persist trusted crash-recovery evidence after run-branch integration but
   // before canonical pass mutation. If the process dies between these steps,
   // reconciliation can later prove the exact integrated branch head.
-  if (workspaceId) await recordIntegratedCheckpointAttestation(config, workspaceId, pending);
+  const checkpointAttestation = workspaceId
+    ? await recordIntegratedCheckpointAttestation(config, workspaceId, pending, integratedHead)
+    : null;
 
-  if (workspaceId) {
-    await postStoryResult(config.port, {
-      runId: config.runId,
-      storyId: pending.story.id,
-      status: 'pass',
-      logPath: pending.logPath,
-      commitSha: pending.commitSha,
-      commitMessage: `story(${pending.story.id}): ${pending.story.title}`,
-      worktreeBranch: pending.commitBranch,
-      ...pending.storyResultExtra,
-      ...pending.activeSkillsExtra,
-      ...pending.tokenPayload,
-      ...(pending.completionPacket ? { completionPacket: pending.completionPacket } : {}),
-      ...(integrationFinalization ? {
-        idempotencyKey: integrationFinalization.finalizationIdentity.idempotencyKey,
-        integrationFinalization,
-      } : {}),
-    });
-  }
-
-  // Filesystem/spec state is a replayable projection of the committed backend
-  // finalization. Never let it become the authority that suppresses missing DB,
-  // WAL, or story-result evidence.
-  const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
-  if (!lifecycle.changed) logger.info(`Repaired duplicate pass projections for ${pending.story.id}`);
-  if (!workspaceId) return;
-
-  const stableFinalizationKey = integrationFinalization?.finalizationIdentity.idempotencyKey;
-  await emitWalEvent(config.port, 'story_passed', workspaceId, {
+  const passPayload = {
     run_id: config.runId,
     story_id: pending.story.id,
     story_title: pending.story.title,
@@ -5384,9 +5338,54 @@ async function finalizeIntegratedStoryPass(
     output_tokens: pending.tokenPayload.outputTokens,
     cost_usd: pending.tokenPayload.costUsd,
     integrated: true,
+    commit_sha: integratedHead.sha,
+    integrated_branch: integratedHead.branch,
+    origin_commit_sha: pending.originCommitSha,
+    origin_branch: pending.originBranch,
+    ...(checkpointAttestation ? {
+      checkpoint_attestation_id: checkpointAttestation.id,
+      checkpoint_attestation_digest: checkpointAttestation.evidenceDigest,
+      checkpoint_attestation_passed_at: checkpointAttestation.passedAt,
+      checkpoint_attestation_expires_at: checkpointAttestation.expiresAt,
+    } : {}),
     ...(pending.graphHits != null ? { graph_hits: pending.graphHits } : {}),
     ...(pending.completionPacket ? { completion_packet: pending.completionPacket } : {}),
-  }, pending.story.id, undefined, stableFinalizationKey ? `${stableFinalizationKey}:wal` : undefined);
+  };
+
+  const persisted = workspaceId
+    ? await postStoryResult(config.port, {
+      runId: config.runId,
+      storyId: pending.story.id,
+      status: 'pass',
+      integrated: true,
+      logPath: pending.logPath,
+      ...pending.storyResultExtra,
+      ...pending.activeSkillsExtra,
+      ...pending.tokenPayload,
+      // Integrated authority is the canonical run checkout, never a temporary
+      // per-story worktree which may already have been removed after merge.
+      worktreePath: config.cwd,
+      commitSha: integratedHead.sha,
+      commitMessage: `integrated story(${pending.story.id}): ${pending.story.title}`,
+      worktreeBranch: integratedHead.branch,
+      ...(pending.completionPacket
+        ? { completionPacket: pending.completionPacket as unknown as Record<string, unknown> }
+        : {}),
+      ...(integrationFinalization ? { integrationFinalization } : {}),
+      trustedPassOutbox: { payload: passPayload },
+    }, resultIdempotencyKey)
+    : null;
+
+  // Local spec projection follows the complete canonical result/commit/outbox
+  // transaction. Relay follows the file mutation, so a crash at either boundary
+  // is recovered by the same deterministic duplicate finalization.
+  const lifecycle = await markStoryPassed(config.jsonPath, pending.story.id);
+  if (persisted?.trustedWal) await relayOrJournalTrustedWal(persisted.trustedWal);
+  if (!lifecycle.changed) {
+    logger.info(`Recovered duplicate pass finalization for ${pending.story.id}`);
+    return;
+  }
+  if (!workspaceId) return;
 
   await autoSynthesizeMemory(
     pending.story.id,
@@ -5411,14 +5410,6 @@ async function recordStoryMergeConflict(
 
   if (!workspaceId) return;
 
-  await emitWalEvent(config.port, 'story_failed', workspaceId, {
-    run_id: config.runId,
-    story_id: wt.storyId,
-    reason: 'merge_conflict',
-    conflictingFiles,
-    worktree_branch: wt.branchName,
-    ...(wave != null ? { wave } : {}),
-  }, wt.storyId);
   await postStoryResult(config.port, {
     runId: config.runId,
     storyId: wt.storyId,
@@ -5431,6 +5422,14 @@ async function recordStoryMergeConflict(
     ...(pending?.activeSkillsExtra ?? {}),
     ...(pending?.tokenPayload ?? {}),
   });
+  await emitWalEvent(config.port, 'story_failed', workspaceId, {
+    run_id: config.runId,
+    story_id: wt.storyId,
+    reason: 'merge_conflict',
+    conflictingFiles,
+    worktree_branch: wt.branchName,
+    ...(wave != null ? { wave } : {}),
+  }, wt.storyId);
 }
 
 function createStoryWorktree(
@@ -5491,7 +5490,7 @@ function createStoryWorktree(
   }
 }
 
-function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
+function _mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
   const env = buildCleanEnv();
   // Integration is fail-closed: an operator's dirty target is never folded into
   // an engine-generated commit. The guarded protocol verifies this again.
@@ -5661,7 +5660,7 @@ async function autoResolveConflicts(
   return { resolved: true, resolvedFiles: [...resolvedFiles, ...resolution.resolvedFiles] };
 }
 
-async function mergeWave(
+async function _mergeWave(
   waveBranches: StoryWorktree[],
   waveIndex: number,
   cwd: string,
@@ -5899,6 +5898,22 @@ async function recordParallelStoryInfrastructureFailure(input: {
         writeProgressTxt(input.config.cwd);
       },
     },
+    {
+      // The canonical story-result transaction owns result, accounting, and
+      // trusted outbox authority. Attempt it before the compatibility WAL while
+      // retaining complete-evidence retries when either projection fails.
+      label: 'story-result-failure',
+      run: () => postStoryResult(input.config.port, {
+        runId: input.config.runId,
+        storyId: input.story.id,
+        status: 'fail',
+        reason: input.reasonCode,
+        ...(input.worktree ? {
+          worktreePath: input.worktree.worktreePath,
+          worktreeBranch: input.worktree.branchName,
+        } : {}),
+      }),
+    },
     ...(input.workspaceId ? [{
       label: 'story_failed-wal',
       run: () => emitWalEvent(input.config.port, 'story_failed', input.workspaceId!, {
@@ -5920,19 +5935,6 @@ async function recordParallelStoryInfrastructureFailure(input: {
         } : {}),
       }, input.story.id),
     }] : []),
-    {
-      label: 'story-result-failure',
-      run: () => postStoryResult(input.config.port, {
-        runId: input.config.runId,
-        storyId: input.story.id,
-        status: 'fail',
-        reason: input.reasonCode,
-        ...(input.worktree ? {
-          worktreePath: input.worktree.worktreePath,
-          worktreeBranch: input.worktree.branchName,
-        } : {}),
-      }),
-    },
   ]);
 
   const failures = [...localWriteFailures, ...evidenceFailures];
@@ -6278,9 +6280,6 @@ async function executeStory(
   const allowsNoCodeChanges = executionManifest
     ? executionManifest.repositoryProfile.changePolicy === 'no_code_allowed'
     : storyAllowsNoCodeChanges(story, mode);
-
-  // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
-  setFallbackContext(effectiveCwd, config.runId);
 
   // CTM-002: per-story context-trace writer. Persist raw payloads under the
   // stable workspace/run artifact root, not ephemeral story worktrees, so the
@@ -6987,13 +6986,13 @@ async function executeStory(
         writeProgressTxt(effectiveCwd);
 
         if (workspaceId) {
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', reason: 'rate_limit_exhausted', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id,
             reason: 'rate_limit_exhausted', attempts: rateLimitAttempts,
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
           // PG-020: Auto-synthesize memory from rate-limit-exhausted failure
           await autoSynthesizeMemory(
@@ -7087,6 +7086,7 @@ async function executeStory(
         }
 
         if (workspaceId && currentRetries >= MAX_RETRIES) {
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', reason: 'max_retries', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId,
             story_id: story.id,
@@ -7096,7 +7096,6 @@ async function executeStory(
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
         } else if (workspaceId) {
           await emitWalEvent(config.port, 'story_retry', workspaceId, {
             run_id: config.runId,
@@ -7196,6 +7195,17 @@ async function executeStory(
               'Maximum repair attempts produced no meaningful implementation change.',
             );
             if (workspaceId) {
+              await postStoryResult(config.port, {
+                runId: config.runId,
+                storyId: story.id,
+                status: 'fail',
+                reason: 'max_retries',
+                logPath: storyLogFile,
+                ...storyResultExtra,
+                ...activeSkillsExtra,
+                ...tokenPayload,
+                ...(noCodeCompletionPacket ? { completionPacket: noCodeCompletionPacket } : {}),
+              });
               await emitWalEvent(config.port, 'story_failed', workspaceId, {
                 run_id: config.runId,
                 story_id: story.id,
@@ -7205,16 +7215,6 @@ async function executeStory(
                 log_file: storyLogFile,
                 ...(noCodeCompletionPacket ? { completion_packet: noCodeCompletionPacket } : {}),
               }, story.id);
-              await postStoryResult(config.port, {
-                runId: config.runId,
-                storyId: story.id,
-                status: 'fail',
-                logPath: storyLogFile,
-                ...storyResultExtra,
-                ...activeSkillsExtra,
-                ...tokenPayload,
-                ...(noCodeCompletionPacket ? { completionPacket: noCodeCompletionPacket } : {}),
-              });
             }
             markStorySkipped(config.jsonPath, story.id);
             rsMarkStoryFailed(effectiveCwd, {
@@ -7363,6 +7363,17 @@ async function executeStory(
           });
           const commitFailurePacket = currentPiCompletionPacket('blocked', failureSummary);
           if (workspaceId) {
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason: failureReason,
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+              ...(commitFailurePacket ? { completionPacket: commitFailurePacket } : {}),
+            });
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
@@ -7372,16 +7383,6 @@ async function executeStory(
               log_file: storyLogFile,
               ...(commitFailurePacket ? { completion_packet: commitFailurePacket } : {}),
             }, story.id);
-            await postStoryResult(config.port, {
-              runId: config.runId,
-              storyId: story.id,
-              status: 'fail',
-              logPath: storyLogFile,
-              ...storyResultExtra,
-              ...activeSkillsExtra,
-              ...tokenPayload,
-              ...(commitFailurePacket ? { completionPacket: commitFailurePacket } : {}),
-            });
           }
           markStorySkipped(config.jsonPath, story.id);
           rsMarkStoryFailed(effectiveCwd, {
@@ -7440,6 +7441,16 @@ async function executeStory(
             writeProgressTxt(effectiveCwd);
           }
           if (workspaceId && currentRetries >= MAX_RETRIES) {
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason: 'max_retries',
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+            });
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
@@ -7448,15 +7459,6 @@ async function executeStory(
               summary: manifestGate.output,
               log_file: storyLogFile,
             }, story.id);
-            await postStoryResult(config.port, {
-              runId: config.runId,
-              storyId: story.id,
-              status: 'fail',
-              logPath: storyLogFile,
-              ...storyResultExtra,
-              ...activeSkillsExtra,
-              ...tokenPayload,
-            });
           } else if (workspaceId) {
             await emitWalEvent(config.port, 'story_retry', workspaceId, {
               run_id: config.runId,
@@ -7602,16 +7604,6 @@ async function executeStory(
         });
 
         if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId,
-            story_id: story.id,
-            reason: `gitreins_${gitReinsResult.reasonCode}`,
-            attempt: gitReinsAttempt,
-            max_attempts: MAX_RETRIES,
-            evidence_id: gitReinsEvidenceId,
-            worktree: gitReinsResult.worktree,
-            log_file: storyLogFile,
-          }, story.id);
           await postStoryResult(config.port, {
             runId: config.runId,
             storyId: story.id,
@@ -7623,6 +7615,16 @@ async function executeStory(
             ...activeSkillsExtra,
             ...tokenPayload,
           });
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: `gitreins_${gitReinsResult.reasonCode}`,
+            attempt: gitReinsAttempt,
+            max_attempts: MAX_RETRIES,
+            evidence_id: gitReinsEvidenceId,
+            worktree: gitReinsResult.worktree,
+            log_file: storyLogFile,
+          }, story.id);
         }
 
         if (action === 'retry') {
@@ -7732,6 +7734,21 @@ async function executeStory(
           }
 
           if (workspaceId) {
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason,
+              closeoutReasonCodes: reasonCodes,
+              closeoutDecisionId: closeout?.decision.decisionId ?? null,
+              attemptResultId: closeout?.attempt.attemptResultId ?? null,
+              manifestHash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
+              logPath: storyLogFile,
+              ...storyResultExtra,
+              ...activeSkillsExtra,
+              ...tokenPayload,
+              ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+            });
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId,
               story_id: story.id,
@@ -7755,21 +7772,6 @@ async function executeStory(
               ...(graphHits != null ? { graph_hits: graphHits } : {}),
               ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
             }, story.id);
-            await postStoryResult(config.port, {
-              runId: config.runId,
-              storyId: story.id,
-              status: 'fail',
-              reason,
-              closeoutReasonCodes: reasonCodes,
-              closeoutDecisionId: closeout?.decision.decisionId ?? null,
-              attemptResultId: closeout?.attempt.attemptResultId ?? null,
-              manifestHash: closeout?.manifest.manifestHash ?? executionManifest.manifestHash,
-              logPath: storyLogFile,
-              ...storyResultExtra,
-              ...activeSkillsExtra,
-              ...tokenPayload,
-              ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
-            });
           }
           if (currentRetries >= MAX_RETRIES && workspaceId) {
             await autoSynthesizeMemory(
@@ -7807,13 +7809,6 @@ async function executeStory(
         });
         const blockedCompletionPacket = currentPiCompletionPacket('blocked', remediation);
         if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId,
-            story_id: story.id,
-            reason: 'blocked',
-            blocker_reason: 'missing_execution_manifest',
-            ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
-          }, story.id);
           await postStoryResult(config.port, {
             runId: config.runId,
             storyId: story.id,
@@ -7825,6 +7820,13 @@ async function executeStory(
             ...tokenPayload,
             ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
           });
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'blocked',
+            blocker_reason: 'missing_execution_manifest',
+            ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
+          }, story.id);
         }
         await persistRetrievalOutcome(false);
         return 'closeout_blocked';
@@ -7865,8 +7867,8 @@ async function executeStory(
         activeSkillsExtra,
         tokenPayload,
         ...(graphHits != null ? { graphHits } : {}),
-        commitSha: getGitHead(effectiveCwd),
-        commitBranch: getGitBranch(effectiveCwd),
+        originCommitSha: getGitHead(effectiveCwd),
+        originBranch: getGitBranch(effectiveCwd),
         ...(validatedCompletionPacket ? { completionPacket: validatedCompletionPacket } : {}),
       };
 
@@ -7921,6 +7923,17 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: 'timeout',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(timeoutCompletionPacket ? { completionPacket: timeoutCompletionPacket } : {}),
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: 'timeout', timeout_minutes: timeoutMin,
@@ -7931,16 +7944,6 @@ async function executeStory(
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
           ...(timeoutCompletionPacket ? { completion_packet: timeoutCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-          ...(timeoutCompletionPacket ? { completionPacket: timeoutCompletionPacket } : {}),
-        });
 
         // PG-020: Auto-synthesize memory from timed-out story
         await autoSynthesizeMemory(
@@ -7989,6 +7992,16 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId,
           story_id: story.id,
@@ -8001,16 +8014,6 @@ async function executeStory(
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          reason: PROMPT_DELIVERY_FAILURE_CATEGORY,
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-        });
       }
       await persistRetrievalOutcome(false);
       return 'failed';
@@ -8040,6 +8043,17 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: classified.category,
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: effectiveAgent === 'pi' ? 'blocked' : classified.category,
@@ -8050,16 +8064,6 @@ async function executeStory(
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
           ...(blockedCompletionPacket ? { completion_packet: blockedCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-          ...(blockedCompletionPacket ? { completionPacket: blockedCompletionPacket } : {}),
-        });
 
         // PG-020: Auto-synthesize memory from non-retryable failure
         await autoSynthesizeMemory(
@@ -8100,6 +8104,17 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: story.id,
+          status: 'fail',
+          reason: 'max_retries',
+          logPath: storyLogFile,
+          ...storyResultExtra,
+          ...activeSkillsExtra,
+          ...tokenPayload,
+          ...(maxRetriesCompletionPacket ? { completionPacket: maxRetriesCompletionPacket } : {}),
+        });
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: 'max_retries', attempts: currentRetries,
@@ -8109,16 +8124,6 @@ async function executeStory(
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
           ...(maxRetriesCompletionPacket ? { completion_packet: maxRetriesCompletionPacket } : {}),
         }, story.id);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: story.id,
-          status: 'fail',
-          logPath: storyLogFile,
-          ...storyResultExtra,
-          ...activeSkillsExtra,
-          ...tokenPayload,
-          ...(maxRetriesCompletionPacket ? { completionPacket: maxRetriesCompletionPacket } : {}),
-        });
 
         // PG-020: Auto-synthesize memory from max-retries failure
         await autoSynthesizeMemory(
@@ -8298,6 +8303,8 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  await ensureAutonomousModelEgress();
+
   // Report our own PID to the parent worker via IPC so it can update pipeline_runs.pid
   // with the real Node.js engine PID (tsx wrapper PID becomes stale within ~1-2s).
   // process.send is only available when spawned with an IPC channel — the ?. guard
@@ -8387,8 +8394,9 @@ async function main(): Promise<void> {
   }
   const retryCounts = new Map<string, number>();
 
-  // Set fallback context for emitWalEvent / postStoryResult fallback file writes
-  setFallbackContext(config.cwd, config.runId);
+  // Establish the immutable stable run root exactly once. Story worktrees are
+  // never eligible fallback targets, including during parallel execution.
+  initializeRunFallbackContext(config.cwd, config.runId, workspaceId);
 
   // ── Clear stale skipped/blocked flags from previous failed runs ───────────
   // Wave parallel failures mark downstream stories as skipped in the spec JSON.
@@ -8448,13 +8456,6 @@ async function main(): Promise<void> {
     if (!workspaceId) return;
     for (const { ownerId, packet } of packets) {
       const storyId = ownerId.slice(ownerId.indexOf(':') + 1);
-      await emitWalEvent(config.port, 'story_failed', workspaceId, {
-        run_id: config.runId,
-        story_id: storyId,
-        reason: 'blocked',
-        blocker_reason: status,
-        completion_packet: packet,
-      }, storyId);
       await postStoryResult(config.port, {
         runId: config.runId,
         storyId,
@@ -8462,6 +8463,13 @@ async function main(): Promise<void> {
         reason: status,
         completionPacket: packet,
       });
+      await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        run_id: config.runId,
+        story_id: storyId,
+        reason: 'blocked',
+        blocker_reason: status,
+        completion_packet: packet,
+      }, storyId);
     }
   };
 
@@ -8510,7 +8518,7 @@ async function main(): Promise<void> {
   }
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
-  if (config.parallelism > 1 && config.terminalMode !== 'pty' && !config.specificStory) {
+  if (config.parallelism > 1 && !isPtyTerminalMode(config.terminalMode) && !config.specificStory) {
     process.exitCode = await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, initialExecutableStories, personaRegistry);
     return;
   }
@@ -8669,15 +8677,8 @@ async function runParallel(
   }
   logger.info('');
 
-  if (workspaceId) {
-    await emitWalEvent(config.port, 'run_started', workspaceId, {
-      run_id: config.runId,
-      parallelism: config.parallelism,
-      waveCount: waves.length,
-      agent_type: config.agentType,
-    });
-  }
-
+  // The worker owns the single trusted run_started event after it transitions
+  // the canonical run. The engine must not create a second caller-WAL copy.
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
@@ -8685,7 +8686,6 @@ async function runParallel(
   const evidenceFailureIds = new Set<string>();
   const pendingIntegratedPasses = new Map<string, PendingIntegratedPass>();
   const queuedFinalizationIds = new Set<string>();
-  const integratedPostures: MergeResolutionPosture[] = [];
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
@@ -8737,19 +8737,20 @@ async function runParallel(
         failReason: `blocked_by: ${blockers.join(', ')}`,
       });
       if (workspaceId) {
-        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        await postStoryResult(config.port, {
+          runId: config.runId,
+          storyId: blockedId,
+          status: 'skip',
+          reason: 'blocked_by',
+          blockedBy: blockers,
+        });
+        await emitWalEvent(config.port, 'story_skipped', workspaceId, {
           run_id: config.runId,
           story_id: blockedId,
           reason: 'blocked_by',
           blockedBy: blockers,
           wave: waveIndex,
         }, blockedId);
-        await postStoryResult(config.port, {
-          runId: config.runId,
-          storyId: blockedId,
-          status: 'skip',
-          blockedBy: blockers,
-        });
       }
     }
   };
@@ -8799,11 +8800,11 @@ async function runParallel(
         });
 
         if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip', reason: 'blocked_by', blockedBy: blockers });
+          await emitWalEvent(config.port, 'story_skipped', workspaceId, {
             run_id: config.runId, story_id: original.id,
             reason: 'blocked_by', blockedBy: blockers,
           }, original.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip', blockedBy: blockers });
         }
         continue;
       }
@@ -8858,10 +8859,15 @@ async function runParallel(
           });
 
           if (workspaceId) {
+            await postStoryResult(config.port, {
+              runId: config.runId,
+              storyId: story.id,
+              status: 'fail',
+              reason: 'worktree_create_failed',
+            });
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
             }, story.id);
-            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
           }
         }
       }
@@ -9034,7 +9040,7 @@ async function runParallel(
     // before potentially expensive merge work begins.
     await persistNewlyBlockedStories(wave.index);
 
-    const finalizeMergedWorktree = async (wt: StoryWorktree): Promise<boolean> => {
+    const _finalizeMergedWorktree = async (wt: StoryWorktree): Promise<boolean> => {
       const pendingPass = pendingIntegratedPasses.get(wt.storyId);
       if (!pendingPass) {
         failedIds.add(wt.storyId);

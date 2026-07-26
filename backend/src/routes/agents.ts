@@ -40,6 +40,8 @@ async function getWorkspacePath(workspaceId: string): Promise<string | null> {
  * @swagger
  * /api/agents:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agents]
  *     summary: Get AGENTS.md roles for a workspace
  *     operationId: getAgentRoles
@@ -96,6 +98,8 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/agents:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agents]
  *     summary: Update AGENTS.md roles for a workspace
  *     operationId: updateAgentRoles
@@ -176,6 +180,8 @@ router.put('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/agents/generate:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agents]
  *     summary: Generate AGENTS.md from workspace directory structure
  *     operationId: generateAgentRoles
@@ -224,6 +230,8 @@ router.post('/generate', async (req: Request, res: Response) => {
  * @swagger
  * /api/agents/violations:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Agents]
  *     summary: Query AGENTS.md governance violations
  *     operationId: listAgentViolations

@@ -17,6 +17,7 @@ import {
   normalizeGraphFilePath,
   parseAgtype,
 } from './knowledge-graph';
+import { buildRorcaCypherSql } from './graph-contract';
 import { logger } from './logger';
 import {
   describeRuntimeGraph,
@@ -470,7 +471,7 @@ async function cypherQuery<T = Record<string, unknown>>(
 ): Promise<T[]> {
   const client = await pool.connect();
   const columnDef = returnColumns.map((column) => `${column.name} ${column.type}`).join(', ');
-  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
+  const sql = buildRorcaCypherSql(cypher, columnDef);
 
   try {
     return await withAgeSession(client, async () => {

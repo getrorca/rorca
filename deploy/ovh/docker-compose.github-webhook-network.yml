@@ -1,0 +1,17 @@
+# Review-only Compose overlay for the observed OVH host topology.
+# Apply only with explicit deployment authority alongside the existing Rorca
+# compose project. The running container was observed as rorca-rorca-1, so the
+# service key is `rorca`; it remains on rorca_default and also joins the external
+# Traefik network `coolify` under one private upstream alias.
+services:
+  rorca:
+    networks:
+      default: {}
+      coolify:
+        aliases:
+          - rorca-github-webhook
+
+networks:
+  coolify:
+    external: true
+    name: coolify

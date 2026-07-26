@@ -5,12 +5,15 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
+import { once } from 'events';
 import * as fs from 'fs';
+import type { Server } from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
@@ -26,19 +29,49 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
-let app: Express;
+// Lifecycle compilation is certified separately. Batch authoring tests retain
+// canonical persistence/workflow behavior without creating immutable portfolio
+// evidence that a fixture teardown is not authorized to delete.
+jest.mock('../../lib/spec-post-save-workflow', () => {
+  const actual = jest.requireActual('../../lib/spec-post-save-workflow');
+  return {
+    ...actual,
+    finalizeSpecPostSavePlanIfReady: jest.fn().mockResolvedValue(null),
+  };
+});
+
+let app: Server;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let authToken: string;
+let fixtureUserId: string;
+let walBoundary = 0;
+
+const WORKSPACE_ID = `ws-batch-${crypto.randomUUID()}`;
 
 const validLlmResponse = JSON.stringify({
   stories: [
     {
       id: 'US-001',
-      title: 'Story one',
-      description: 'Desc one',
-      acceptanceCriteria: ['AC1', 'AC2', 'AC3'],
+      title: 'User login',
+      description: 'Allow users to log in with email and password',
+      acceptanceCriteria: [
+        'Given valid credentials, the user is authenticated',
+        'Given invalid credentials, an error is shown',
+        'The session persists across refresh',
+      ],
       dependsOn: [],
+    },
+    {
+      id: 'US-002',
+      title: 'Dashboard view',
+      description: 'Show the user dashboard after login',
+      acceptanceCriteria: [
+        'The dashboard shows the user name',
+        'The dashboard shows recent activity',
+        'The dashboard loads within two seconds',
+      ],
+      dependsOn: ['US-001'],
     },
   ],
 });
@@ -61,45 +94,84 @@ async function waitForBatch(batchId: string, timeoutMs = 10_000): Promise<void> 
   throw new Error(`Batch ${batchId} did not finish within ${timeoutMs}ms`);
 }
 
-beforeEach(async () => {
-  jest.resetModules();
+async function cleanFixtureState(): Promise<void> {
+  const slugs = (await query<{ spec_slug: string }>(
+    `SELECT DISTINCT spec_slug FROM spec_generation_logs
+     WHERE context_summary_json->>'workspaceId' = $1`,
+    [WORKSPACE_ID],
+  )).map(row => row.spec_slug);
 
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockImplementation((m: string) =>
-      ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
-    ),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
-  }));
+  await execute('DELETE FROM spec_post_save_workflow_runs WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM spec_jobs WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM spec_search_index WHERE workspace_id = $1', [WORKSPACE_ID]);
+  if (slugs.length > 0) {
+    await execute('DELETE FROM spec_versions WHERE spec_slug = ANY($1::text[])', [slugs]);
+  }
+  await execute(
+    `DELETE FROM spec_generation_logs WHERE context_summary_json->>'workspaceId' = $1`,
+    [WORKSPACE_ID],
+  );
+  await execute(
+    `DELETE FROM wal_events
+     WHERE workspace_id = $1
+        OR (id > $2 AND event_type IN ('batch_started', 'batch_progress', 'batch_finished', 'generate'))`,
+    [WORKSPACE_ID, walBoundary],
+  );
+  fs.rmSync(path.join(tmpDir, 'forge'), { recursive: true, force: true });
+}
 
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-batch-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+  const authId = crypto.randomUUID();
+  const fixtureUser = await ensureTestUser({
+    email: `batch-${authId}@test.rorca.local`,
+    authId,
+    role: 'admin',
+    plan: 'pro',
+  });
+  fixtureUserId = fixtureUser.id;
 
   const serverMod = require('../../server');
-  app = serverMod.default;
-const llmClient = require('../../lib/llm-client');
+  const expressApp = serverMod.default as Express;
+  const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
+  authToken = await getAuthToken(expressApp, {
+    email: fixtureUser.email,
+    authId,
+    role: 'admin',
+    displayName: 'Batch Test Admin',
+  });
+  await execute(
+    `INSERT INTO workspaces (id, label, path) VALUES ($1, 'Batch Test WS', $2)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [WORKSPACE_ID, tmpDir],
+  );
+  const boundary = await queryOne<{ id: string | number | null }>('SELECT MAX(id) AS id FROM wal_events');
+  walBoundary = Number(boundary?.id ?? 0);
 
-  // Seed a workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1) ON CONFLICT (id) DO NOTHING`, [os.tmpdir()]);
-
-  authToken = await getAuthToken(app);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-  const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
-  if (fs.existsSync(specsRoot)) {
-    fs.rmSync(specsRoot, { recursive: true, force: true });
-  }
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  jest.clearAllMocks();
+  mockChatComplete.mockReset();
+  await cleanFixtureState();
+  const boundary = await queryOne<{ id: string | number | null }>('SELECT MAX(id) AS id FROM wal_events');
+  walBoundary = Number(boundary?.id ?? 0);
+});
+
+afterEach(cleanFixtureState);
+
+afterAll(async () => {
+  await cleanFixtureState();
+  await execute('DELETE FROM workspaces WHERE id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM users WHERE id = $1', [fixtureUserId]);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/specs/generate/batch ───────────────────────────────────────────
@@ -112,8 +184,8 @@ test('POST /api/specs/generate/batch returns batchId and briefCount', async () =
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { brief: 'Build auth system', workspaceId: 'ws-test', title: 'Auth System' },
-        { brief: 'Build payment flow', workspaceId: 'ws-test', title: 'Payment Flow' },
+        { brief: 'Build auth system', workspaceId: WORKSPACE_ID, title: 'Auth System' },
+        { brief: 'Build payment flow', workspaceId: WORKSPACE_ID, title: 'Payment Flow' },
       ],
     });
 
@@ -133,7 +205,7 @@ test('POST /api/specs/generate/batch returns batchId and briefCount', async () =
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { brief: 'Build billing dashboard', workspaceId: 'ws-test', title: 'Billing Dashboard', postSave: { enrich: false, matchSkills: false, memorySynthesis: false } },
+        { brief: 'Build billing dashboard', workspaceId: WORKSPACE_ID, title: 'Billing Dashboard', postSave: { enrich: false, matchSkills: false, memorySynthesis: false } },
       ],
     });
 
@@ -148,8 +220,11 @@ test('POST /api/specs/generate/batch returns batchId and briefCount', async () =
     .set('Authorization', `Bearer ${authToken}`);
 
   expect(statusRes.status).toBe(200);
-  expect(statusRes.body.items[0].status).toBe('completed');
-  expect(statusRes.body.items[0].slug).toBe('billing-dashboard');
+  expect({
+    status: statusRes.body.items[0].status,
+    slug: statusRes.body.items[0].slug,
+    error: statusRes.body.items[0].error,
+  }).toEqual({ status: 'completed', slug: 'billing-dashboard', error: undefined });
 });
 
 test('POST /api/specs/generate/batch with empty briefs → 400', async () => {
@@ -178,8 +253,8 @@ test('POST /api/specs/generate/batch validates brief fields', async () => {
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { title: 'Good Title', brief: 'Good brief', workspaceId: 'ws-test' },
-        { title: 'Bad Title', brief: '', workspaceId: 'ws-test' }, // empty brief
+        { title: 'Good Title', brief: 'Good brief', workspaceId: WORKSPACE_ID },
+        { title: 'Bad Title', brief: '', workspaceId: WORKSPACE_ID }, // empty brief
       ],
     });
 
@@ -195,7 +270,7 @@ test('POST /api/specs/generate/batch accepts any model string (pass-through)', a
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { title: 'Auth System', brief: 'Build auth', workspaceId: 'ws-test', model: 'custom-model-v1' },
+        { title: 'Auth System', brief: 'Build auth', workspaceId: WORKSPACE_ID, model: 'custom-model-v1' },
       ],
     });
 
@@ -212,7 +287,7 @@ test('POST /api/specs/generate/batch emits batch_started WAL event', async () =>
     .post('/api/specs/generate/batch')
     .set('Authorization', `Bearer ${authToken}`)
     .send({
-      briefs: [{ brief: 'Build auth', workspaceId: 'ws-test', title: 'Auth' }],
+      briefs: [{ brief: 'Build auth', workspaceId: WORKSPACE_ID, title: 'Auth' }],
     });
 
   expect(res.status).toBe(201);
@@ -235,7 +310,7 @@ test('GET /api/specs/generate/batch/:batchId returns batch status', async () => 
     .post('/api/specs/generate/batch')
     .set('Authorization', `Bearer ${authToken}`)
     .send({
-      briefs: [{ brief: 'Build auth', workspaceId: 'ws-test', title: 'Auth Check' }],
+      briefs: [{ brief: 'Build auth', workspaceId: WORKSPACE_ID, title: 'Auth Check' }],
     });
 
   const { batchId } = createRes.body;
@@ -273,8 +348,8 @@ test('failed brief does not block subsequent briefs', async () => {
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { brief: 'Will fail', workspaceId: 'ws-test', title: 'Fail Spec' },
-        { brief: 'Will succeed', workspaceId: 'ws-test', title: 'Success Spec' },
+        { brief: 'Will fail', workspaceId: WORKSPACE_ID, title: 'Fail Spec' },
+        { brief: 'Will succeed', workspaceId: WORKSPACE_ID, title: 'Success Spec' },
       ],
     });
 
@@ -300,8 +375,8 @@ test('batch emits batch_progress WAL events for each brief', async () => {
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { brief: 'Brief one', workspaceId: 'ws-test', title: 'Spec One' },
-        { brief: 'Brief two', workspaceId: 'ws-test', title: 'Spec Two' },
+        { brief: 'Brief one', workspaceId: WORKSPACE_ID, title: 'Spec One' },
+        { brief: 'Brief two', workspaceId: WORKSPACE_ID, title: 'Spec Two' },
       ],
     });
 
@@ -343,7 +418,7 @@ test('batch with invalid workspace captures error per-brief', async () => {
     .send({
       briefs: [
         { brief: 'Bad workspace', workspaceId: 'nonexistent', title: 'Ghost' },
-        { brief: 'Good workspace', workspaceId: 'ws-test', title: 'Good Spec' },
+        { brief: 'Good workspace', workspaceId: WORKSPACE_ID, title: 'Good Spec' },
       ],
     });
 
@@ -365,7 +440,7 @@ test('batch writes spec and emits generate WAL event', async () => {
     .post('/api/specs/generate/batch')
     .set('Authorization', `Bearer ${authToken}`)
     .send({
-      briefs: [{ brief: 'Build auth', workspaceId: 'ws-test', title: 'Batch Auth' }],
+      briefs: [{ brief: 'Build auth', workspaceId: WORKSPACE_ID, title: 'Batch Auth' }],
     });
 
   await waitForBatch(createRes.body.batchId);
@@ -380,5 +455,5 @@ test('batch writes spec and emits generate WAL event', async () => {
   expect(walEvent).toBeDefined();
   const payload = parsePayload(walEvent!.payload);
   expect(payload.title).toBe('Batch Auth');
-  expect(payload.storyCount).toBe(1);
+  expect(payload.storyCount).toBe(2);
 });

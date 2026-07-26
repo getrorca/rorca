@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, apiFetchProviderMutation } from '../lib/apiFetch';
 
 interface DeliveryPolicy {
   id: string;
@@ -175,7 +175,7 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
       if (checks.length === 0) throw new Error('At least one required CI check is required');
       const expiry = new Date(expiresAt);
       if (Number.isNaN(expiry.getTime())) throw new Error('A valid policy expiry is required');
-      await apiFetch(`/api/workspaces/${workspaceId}/github/delivery-policies`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/delivery-policies`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newRequestId('delivery-policy-create') },
         body: JSON.stringify({
@@ -212,7 +212,7 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
     if (!accepted) return;
     setSaving(true);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/delivery-policies/${policy.id}/activate`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/delivery-policies/${policy.id}/activate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newRequestId('delivery-policy-activate') },
         body: JSON.stringify({
@@ -237,7 +237,7 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
     }
     setSaving(true);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/delivery-policies/${policy.id}/revoke`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/delivery-policies/${policy.id}/revoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newRequestId('delivery-policy-revoke') },
         body: JSON.stringify({ reason }),
@@ -260,7 +260,7 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
     }
     setObserving(true);
     try {
-      const result = await apiFetch<{ queued: boolean; reason: string | null }>(
+      const result = await apiFetchProviderMutation<{ queued: boolean; reason: string | null }>(
         `/api/workspaces/${workspaceId}/github/autonomous-deliveries`,
         {
           method: 'POST',
@@ -289,7 +289,7 @@ export default function AutonomousDeliverySettings({ workspaceId, connected, sho
     }
     setObserving(true);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}/github/delivery-evidence`, {
+      await apiFetchProviderMutation(`/api/workspaces/${workspaceId}/github/delivery-evidence`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ runId: numericRunId, expectedHeadSha: expectedHeadSha.trim().toLowerCase() }),

@@ -35,21 +35,47 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      RORCA_INTERNAL_SERVICE_TOKEN: ${RORCA_INTERNAL_SERVICE_TOKEN:-}
+      # Digest only. The preimage is entered explicitly in the local browser and
+      # is never placed in Compose, server persistence, worker, or child env.
+      RORCA_OPERATOR_CAPABILITY_SHA256: ${RORCA_OPERATOR_CAPABILITY_SHA256:-}
+      # Supported OSS topology is one private local operator. This is not a
+      # hosted multi-user auth surface; only the signed webhook callback may be
+      # routed publicly by the separate exact-path OVH configuration.
+      AUTH_REQUIRED: "false"
+      # API-side spec-drafting CLIs use the same mandatory namespace and
+      # exact-host model-egress boundary as worker agents. HTTP SDK calls remain
+      # in the trusted API process and never grant a child ambient authority.
+      RORCA_AUTONOMOUS_ISOLATION: linux-bwrap
+      RORCA_BWRAP_BIN: /usr/bin/bwrap
+      RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS: ${RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS:-api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com}
+      RORCA_PTY_ARCHIVE_ROOT: /data/rorca/pty-archives
+    volumes:
+      - rorca_pty_archives:/data/rorca/pty-archives
     env_file:
       - path: .env
         required: false
     depends_on:
       db:
         condition: service_healthy
+    # Bind the combined API/UI to loopback by default. Do not change this to a
+    # public interface; use the reviewed exact-path webhook overlay instead.
+    ports:
+      - "${RORCA_BIND_ADDRESS:-127.0.0.1}:${RORCA_PORT:-3030}:3030"
+    # The trusted API needs namespace construction only for sandboxed drafting
+    # CLIs. Its child drops ALL capabilities and receives no host namespace,
+    # API environment, credential home, DB route, or unrestricted network.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined
+    pids_limit: 512
     restart: unless-stopped
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.rorca.rule=Host(`${COOLIFY_FQDN}`)
-      - traefik.http.routers.rorca.entrypoints=https
-      - traefik.http.routers.rorca.tls=true
-      - traefik.http.routers.rorca.tls.certresolver=letsencrypt
-      - traefik.http.services.rorca.loadbalancer.server.port=3030
+      - traefik.enable=false
 
   worker:
     build:
@@ -67,12 +93,35 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      RORCA_INTERNAL_SERVICE_TOKEN: ${RORCA_INTERNAL_SERVICE_TOKEN:-}
+      RORCA_AUTONOMOUS_ISOLATION: linux-bwrap
+      RORCA_BWRAP_BIN: /usr/bin/bwrap
+      # Exact CONNECT destinations for model inference only. The autonomous
+      # namespace has no direct interface/default route and cannot reach DB,
+      # GitHub, localhost, or the Rorca control plane.
+      RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS: ${RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS:-api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com}
+      RORCA_PTY_ARCHIVE_ROOT: /data/rorca/pty-archives
+    volumes:
+      - rorca_pty_archives:/data/rorca/pty-archives
     env_file:
       - path: .env
         required: false
     depends_on:
       db:
         condition: service_healthy
+    # The trusted worker receives the one capability needed to create its bwrap
+    # mount/user/PID/network namespaces. Docker's default seccomp permits
+    # the namespace syscalls when SYS_ADMIN is present; AppArmor must not block
+    # those mount operations. The sandbox drops ALL capabilities before the
+    # model command and has no host network/PID/mount view.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined
+    pids_limit: 512
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'worker.js' > /dev/null"]
@@ -83,4 +132,6 @@ services:
 
 volumes:
   rorca_pgdata:
+    driver: local
+  rorca_pty_archives:
     driver: local

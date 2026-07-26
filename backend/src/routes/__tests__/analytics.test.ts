@@ -8,6 +8,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
@@ -24,66 +26,63 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
-let app: Express;
+let expressApp: Express;
+let app: Server;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
 let authId: string;
 
-const WS_ID = 'ws-analytics';
+let workspaceSequence = 0;
+let WS_ID = '';
+
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  process.env.AUTH_REQUIRED = 'true';
+  expressApp = require('../../server').default as Express;
+  authId = randomUUID();
+  authToken = await getAuthToken(expressApp, {
+    email: `analytics-${process.pid}-${randomUUID()}@rorca.test`,
+    authId,
+  });
+  await execute(`UPDATE users SET plan = 'pro' WHERE auth_id = $1::uuid`, [authId]);
+  app = await new Promise<Server>((resolve, reject) => {
+    const listener = expressApp.listen(0, '127.0.0.1', () => resolve(listener));
+    listener.once('error', reject);
+  });
+});
 
 beforeEach(async () => {
-  jest.resetModules();
-
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockReturnValue(true),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-  }));
-
+  workspaceSequence += 1;
+  WS_ID = `ws-analytics-${process.pid}-${workspaceSequence}`;
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-analytics-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-process.env.AUTH_REQUIRED = 'true';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-  authId = `00000000-0000-4000-8000-${Math.floor(Math.random() * 1_000_000_000_000).toString().padStart(12, '0')}`;
-  authToken = await getAuthToken(app, { authId });
   jest.spyOn(ageGuard, 'checkAge').mockResolvedValue(true);
 
-  // Create workspace directory and DB record
+  // Each test owns a fresh workspace identity; append-only run/evidence state
+  // is retained rather than globally truncated between requests.
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
-  // Clean analytics-specific tables so tests run against a clean state regardless of prior test files
-  await execute(`DELETE FROM memory_relations WHERE workspace_id = $1`, [WS_ID]);
-  await execute(`DELETE FROM memories WHERE workspace_id = $1`, [WS_ID]);
-  await execute(`DELETE FROM token_usage WHERE workspace_id = $1`, [WS_ID]);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
-  await execute(`DELETE FROM billing_profiles WHERE workspace_id = $1 OR workspace_id IS NULL`, [WS_ID]);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [WS_ID]);
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WS_ID, wsDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2)`, [WS_ID, wsDir]);
   await execute(
     `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
-     VALUES ($1, $2::uuid, 'owner')
-     ON CONFLICT (workspace_id, user_auth_id) DO NOTHING`,
+     VALUES ($1, $2::uuid, 'owner')`,
     [WS_ID, authId],
   );
 });
 
 afterEach(async () => {
   jest.restoreAllMocks();
-  // Use require() to get the CURRENT module instance (post-resetModules) for cleanup
-  try {
-    const db = require('../../db/index');
-    await db.execute('TRUNCATE token_usage, story_results, pipeline_runs, billing_profiles, workspace_members, workspaces, users CASCADE');
-    await db.closePool();
-  } catch { /* ignore */ }
+  await execute(
+    `UPDATE pipeline_runs SET status = 'failed', finished_at = COALESCE(finished_at, NOW())
+      WHERE workspace_id = $1 AND status NOT IN ('done', 'failed', 'cancelled', 'partial_failure')`,
+    [WS_ID],
+  );
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
   delete process.env.NODE_ENV;
   delete process.env.AUTH_REQUIRED;
 });
@@ -232,7 +231,7 @@ async function seedSubscriptionProfile(opts: {
   await execute(
     `INSERT INTO billing_profiles (workspace_id, provider, model_pattern, billing_mode, monthly_cost_usd, allocation_basis, effective_from, enabled)
      VALUES ($1, $2, $3, 'subscription', $4, $5, NOW() - INTERVAL '365 days', TRUE)`,
-    [opts.workspaceId ?? null, opts.provider, opts.modelPattern ?? null, opts.monthlyCostUsd, opts.allocationBasis ?? 'even'],
+    [opts.workspaceId === undefined ? WS_ID : opts.workspaceId, opts.provider, opts.modelPattern ?? null, opts.monthlyCostUsd, opts.allocationBasis ?? 'even'],
   );
 }
 
@@ -648,16 +647,16 @@ describe('GET /api/analytics/pi-providers', () => {
       totalInputTokens: 999,
       totalOutputTokens: 999,
       totalCost: 9.99,
-      avgCostPerStory: 9.99,
     });
+    expect(claude.avgCostPerStory).toBeCloseTo(9.99, 5);
   });
 
-  test('applies workspace RLS via withUserClient', async () => {
-    const hiddenWorkspaceId = 'ws-analytics-hidden';
+  test('applies the explicit workspace scope without leaking another workspace', async () => {
+    const hiddenWorkspaceId = `${WS_ID}-hidden`;
     await seedPiProviderData(WS_ID, authId);
     await seedPiProviderData(hiddenWorkspaceId);
 
-    const res = await get('/api/analytics/pi-providers');
+    const res = await get(`/api/analytics/pi-providers?workspace_id=${WS_ID}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(3);

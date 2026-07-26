@@ -5,10 +5,10 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { isUtf8 } from 'buffer';
 import { randomUUID } from 'node:crypto';
-import { execFileSync, execSync, spawn } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -26,19 +26,17 @@ import {
 } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
-import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
-import { getWorkspaceEnvVars } from './env-vars';
+import { DEFAULT_MODEL } from '../lib/llm-client';
 import { checkBudgetThresholds } from './budget';
-import { getVaultKey } from './vault';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
+import { requireWorkspaceAdmin } from '../lib/auth-utils';
 import { parsePaginationParams } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine } from '../lib/semantic-log-parser';
 import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
-import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, storyAllowsNoCodeChanges, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
 import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
@@ -62,12 +60,16 @@ import { persistStoryExecutionManifest } from '../lib/story-closeout';
 import { requiresPerStoryWorktree } from '../lib/parallel-wave-core';
 import { inspectApprovedSpecPasses, reconcileApprovedSpecPasses, type PassReconciliationReport } from '../lib/ssdlc-pass-reconciler';
 import { classifyRunLiveness } from '../lib/ssdlc-liveness';
-import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
+import { routeWorkspaceContext } from '../lib/workspace-context-routing';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
-import { synthesizeRunMemory } from '../lib/auto-memory';
 import * as piDetector from '../lib/pi-detector';
+import {
+  RorcaExecutionSandboxError,
+  resolveRorcaExecutionSandboxProfile,
+  type RorcaExecutionSandboxMode,
+} from '../lib/ordinary-local-pi-profile';
 import {
   PiExecutionPreflightError,
   preflightPiModelAndEffort,
@@ -77,15 +79,29 @@ import { logger } from '../lib/logger';
 import { emitLifecycleInvalidation } from '../lib/lifecycle-mutations';
 import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
+import { getPgBossTableSql } from '../lib/pg-boss-schema';
+import {
+  claimDispatchPublication,
+  pipelineTriggerRequestHash,
+  prepareDispatchPublication,
+  publishPreparedDispatch,
+  type DispatchPublicationClaim,
+  type DispatchPublicationState,
+} from '../lib/dispatch-publication';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
+import { terminalizeCanonicalCancellation } from '../lib/pipeline-cancellation';
 import { authRequired, isSuperUser } from '../lib/auth-utils';
-import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
+import { AuthError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isPtyTerminalMode, isTerminalMode, normalizeTerminalMode, resolveOperatorInputTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { normalizeRunAgentType, normalizeRunMetadata, type NormalizedRunAgentType } from '../lib/run-metadata';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
-import { mayFinalizePtyCancellationInline } from '../lib/pty-cancel-policy';
+import {
+  persistCanonicalStoryResult,
+  persistLegacyStoryResultAccounting,
+  type CanonicalStoryResultStatus,
+} from '../lib/story-result-persistence';
 import { isPtyGenerationReaderEnabled } from '../lib/pty-feature-flags';
-import { lifecycleFromLegacyStatus, transitionRunLifecycle, type RunLifecycleStatus } from '../lib/run-lifecycle';
+import { lifecycleFromLegacyStatus, type RunLifecycleStatus } from '../lib/run-lifecycle';
 import { normalizeRejectedStoryEvidence, sanitizeStoredRejectedStoryEvidence, type PortableRejectionEvidence } from '../lib/rejected-wave-closeout';
 import { subscribeRunOutput } from '../lib/run-output-listener';
 import {
@@ -117,6 +133,18 @@ import { sweepOrphanProcesses } from '../worker';
 import { safelyRefreshReusableWorktree, validateReusableBranch, validateReusableWorktree } from '../lib/worktree-freshness';
 import { PipelineRetryJobPayload } from '../lib/pg-boss-schemas';
 import {
+  deriveRunSpecPath,
+  durableAtomicWriteFile,
+  prepareRunSpecSnapshot,
+} from '../lib/run-spec-snapshot';
+import { frozenRunStoryScope } from '../lib/run-story-scope';
+import {
+  inspectRunHostAuthority,
+  linkedPredecessorAuthorityHash,
+} from '../lib/run-host-authority';
+import { loadHostRunCloseoutEvidence } from '../lib/run-closeout-authority';
+import { assertCanonicalRunCheckout, assertOrderedCommitAncestry } from '../lib/run-git-authority';
+import {
   buildGovernedRetrySpec,
   compareRetryPlanToPreview,
   createRetryPreview,
@@ -132,19 +160,31 @@ import {
   type RetryPreviewPacket,
 } from '../lib/retry-governance';
 import {
+  assertHumanRetryApprover,
+  consumeGovernedRetryHumanApproval,
+  issueGovernedRetryHumanApproval,
+} from '../lib/governed-retry-approval';
+import { dispatchOutcome, replayDispositionForRunStatus } from '../lib/hermes-dispatch-outcome';
+import {
+  assertProviderTenantWorkspaceBinding,
+  providerHumanActionHash,
+  ProviderHumanEventSchema,
+  verifyAndPersistProviderHumanAuthority,
+} from '../lib/provider-human-authority';
+import {
   createGovernedRetryDispatchIdentity,
   deriveAuthoritativeRetryScope,
   governedRetryQueuePayloadHash,
   type AuthoritativeRetryScope,
   type RetryCompletionEvidence,
   type RetryIntegrationEvidence,
-  type RetryRunCloseoutEvidence,
 } from '../lib/governed-story-retry';
 import {
   advanceGovernedRetryPreparation,
   cancelGovernedRetryPreview,
   GovernedRetryStateConflictError,
   publishGovernedRetryDispatch,
+  requestGovernedRetryRunCancellation,
   refuseAbandonedGovernedRetryPreparation,
   refuseGovernedRetryPreparation,
   type RetryPreparationState,
@@ -157,6 +197,12 @@ import {
 import { safeParseTaskManifest, type TaskManifest } from '../lib/task-manifest';
 import { computeTaskManifestHash, resolveTaskManifestArtifactPaths } from '../lib/task-manifest-artifacts';
 import {
+  createTaskManifestRunLineage,
+  insertTaskManifestRunLineage,
+  loadAndVerifyTaskManifestRunLineage,
+} from '../lib/task-manifest-run-lineage';
+import {
+  computeSyntheticTaskManifestSpecHash,
   createTaskManifestExecutionEnvelope,
   writeTaskManifestExecutionEnvelope,
   type WriteTaskManifestExecutionEnvelopeResult,
@@ -169,7 +215,6 @@ import {
 } from '../lib/resolve-execution-options';
 import { assertExecutionEnvironmentReady, resolveExecutionEnvironment } from '../lib/execution-environment';
 import { assertExecutionEnvironmentReadyForRun } from '../lib/execution-environment-registry';
-import { createRunnerJob } from '../lib/execution-runner-jobs';
 import { getRecoveryTelemetry } from '../lib/recovery-telemetry';
 import {
   createExecutionSecretReferences,
@@ -177,7 +222,7 @@ import {
   resolveExecutionSecrets,
 } from '../lib/execution-secret-references';
 import { resolveExecutionEngineEntrypoint } from '../lib/execution-engine-entrypoint';
-import { deleteFallbackFile, readFallbackResults } from '../lib/resilient-post';
+import { fallbackReplayBlocksCompletion, replayFallbackResults } from '../lib/fallback-replay';
 import {
   currentWaveParallelPolicyEnvironment,
   enforceWaveParallelPolicy,
@@ -185,6 +230,7 @@ import {
   type WaveExecutionMode,
 } from '../lib/wave-parallel-policy';
 import { auditWaveProductionDecision, resolveWaveProductionPolicy } from '../lib/wave-production-governance';
+import { assertReleaseOnePipelineExecutionRequest } from '../lib/release-one-capability-profile';
 
 const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
 
@@ -282,30 +328,23 @@ function resolveTriggerWavePolicy(input: {
   orchestration: ReturnType<typeof autoSelectOrchestration>;
 } {
   const analysis = autoSelectOrchestration(input.stories);
-  let workspaceParallelRequested = false;
-  try {
-    const configPath = path.join(input.workspacePath, '.rorca', 'config.json');
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { execution?: { waveParallelism?: boolean } };
-      workspaceParallelRequested = config.execution?.waveParallelism === true;
-    }
-  } catch {
-    // Invalid/missing config is never authority to broaden execution.
+  const explicitWaveMode = input.requestedMode === 'wave-parallel';
+  const explicitParallelism = input.requestedParallelism !== undefined;
+  if (explicitWaveMode && (!explicitParallelism || input.requestedParallelism! <= 1)) {
+    throw new ValidationError('incomplete_wave_request: wave-parallel requires explicit parallelism between 2 and 4');
   }
-
-  const explicitlyParallel = input.requestedMode === 'wave-parallel'
-    || (input.requestedParallelism ?? 1) > 1;
+  if (!explicitWaveMode && explicitParallelism && input.requestedParallelism! > 1) {
+    throw new ValidationError('conflicting_wave_request: parallelism greater than one requires explicit wave-parallel mode');
+  }
+  const explicitlyParallel = explicitWaveMode && input.requestedParallelism! > 1;
   const forcedSequential = input.forceSequential === true
     || isPtyTerminalMode(input.terminalMode)
     || Boolean(input.specificStory);
-  const parallelRequested = explicitlyParallel
-    || (workspaceParallelRequested && !forcedSequential);
+  const parallelRequested = explicitlyParallel;
   const policy = enforceWaveParallelPolicy({
     source: 'pipeline-trigger',
-    requestedMode: input.requestedMode ?? (parallelRequested ? 'wave-parallel' : 'sequential'),
-    requestedParallelism: parallelRequested
-      ? (input.requestedParallelism ?? Math.max(2, analysis.parallelism))
-      : 1,
+    requestedMode: input.requestedMode ?? 'sequential',
+    requestedParallelism: parallelRequested ? input.requestedParallelism! : 1,
     forceSequential: forcedSequential,
   }, currentWaveParallelPolicyEnvironment());
 
@@ -631,6 +670,10 @@ async function resolveAndPersistDispatchManifests(input: {
   const stories = (Array.isArray(input.specJson.userStories) ? input.specJson.userStories : phaseStories) as DispatchManifestStory[];
   const mode = detectExecutionModeFromSpec(input.specJson as { mode?: string; phases?: unknown });
   const specProfile = (input.specJson.executionManifest as DispatchManifestProfile | undefined) ?? {};
+  const taskManifestExecution = parseJsonRecordLike(input.specJson.taskManifestExecution);
+  const taskManifestCommandDenylist = Array.isArray(taskManifestExecution?.commandDenylist)
+    ? taskManifestExecution.commandDenylist.filter((value): value is string => typeof value === 'string' && value.length > 0)
+    : [];
   const baseRevision = execSync('git rev-parse HEAD', { cwd: input.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const specRevision = deriveStoryContractRevision(input.specJson);
   const manifests: ImmutableStoryExecutionManifest[] = [];
@@ -743,7 +786,10 @@ async function resolveAndPersistDispatchManifests(input: {
         guardVersion: '1',
         guardedWorkingDirectory: storyWorktreePath,
         allowedWorkingDirectories: [...new Set([storyWorktreePath, input.cwd])],
-        blockedCommandPatterns: ['backend/Jest-style tests without an isolated *_test database'],
+        blockedCommandPatterns: [
+          'backend/Jest-style tests without an isolated *_test database',
+          ...taskManifestCommandDenylist,
+        ],
         redactedEnvironmentKeys: ['ANTHROPIC_API_KEY', 'DATABASE_URL', 'DATABASE_URL_TEST', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'],
         allowBackendJest: false,
         baselineFailurePolicy: profile.baselineFailurePolicy ?? 'block',
@@ -814,67 +860,12 @@ function buildExecutionReadinessSummary(
 // This function reads that file and replays entries into the DB.
 
 export async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
-  const entries = readFallbackResults(cwd);
-  if (entries.length === 0) return 0;
-
-  let synced = 0;
-  for (const entry of entries) {
-    try {
-      if (entry.type === 'wal') {
-        // Replay WAL event directly into DB
-        const p = entry.payload as Record<string, unknown>;
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [p.event_type ?? entry.status,
-          p.workspace_id ?? workspaceId,
-          p.spec_id ?? null,
-          p.story_id ?? entry.storyId,
-          JSON.stringify(p.payload ?? p),]);
-        broadcastAll(walEvent!);
-        synced++;
-      } else if (entry.type === 'story_result') {
-        // Replay story_result into DB
-        const p = entry.payload as Record<string, unknown>;
-        const runId = (p.runId as number) ?? entry.runId;
-        const storyId = (p.storyId as string) ?? entry.storyId;
-        const status = (p.status as string) ?? entry.status;
-
-        if (!runId || !storyId || !status) continue;
-
-        // Check if already synced (idempotent — don't double-insert)
-        const existing = await queryOne('SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2', [runId, storyId]);
-
-        if (!existing) {
-          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
-            ? JSON.stringify(p.activeSkills)
-            : null;
-          await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills, completion_packet)
-             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`, [runId, storyId, status,
-            (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
-            (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
-            (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
-            activeSkillsVal,
-            p.completionPacket && typeof p.completionPacket === 'object' ? JSON.stringify(p.completionPacket) : null,]);
-        }
-        synced++;
-      }
-    } catch (err: any) {
-      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
-    }
+  const replay = await replayFallbackResults(cwd, workspaceId);
+  if (fallbackReplayBlocksCompletion(replay)) {
+    throw new ConflictError('Critical fallback replay is retained, invalid, or incomplete');
   }
-
-  if (synced > 0) {
-    deleteFallbackFile(cwd);
-    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
-  }
-  return synced;
+  return replay.inserted + replay.duplicates;
 }
-
-// All Claude Code env vars that block nested invocation (same as llm-client.ts)
-const CLAUDE_ENV_VARS_TO_REMOVE = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_AGENT_SDK_VERSION',
-  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
-];
 
 function assertReusableWorktreeFresh(
   workspacePath: string,
@@ -911,34 +902,6 @@ function assertReusableBranchFresh(workspacePath: string, branchName: string): v
   );
 }
 
-/** FR-005: When a pipeline run finishes with status='done', snapshot spec version as 'completed'. */
-async function markSpecCompleted(specPath: string): Promise<void> {
-  try {
-    const slug = path.basename(specPath, '.json');
-    // Check if latest spec_versions entry is already 'completed'
-    const latestVersion = await queryOne(`SELECT status FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [slug]) as { status: string } | undefined;
-    if (latestVersion?.status === 'completed') return; // already marked
-
-    // Read spec content from filesystem (approved dir is the canonical location)
-    // spec_path stored in pipeline_runs is relative like 'forge/specs/approved/slug.json'
-    // We just need the slug for the version snapshot
-    const run = await queryOne(`SELECT pr.workspace_id, w.path as workspace_path FROM pipeline_runs pr
-       JOIN workspaces w ON w.id = pr.workspace_id
-       WHERE pr.spec_path = $1 ORDER BY pr.id DESC LIMIT 1`, [specPath]) as { workspace_id: string; workspace_path: string } | undefined;
-    if (!run) return;
-
-    const absSpecPath = path.join(run.workspace_path, specPath);
-    if (!fs.existsSync(absSpecPath)) return;
-
-    const content = fs.readFileSync(absSpecPath, 'utf8');
-    const nextVer = ((await queryOne('SELECT MAX(version) as max_ver FROM spec_versions WHERE spec_slug = $1', [slug]) as { max_ver: number | null } | undefined)?.max_ver ?? 0) + 1;
-
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, 'completed')`, [slug, nextVer, content]);
-  } catch {
-    // Non-fatal — completed status is also derived from pipeline_runs at query time
-  }
-}
-
 const router = Router();
 
 // ─── In-memory output buffers (runId → live stdout/stderr stream) ─────────────
@@ -965,6 +928,8 @@ interface EffectiveRunOptions {
     deploy: boolean;
     externalSend: boolean;
     policyLocked: boolean;
+    /** True only when the route selected the frozen Darwin ordinary-local Pi profile. */
+    ordinaryLocalPi?: boolean;
   };
 }
 
@@ -979,7 +944,8 @@ function isEffectiveRunOptions(value: unknown): value is EffectiveRunOptions {
     && candidate.safety.allowBackendJest === false
     && typeof candidate.safety.deploy === 'boolean'
     && typeof candidate.safety.externalSend === 'boolean'
-    && typeof candidate.safety.policyLocked === 'boolean');
+    && typeof candidate.safety.policyLocked === 'boolean'
+    && (candidate.safety.ordinaryLocalPi === undefined || typeof candidate.safety.ordinaryLocalPi === 'boolean'));
 }
 
 function buildEffectiveRunOptions(input: {
@@ -995,6 +961,7 @@ function buildEffectiveRunOptions(input: {
   policyLocked: boolean;
   deploy: boolean;
   externalSend: boolean;
+  ordinaryLocalPi?: boolean;
 }): EffectiveRunOptions {
   return {
     model: input.model,
@@ -1009,6 +976,7 @@ function buildEffectiveRunOptions(input: {
       deploy: input.deploy,
       externalSend: input.externalSend,
       policyLocked: input.policyLocked,
+      ordinaryLocalPi: input.ordinaryLocalPi ?? false,
     },
   };
 }
@@ -1053,6 +1021,7 @@ interface PipelineRunRow {
   idempotency_key?: string | null;
   task_manifest_id?: string | null;
   task_manifest_artifacts?: Record<string, unknown> | string | null;
+  task_manifest_authority_version?: number | null;
   trigger_options?: Record<string, unknown> | string | null;
   lifecycle_status?: string | null;
   lifecycle_updated_at?: string | null;
@@ -1200,6 +1169,8 @@ interface StoryResultRow {
  * @swagger
  * /api/pipeline/preflight:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Pre-flight capability check for spec stories vs engine
  *     operationId: preflightPipelineCheck
@@ -1246,14 +1217,6 @@ router.post('/preflight', async (req: Request, res: Response) => {
     const orchConfig = loadOrchestrationConfig(workspace.path);
     const executionReadiness = buildExecutionReadinessSummary(workspace.path, specJson);
 
-    let browserMcpAvailable = false;
-    try {
-      require.resolve('@playwright/mcp');
-      browserMcpAvailable = true;
-    } catch {
-      browserMcpAvailable = false;
-    }
-
     res.json({
       compatible: report.compatible,
       mismatchMode: orchConfig.capabilityMismatch,
@@ -1266,8 +1229,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
         warnings: s.result.warnings,
       })),
       executionReadiness,
-      browserMcpAvailable,
-      browserMcpPort: 4040,
+      browserMcpAvailable: false,
+      browserMcpPort: null,
+      browserMcpReason: 'disabled_by_autonomous_isolation',
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Preflight');
@@ -1279,12 +1243,12 @@ router.post('/preflight', async (req: Request, res: Response) => {
  * /api/pipeline/trigger:
  *   post:
  *     tags: [Pipeline]
- *     summary: Trigger a pipeline run (spawn run-loop.sh)
+ *     summary: Trigger a safe local spec run or preview external delivery
  *     operationId: triggerPipelineRun
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Starting a local spec run is a core open-source CLI action and must remain callable via MCP and REST."
+ *     x-rorca-rationale: "Approved specs may execute in a host-created isolated local branch with no provider, merge, or deployment effects; external delivery remains TaskManifest-gated."
  *     x-rorca-public-api: true
- *     description: Spawns the execution engine as a subprocess to run all stories in the specified spec, optionally in a git worktree.
+ *     description: Missing execution options resolve to the safe local profile (isolated worktree, branch-only, no external send, sequential ANSI replay). PR/draft-PR delivery still requires POST /api/pipeline/task-manifests/trigger with exact authority.
  *     requestBody:
  *       required: true
  *       content:
@@ -1295,16 +1259,16 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *             properties:
  *               specPath: { type: string, example: "forge/specs/approved/my-spec.json" }
  *               workspaceId: { type: string }
- *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
- *               autoMerge: { type: boolean, default: false, description: "Auto-merge worktree branch to main on successful run" }
- *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
+ *               autoWorktree: { type: boolean, enum: [true], default: true, description: "Release-1 execution requires a host-created isolated worktree; dry-run previews may omit this field." }
+ *               autoMerge: { type: boolean, enum: [false], default: false, description: "Release-1 never auto-merges." }
+ *               mergeStrategy: { type: string, enum: [branch-only, pr, draft-pr], default: branch-only, description: "branch-only keeps output local and is the ordinary run default; PR/draft-PR external delivery requires an exact TaskManifest." }
  *               dryRun: { type: boolean, default: false }
- *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
- *               orchestrationMode: { type: string, enum: [sequential, wave-parallel], default: sequential, description: "Effective orchestration request. wave-parallel is experimental, non-production-only, and policy-gated." }
- *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Requested effective story parallelism. Values above 1 require the non-production experimental gate." }
+ *               triggerType: { type: string, enum: [manual], default: manual, description: "Scheduled unattended execution is disabled in Release-1." }
+ *               orchestrationMode: { type: string, enum: [sequential], default: sequential, description: "Wave-parallel/high-risk autonomous execution is disabled in Release-1." }
+ *               parallelism: { type: integer, minimum: 1, maximum: 1, default: 1, description: "Release-1 execution is sequential." }
  *               forceSequential: { type: boolean, default: false, description: "Force effective sequential execution." }
  *               qualificationReceiptId: { type: string, description: "Operator-selected immutable qualification receipt identity for governed wave qualification metadata" }
- *               rolloutCohort: { type: string, description: "Explicit governed rollout cohort metadata; it cannot override the non-production wave policy" }
+ *               rolloutCohort: { type: string, description: "Explicit governed production rollout cohort metadata; it is validated with the immutable qualification and activation envelope." }
  *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi], description: "Override the execution agent for this run" }
  *               modelOverride: { type: string, description: "Override the execution model for this run" }
@@ -1324,9 +1288,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                 description: "Run-level terminal renderer mode. native-pty runs the real interactive CLI in xterm with marker-based completion. null/missing resolves to ansi-html for backward compatibility."
  *               executionEnvironment:
  *                 type: string
- *                 enum: [remote-rorca, local-user]
+ *                 enum: [remote-rorca]
  *                 default: remote-rorca
- *                 description: "Where the implementation engine executes. local-user requires a configured local execution bridge and fails closed otherwise."
+ *                 description: "Release-1 executes on the Rorca host; the retired local-user bridge fails closed."
  *     responses:
  *       200:
  *         description: Pipeline started or conflict detected
@@ -1346,7 +1310,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *                     activeRunId: { type: integer }
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or spec not found" }
- *       422: { description: "Spec is not executable or wave-parallel execution was denied by policy" }
+ *       422: { description: "Spec is not executable or the request asks for a disabled Release-1 capability" }
  */
 const PipelineTriggerSchema = z.object({
   specPath: z.string().min(1),
@@ -1357,7 +1321,7 @@ const PipelineTriggerSchema = z.object({
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   orchestrationMode: z.enum(['sequential', 'wave-parallel']).optional(),
-  parallelism: z.number().int().min(1).max(10).optional(),
+  parallelism: z.number().int().min(1).max(4).optional(),
   forceSequential: z.boolean().optional(),
   qualificationReceiptId: z.union([z.string().min(1), z.number().int().positive()]).optional(),
   rolloutCohort: z.string().min(1).max(128).optional(),
@@ -1390,6 +1354,8 @@ const PipelineTriggerSchema = z.object({
   reservedRunId: z.number().optional(),
   executionEnvironment: z.enum(['remote-rorca', 'local-user']).optional(),
   executionEnvironmentId: z.string().optional(),
+  dispatchPublicationOwner: z.string().min(1).max(200).optional(),
+  taskManifestPromotion: z.boolean().optional(),
 }).passthrough();
 
 const HERMES_LEGACY_REPAIR_METADATA_FIELDS = [
@@ -1432,8 +1398,35 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), handlePipelineTrigg
 async function handlePipelineTrigger(req: Request, res: Response): Promise<void> {
   try {
     assertNoLegacyHermesRepairMetadataOnPipelineTrigger(req.body as Record<string, unknown>);
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride } = req.body;
+    const { specPath, workspaceId, autoWorktree: requestedAutoWorktree, autoMerge: requestedAutoMerge, mergeStrategy: requestedMergeStrategy, dryRun, triggerType, orchestrationMode, parallelism: requestedParallelism, forceSequential, qualificationReceiptId, rolloutCohort, queuedRunId, reservedRunId: requestedReservedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, reasoning, rerunFromScratch, readinessOverride, runAnywayOverride, overrideReadinessGate, terminal_mode, terminalMode, operator_keyboard_input, operatorKeyboardInput, idempotencyKey, manifestId, taskManifestArtifacts, taskManifestArtifactRefs, triggerOptions, executionEnvironment, executionEnvironmentId, manifestExecutionAgentOverride, manifestExecutionModelOverride, dispatchPublicationOwner, taskManifestPromotion } = req.body;
+    // The ordinary create/run path is local-only by default. Callers do not
+    // need to understand delivery authority merely to execute an approved spec.
+    const autoWorktree = requestedAutoWorktree ?? true;
+    const autoMerge = requestedAutoMerge ?? false;
+    const mergeStrategy = requestedMergeStrategy ?? 'branch-only';
+    const externalSend = mergeStrategy !== 'branch-only';
+    // Reject disabled execution shapes before compatibility resolvers, workspace
+    // reads, Git, run rows, or queue state. Exact TaskManifest authority is
+    // checked again after a queued-promotion lease is verified below.
+    assertReleaseOnePipelineExecutionRequest({
+      dryRun,
+      triggerType,
+      orchestrationMode,
+      parallelism: requestedParallelism,
+      autoWorktree,
+      autoMerge,
+      mergeStrategy,
+      executionEnvironment,
+      externalSend,
+      taskManifestAuthority: taskManifestPromotion === true
+        || (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true,
+    });
+    let reservedRunId = requestedReservedRunId;
+    const triggerRequestHash = pipelineTriggerRequestHash(req.body as Record<string, unknown>);
     const readinessOverrideRequested = readinessOverride === true || runAnywayOverride === true || overrideReadinessGate === true;
+    // Compatibility parsing is intentionally before the first workspace/DB read.
+    // local-user is unavailable until a signed host closeout protocol exists.
+    const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1442,6 +1435,111 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       throw new NotFoundError('Workspace not found');
       return;
     }
+    if (taskManifestPromotion === true) {
+      if (!queuedRunId || !dispatchPublicationOwner) throw new ConflictError('TaskManifest promotion lacks queue publication authority');
+      const authorizedPromotion = await queryOne<{ id: number }>(
+        `SELECT run.id
+           FROM pipeline_runs run
+           JOIN pipeline_dispatch_publications publication ON publication.run_id = run.id
+          WHERE run.id = $1 AND run.workspace_id = $2 AND run.task_manifest_id IS NOT NULL
+            AND run.status = 'queued' AND publication.state = 'preparing'
+            AND publication.lease_owner = $3 AND publication.lease_expires_at > NOW()`,
+        [queuedRunId, workspaceId, dispatchPublicationOwner],
+      );
+      if (!authorizedPromotion) throw new ConflictError('TaskManifest promotion publication lease is invalid or stale');
+      (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution = true;
+    }
+    assertReleaseOnePipelineExecutionRequest({
+      dryRun,
+      triggerType,
+      orchestrationMode,
+      parallelism: requestedParallelism,
+      autoWorktree,
+      autoMerge,
+      mergeStrategy,
+      executionEnvironment,
+      externalSend,
+      taskManifestAuthority: (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true,
+    });
+
+    // Generic trigger idempotency is application-owned. A scheduler/client may
+    // lose the committed HTTP response; exact replay must discover the durable
+    // run instead of attempting a second INSERT and wedging on the unique key.
+    if (idempotencyKey && queuedRunId === undefined && reservedRunId === undefined && dryRun !== true) {
+      const replay = await queryOne<{
+        id: number; workspace_id: string; spec_path: string; trigger_type: string; status: string;
+        branch_name: string | null; worktree_path: string | null; triggered_via: string | null;
+        dispatch_request_hash: string | null;
+        publication_state: DispatchPublicationState | null; publication_payload: Record<string, unknown> | null;
+        lease_expires_at: Date | string | null;
+      }>(
+        `SELECT run.id, run.workspace_id, run.spec_path, run.trigger_type, run.status,
+                run.branch_name, run.worktree_path, run.triggered_via, run.dispatch_request_hash,
+                publication.state AS publication_state, publication.payload AS publication_payload,
+                publication.lease_expires_at
+           FROM pipeline_runs run
+           LEFT JOIN pipeline_dispatch_publications publication ON publication.run_id = run.id
+          WHERE run.workspace_id = $1 AND run.idempotency_key = $2`,
+        [workspaceId, idempotencyKey],
+      );
+      if (replay) {
+        const replayRunId = normalizeWorkerRunId(replay.id);
+        if (replay.spec_path !== specPath
+          || replay.trigger_type !== (triggerType === 'scheduled' ? 'scheduled' : 'manual')
+          || (replay.dispatch_request_hash !== null && replay.dispatch_request_hash !== triggerRequestHash)) {
+          throw new ConflictError('Pipeline idempotency key was reused for a different trigger request or effective options');
+        }
+        if (!replay.publication_state) {
+          throw new ConflictError('Idempotent pipeline run lacks application publication authority');
+        }
+
+        const replayResponse = (disposition: Parameters<typeof dispatchOutcome>[0]['disposition'], reasonCode: string) => ({
+          ok: true,
+          replayed: true,
+          runId: replayRunId,
+          status: replay.status,
+          queued: replay.status === 'queued',
+          idempotencyKey,
+          branchName: replay.branch_name,
+          worktreePath: replay.worktree_path,
+          dispatchOutcome: dispatchOutcome({
+            disposition,
+            runId: replayRunId,
+            runStatus: replay.status,
+            replayed: true,
+            reasonCode,
+          }),
+        });
+        if (replay.publication_state === 'reserved' && replay.triggered_via === 'queue') {
+          res.status(200).json(replayResponse('already_queued', 'pipeline_queue_reservation_replayed'));
+          return;
+        }
+        if (replay.publication_state === 'reserved'
+          || (replay.publication_state === 'preparing'
+            && !replay.publication_payload
+            && (!replay.lease_expires_at || new Date(replay.lease_expires_at).getTime() <= Date.now()))) {
+          // The committed run exists but no transport payload was durably built.
+          // Resume the exact row through the normal preflight/publication path;
+          // never acknowledge it merely because the idempotency row exists.
+          reservedRunId = replayRunId;
+        } else if (replay.publication_state === 'preparing') {
+          res.status(202).json(replayResponse('pending_publication', 'pipeline_dispatch_preparing'));
+          return;
+        } else if (replay.publication_state === 'published') {
+          res.status(200).json(replayResponse('already_queued', 'pipeline_dispatch_published'));
+          return;
+        } else if (replay.publication_state === 'claimed') {
+          res.status(200).json(replayResponse('running', 'pipeline_dispatch_claimed'));
+          return;
+        } else {
+          res.status(200).json(replayResponse(
+            replayDispositionForRunStatus(replay.status),
+            `pipeline_dispatch_${replay.publication_state}`,
+          ));
+          return;
+        }
+      }
+    }
 
     const requestedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
     const resolvedTerminalMode = resolveOperatorInputTerminalMode(
@@ -1449,7 +1547,6 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       operator_keyboard_input === true || operatorKeyboardInput === true,
     );
     assertTerminalModeAvailable(resolvedTerminalMode);
-    const resolvedExecutionEnvironment = resolveExecutionEnvironment(executionEnvironment);
     await assertExecutionEnvironmentReady(resolvedExecutionEnvironment);
 
     // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
@@ -1477,12 +1574,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
           : undefined;
       const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
+      const executionReadiness = buildExecutionReadinessSummary(workspace.path, specJson);
       res.json({
         dryRun: true,
         executionEnvironment: resolvedExecutionEnvironment.effective,
         terminalMode: resolvedTerminalMode,
         terminal_mode: resolvedTerminalMode,
         estimate,
+        executionReadiness,
       });
       return;
     }
@@ -1540,52 +1639,23 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       workflowConfig: wfConfig,
       activeAgentFallback: activeAgent,
       activeModelFallback: activeModel,
+      // Pi discovery is mode-sensitive. Defer it until the immutable local
+      // versus Linux-bwrap execution posture has been resolved below.
+      resolvePiModel: false,
       log: logger,
     });
     const resolvedAgentType: AgentType = executionOptions.resolvedAgentType;
     let finalAgentModel = executionOptions.finalAgentModel;
 
-    let piCatalog: piDetector.PiModel[] | null = null;
-    const preflightPiSelection = (model: string | null, effort: string | null | undefined) => {
-      if (!piCatalog) {
-        const piStatus = piDetector.detectPi();
-        if (!piStatus.piInstalled || !piStatus.piBinPath) {
-          throw new ValidationError('pi_preflight:not_installed');
-        }
-        piCatalog = piDetector.listPiModels(piStatus.piBinPath);
-      }
-      try {
-        return preflightPiModelAndEffort(model, effort, piCatalog, DEFAULT_PI_MODEL);
-      } catch (error: unknown) {
-        if (error instanceof PiExecutionPreflightError) {
-          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
-        }
-        throw error;
-      }
-    };
-
-    if (resolvedAgentType === 'pi') {
-      const selection = preflightPiSelection(finalAgentModel, resolvedReasoningEffort);
-      finalAgentModel = selection.model;
-      resolvedReasoningEffort = selection.effort ?? undefined;
-    }
-
-    // Per-story Pi assignments use the same model/effort mechanism and must be
-    // validated before readiness, run-row, worktree, hook, or queue mutation.
+    // Per-story Pi assignments participate in the same frozen profile decision
+    // as the run-level agent. A mixed-engine run never gets the Darwin local
+    // Pi exception and remains on the strict Linux bwrap path.
     const phaseStoriesForPreflight = Array.isArray(specModelJson.phases)
       ? (specModelJson.phases as Array<{ stories?: DispatchManifestStory[] }>).flatMap(phase => phase.stories ?? [])
       : [];
     const storiesForPreflight = (Array.isArray(specModelJson.userStories)
       ? specModelJson.userStories
       : phaseStoriesForPreflight) as DispatchManifestStory[];
-    for (const dispatchStory of storiesForPreflight) {
-      if (dispatchStory.excluded) continue;
-      if (resolveStoryAgent(dispatchStory as EngineUserStory, resolvedAgentType) !== 'pi') continue;
-      preflightPiSelection(
-        dispatchStory.model ?? executionOptions.resolvedAgentModel,
-        dispatchStory.effort ?? resolvedReasoningEffort,
-      );
-    }
 
     const waveStories: WaveUserStory[] = storiesForPreflight.map((story) => ({
       id: story.id,
@@ -1647,9 +1717,30 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       autoMerge: Boolean(autoWorktree) && autoMerge === true,
       mergeStrategy: mergeStrategy ?? 'direct',
     });
+    if ((req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution) {
+      // The reservation's complete immutable safety envelope is authoritative;
+      // generic trigger defaults may never broaden branch-only/no-send policy.
+      const taskManifestRunId = reservedRunId ?? queuedRunId;
+      const reservedOptions = taskManifestRunId === undefined ? null : parseJsonRecordLike((await queryOne<{ effective_options: unknown }>(
+        'SELECT effective_options FROM pipeline_runs WHERE id = $1 AND workspace_id = $2',
+        [normalizeWorkerRunId(taskManifestRunId), workspaceId],
+      ))?.effective_options);
+      if (!reservedOptions || !isEffectiveRunOptions(reservedOptions)) {
+        throw new ConflictError('TaskManifest reservation lacks immutable effective execution options');
+      }
+      autonomousSafety = {
+        autoWorktree: reservedOptions.worktree.enabled,
+        autoMerge: reservedOptions.merge.autoMerge,
+        mergeStrategy: reservedOptions.merge.strategy,
+        deploy: reservedOptions.safety.deploy,
+        externalSend: reservedOptions.safety.externalSend,
+        policyLocked: reservedOptions.safety.policyLocked,
+      };
+    }
     let frozenQueuedOptions: EffectiveRunOptions | null = null;
-    if (queuedRunId !== undefined) {
-      const queuedId = normalizeWorkerRunId(queuedRunId);
+    const frozenReservedOrQueuedRunId = queuedRunId ?? reservedRunId;
+    if (frozenReservedOrQueuedRunId !== undefined) {
+      const queuedId = normalizeWorkerRunId(frozenReservedOrQueuedRunId);
       const queuedRow = await queryOne<{
         workspace_id: string;
         spec_path: string;
@@ -1679,6 +1770,96 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         externalSend: queuedOptions.safety.externalSend,
         policyLocked: queuedOptions.safety.policyLocked,
       };
+    }
+
+    const executableStoriesForPreflight = storiesForPreflight.filter((story) => !story.excluded);
+    const hasPiExecution = resolvedAgentType === 'pi'
+      || executableStoriesForPreflight.some((story) => resolveStoryAgent(story as EngineUserStory, resolvedAgentType) === 'pi');
+    const allRequiredAgentsPi = executableStoriesForPreflight.length > 0
+      && executableStoriesForPreflight.every((story) => resolveStoryAgent(story as EngineUserStory, resolvedAgentType) === 'pi');
+    let piExecutionSandboxMode: RorcaExecutionSandboxMode | null = null;
+
+    if (hasPiExecution) {
+      const taskManifestAuthority = (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true;
+      const ordinaryLocalPiProfileRequested = frozenQueuedOptions
+        ? frozenQueuedOptions.safety.ordinaryLocalPi === true
+        : !taskManifestAuthority;
+      try {
+        // Delivery authority never receives the host-local exception. It stays
+        // on the strict Linux profile and will fail closed if bwrap is absent.
+        // Resolve the Darwin exception only for the intentionally narrow
+        // ordinary-local shape so its typed diagnostics remain actionable.
+        const sandboxProfile = ordinaryLocalPiProfileRequested
+          ? resolveRorcaExecutionSandboxProfile({
+              ordinaryLocalPiProfileRequested,
+              agent: resolvedAgentType,
+              allRequiredAgentsPi,
+              autoWorktree: autonomousSafety.autoWorktree,
+              autoMerge: autonomousSafety.autoMerge,
+              mergeStrategy: autonomousSafety.mergeStrategy,
+              deploy: autonomousSafety.deploy,
+              externalSend: autonomousSafety.externalSend,
+              policyLocked: autonomousSafety.policyLocked,
+              parallelism: waveExecutionPolicy.parallelism,
+              orchestrationMode: waveExecutionPolicy.mode,
+              terminalMode: frozenQueuedOptions?.terminal ?? resolvedTerminalMode,
+              executionEnvironment: resolvedExecutionEnvironment.effective,
+              taskManifestAuthority,
+              readinessOverride: readinessOverrideRequested,
+            })
+          : { mode: 'linux-bwrap' as const };
+        piExecutionSandboxMode = sandboxProfile.mode;
+
+        let piCatalog: piDetector.PiModel[] | null = null;
+        const preflightPiSelection = (model: string | null, effort: string | null | undefined) => {
+          if (!piCatalog) {
+            if (sandboxProfile.mode === 'darwin-local-pi') {
+              const inspection = piDetector.inspectPi({ sandboxMode: sandboxProfile.mode });
+              if (!inspection.status.piInstalled || !inspection.status.piBinPath) {
+                throw new ValidationError(`pi_preflight:${inspection.failureCode ?? 'pi_not_installed'}`);
+              }
+              piCatalog = piDetector.listPiModels(inspection.status.piBinPath, { sandboxMode: sandboxProfile.mode });
+            } else {
+              // Keep delivery/autonomous preflight on the legacy Linux-only
+              // probe surface. On a real non-Linux host it resolves to the
+              // typed bwrap requirement below; test/worker bwrap stubs retain
+              // their normal availability contract.
+              const status = piDetector.detectPi();
+              if (!status.piInstalled || !status.piBinPath) {
+                const inspection = piDetector.inspectPi({ sandboxMode: 'linux-bwrap' });
+                throw new ValidationError(`pi_preflight:${inspection.failureCode ?? 'linux_bwrap_required_for_requested_mode'}`);
+              }
+              piCatalog = piDetector.listPiModels(status.piBinPath);
+            }
+          }
+          try {
+            return preflightPiModelAndEffort(model, effort, piCatalog, DEFAULT_PI_MODEL);
+          } catch (error: unknown) {
+            if (error instanceof PiExecutionPreflightError) {
+              throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+            }
+            throw error;
+          }
+        };
+
+        if (resolvedAgentType === 'pi') {
+          const selection = preflightPiSelection(finalAgentModel, resolvedReasoningEffort);
+          finalAgentModel = selection.model;
+          resolvedReasoningEffort = selection.effort ?? undefined;
+        }
+        for (const dispatchStory of executableStoriesForPreflight) {
+          if (resolveStoryAgent(dispatchStory as EngineUserStory, resolvedAgentType) !== 'pi') continue;
+          preflightPiSelection(
+            dispatchStory.model ?? executionOptions.resolvedAgentModel,
+            dispatchStory.effort ?? resolvedReasoningEffort,
+          );
+        }
+      } catch (error) {
+        if (error instanceof RorcaExecutionSandboxError) {
+          throw new ValidationError(`pi_preflight:${error.code}: ${error.message}`);
+        }
+        throw error;
+      }
     }
 
     // All model/effort/safety preflight has succeeded. Readiness override audit
@@ -1869,25 +2050,32 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     }
 
     const executionEngineEntrypoint = resolveExecutionEngineEntrypoint(path.join(__dirname, '..'));
-    const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const hasExecutionEngine = executionEngineEntrypoint.exists;
-    const hasBashRunLoop = fs.existsSync(runLoopSh);
-
-    if (!hasExecutionEngine && !hasBashRunLoop) {
-      throw new UnprocessableError('No execution engine found — expected execution-engine.js or execution-engine.ts');
+    if (!executionEngineEntrypoint.exists) {
+      throw new UnprocessableError('No canonical execution engine found — expected execution-engine.js or execution-engine.ts');
       return;
     }
 
     // Reconcile before queue-row creation, worktree creation, manifest creation,
     // or pg-boss dispatch. An ambiguous story must never be converted into an
     // automatic scope by the scheduler.
-    const passReconciliation = await reconcileApprovedSpecPasses({
-      workspaceId,
-      workspacePath: workspace.path,
-      specPath,
-    });
-    assertReconciliationAllowsAutomaticScope(passReconciliation);
-    (req as any)._passReconciliation = passReconciliation;
+    const taskManifestExecution = (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true
+      && typeof manifestId === 'string' && manifestId.length > 0
+      && triggerOptions !== null && typeof triggerOptions === 'object' && !Array.isArray(triggerOptions)
+      && (triggerOptions as Record<string, unknown>).source === 'task-manifest';
+    if (!taskManifestExecution) {
+      const passReconciliation = await reconcileApprovedSpecPasses({
+        workspaceId,
+        workspacePath: workspace.path,
+        specPath,
+      });
+      assertReconciliationAllowsAutomaticScope(passReconciliation);
+      (req as any)._passReconciliation = passReconciliation;
+    } else {
+      // Synthetic TaskManifest specs are immutable manifest projections, not
+      // human-approved canonical specs. They must never enter approved-spec
+      // pass reconciliation or inherit copied pass authority.
+      (req as any)._passReconciliation = undefined;
+    }
 
     // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
     //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
@@ -2004,10 +2192,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
            terminal_mode, execution_environment, branch_name, worktree_path, effective_options,
            idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
            orchestration_mode, wave_policy, wave_policy_fence, wave_qualification_receipt_id,
-           wave_source_revision, wave_rollout_cohort)
+           wave_source_revision, wave_rollout_cohort, dispatch_request_hash, dispatch_effective_options_hash)
           VALUES ($1, $2, 'queued', $3, $4, NOW(), $5, 'queue', $6, $7, $8, $9, $10, $11, $12,
                   $13, $14, $15, $16, $17::jsonb, $18, $19, $20::jsonb, $21::jsonb,
-                  $22, $23::jsonb, $24, $25, $26, $27)
+                  $22, $23::jsonb, $24, $25, $26, $27, $28, $29)
           RETURNING id`, [
           specPath,
           workspaceId,
@@ -2036,6 +2224,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
           wavePolicy.receipt?.id ?? null,
           wavePolicy.receipt?.sourceRevision ?? null,
           wavePolicy.requested.rolloutCohort,
+          triggerRequestHash,
+          retryHash(queuedEffectiveOptions),
         ]);
         const queuedId = normalizeWorkerRunId(queueResult?.id);
 
@@ -2270,6 +2460,14 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       cwd = worktreePath;
     }
 
+    // The DB row, execution checkout, commit projection, recovery, and terminal
+    // release all bind to one symbolic branch. Direct mode keeps payload branch
+    // controls null while still freezing its actual repository branch in DB.
+    const canonicalRunBranch = branchName ?? (await simpleGit(cwd).revparse(['--abbrev-ref', 'HEAD'])).trim();
+    if (!canonicalRunBranch || canonicalRunBranch === 'HEAD') {
+      throw new ConflictError('Pipeline execution requires a canonical symbolic Git branch');
+    }
+
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     //    If queuedRunId is provided, promote the existing queued row instead of inserting
     // A base-branch merge is opt-in. Worktree isolation alone must never imply
@@ -2306,9 +2504,10 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       }
     }
 
-    if (autonomousSafety.policyLocked || parallelism > 1) {
-      // Wave authority is execution authority only; it never implies merge,
-      // deployment, retry, or lifecycle approval.
+    if ((autonomousSafety.policyLocked && !taskManifestExecution) || parallelism > 1) {
+      // Generic policy-locked/wave authority is execution authority only. A
+      // TaskManifest's separately validated PR/draft-PR strategy is host-frozen
+      // release authority and must never be silently degraded to branch-only.
       resolvedMergeStrategy = 'branch-only';
     }
 
@@ -2327,6 +2526,7 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       policyLocked: autonomousSafety.policyLocked,
       deploy: autonomousSafety.deploy,
       externalSend: autonomousSafety.externalSend,
+      ordinaryLocalPi: piExecutionSandboxMode === 'darwin-local-pi',
     });
 
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
@@ -2362,11 +2562,21 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     );
 
     const existingRunMetadata = existingRunId
-      ? await queryOne<Pick<PipelineRunRow, 'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'>>(
-        `SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options FROM pipeline_runs WHERE id = $1`,
+      ? await queryOne<Pick<PipelineRunRow, 'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'> & {
+        dispatch_request_hash: string | null;
+        dispatch_effective_options_hash: string | null;
+      }>(
+        `SELECT idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+                dispatch_request_hash, dispatch_effective_options_hash
+           FROM pipeline_runs WHERE id = $1`,
         [existingRunId],
       )
       : undefined;
+    const persistedDispatchOptionsHash = retryHash(persistedDispatchOptions);
+    if (existingRunMetadata?.dispatch_effective_options_hash
+      && existingRunMetadata.dispatch_effective_options_hash !== persistedDispatchOptionsHash) {
+      throw new ConflictError('Reserved pipeline run differs from the exact effective execution options');
+    }
     const persistedArtifacts = parseJsonRecordLike(existingRunMetadata?.task_manifest_artifacts) ?? undefined;
     const existingTriggerOptions = parseJsonRecordLike(existingRunMetadata?.trigger_options) ?? undefined;
     const effectiveIdempotencyKey = idempotencyKey ?? existingRunMetadata?.idempotency_key ?? stringValue(existingTriggerOptions?.idempotencyKey);
@@ -2382,6 +2592,12 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       orchestration,
     };
 
+    const taskManifestAuthorityRequested =
+      (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true
+      || Boolean(existingRunId && existingRunMetadata?.task_manifest_id);
+    if (taskManifestAuthorityRequested && existingRunId) {
+      await loadAndVerifyTaskManifestRunLineage(existingRunId, workspace.path);
+    }
     const serializedTaskManifestArtifacts = effectiveTaskManifestArtifacts
       ? JSON.stringify(effectiveTaskManifestArtifacts)
       : null;
@@ -2389,15 +2605,45 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     if (existingRunId) {
       // Promote or complete a pre-reserved queued run — worker will actually execute it.
-      await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
+      const promoted = await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
          branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13, execution_environment = $14,
          idempotency_key = COALESCE($15, idempotency_key), task_manifest_id = COALESCE($16, task_manifest_id), task_manifest_artifacts = COALESCE($17::jsonb, task_manifest_artifacts), trigger_options = $18::jsonb
-         WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, existingRunId, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+         WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, canonicalRunBranch, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, existingRunId, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      if (promoted.rowCount !== 1) throw new ConflictError('Queued run lost canonical promotion authority');
       runId = normalizeWorkerRunId(existingRunId);
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode, execution_environment, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options, dispatch_request_hash, dispatch_effective_options_hash) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb, $21, $22) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, canonicalRunBranch, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, effectiveIncludeGraph, resolvedMergeStrategy, effectiveTerminalMode, resolvedExecutionEnvironment.effective, effectiveIdempotencyKey ?? null, effectiveManifestId ?? null, serializedTaskManifestArtifacts, serializedTriggerOptions, triggerRequestHash, persistedDispatchOptionsHash]);
       runId = normalizeWorkerRunId(runResult?.id);
+    }
+
+    const dispatchRequestHash = existingRunMetadata?.dispatch_request_hash ?? triggerRequestHash;
+    let dispatchPublication = (req as Request & { _dispatchPublication?: DispatchPublicationClaim })._dispatchPublication;
+    if (!dispatchPublication) {
+      dispatchPublication = await claimDispatchPublication({
+        runId,
+        workspaceId,
+        expectedRequestHash: dispatchRequestHash,
+        ...(dispatchPublicationOwner ? { owner: dispatchPublicationOwner } : {}),
+      });
+      if (dispatchPublication.outcome !== 'acquired') {
+        res.status(202).json({
+          ok: true,
+          queued: true,
+          runId,
+          idempotencyKey: effectiveIdempotencyKey ?? null,
+          dispatchOutcome: dispatchOutcome({
+            disposition: 'pending_publication',
+            runId,
+            runStatus: 'queued',
+            replayed: true,
+            retryable: dispatchPublication.outcome === 'busy' || dispatchPublication.outcome === 'published',
+            reasonCode: `pipeline_dispatch_${dispatchPublication.outcome}`,
+          }),
+        });
+        return;
+      }
+      (req as Request & { _dispatchPublication?: DispatchPublicationClaim })._dispatchPublication = dispatchPublication;
     }
 
     // Re-evaluate after the durable run identity exists. This is the API/run-row
@@ -2447,13 +2693,15 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
               wave_qualification_receipt_id = $7,
               wave_source_revision = $8,
               wave_rollout_cohort = $9,
-              trigger_options = $10::jsonb
+              trigger_options = $10::jsonb,
+              task_manifest_authority_version = CASE WHEN $11 THEN 1 ELSE task_manifest_authority_version END
         WHERE id = $2`,
       [
         JSON.stringify(persistedDispatchOptions), runId, parallelism,
         waveExecutionPolicy.mode, JSON.stringify(wavePolicy), wavePolicy.fence,
         wavePolicy.receipt?.id ?? null, wavePolicy.receipt?.sourceRevision ?? null,
         wavePolicy.requested.rolloutCohort, JSON.stringify(effectiveTriggerOptions),
+        taskManifestAuthorityRequested,
       ],
     );
     if (explicitWaveRequested) {
@@ -2537,10 +2785,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         (s: { excluded?: boolean }) => s.excluded === true
       );
       for (const s of excludedStories) {
-        await execute(
-          `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, $2, 'excluded', NOW())`,
-          [runId, s.id]
-        );
+        // Telemetry only. Governing exclusion authority is frozen later in the
+        // host-owned pipeline_runs scope and never comes from a result journal.
         const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_excluded_from_run', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId })]);
         broadcastAll(walEvent!);
       }
@@ -2562,10 +2808,8 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
         (s: { passes?: boolean; excluded?: boolean }) => s.passes === true && s.excluded !== true
       );
       for (const s of alreadyPassing) {
-        await execute(
-          `INSERT INTO story_results (run_id, story_id, status, reason, finished_at) VALUES ($1, $2, 'skip', 'previously_passed', NOW())`,
-          [runId, s.id]
-        );
+        // Historical canonical-spec passes are outside this run's frozen
+        // execution scope. This event is non-governing UI telemetry only.
         const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'previously_passed' })]);
         broadcastAll(walEvent!);
       }
@@ -2578,10 +2822,62 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       startFromStoryId = startFromStory?.id ?? undefined;
     } catch { /* spec read error — non-fatal, worker will handle */ }
 
-    // 10. Resolve immutable per-story manifests before queue dispatch. The
-    // engine receives the resulting execution-only contract and does not
-    // recompute lifecycle evidence or command-safety policy from story prose.
-    const dispatchSpec = JSON.parse(fs.readFileSync(absSpecPath, 'utf8')) as Record<string, unknown>;
+    // 10. Resolve the deterministic run-owned mutable spec. Worktree runs use
+    // .rorca/run-specs/run-<id>.json; only direct non-retry execution retains
+    // the canonical approved-spec mutation contract.
+    const runSpecPath = prepareRunSpecSnapshot({
+      runId,
+      sourceSpecPath: absSpecPath,
+      workspacePath: workspace.path,
+      worktreePath,
+    });
+
+    // Resolve immutable per-story manifests before queue dispatch. The engine
+    // receives the resulting execution-only contract and does not recompute
+    // lifecycle evidence or command-safety policy from story prose.
+    const dispatchSpec = JSON.parse(fs.readFileSync(runSpecPath, 'utf8')) as Record<string, unknown>;
+    const dispatchTaskManifestExecution = parseJsonRecordLike(dispatchSpec.taskManifestExecution);
+    const taskManifestCommandDenylist = Array.isArray(dispatchTaskManifestExecution?.commandDenylist)
+      ? dispatchTaskManifestExecution.commandDenylist.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : [];
+    const { expectedStoryIds, excludedStoryIds } = frozenRunStoryScope(dispatchSpec, storyId);
+    if (expectedStoryIds.length === 0) throw new ValidationError('Runnable spec must freeze at least one non-excluded expected story');
+
+    // A run-owned spec is a projection, not predecessor authority. Clear forged
+    // or stale pass flags for every selected story so the engine executes the
+    // complete frozen scope. Explicit story-only selection remains independent.
+    const expectedSet = new Set(expectedStoryIds);
+    const clearSelectedPasses = (stories: unknown): void => {
+      if (!Array.isArray(stories)) return;
+      for (const candidate of stories) {
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+        const story = candidate as Record<string, unknown>;
+        if (typeof story.id === 'string' && expectedSet.has(story.id.trim())) {
+          story.passes = false;
+          if (story.status === 'passed') story.status = 'pending';
+        }
+      }
+    };
+    clearSelectedPasses(dispatchSpec.userStories);
+    if (Array.isArray(dispatchSpec.phases)) {
+      for (const phase of dispatchSpec.phases) {
+        if (phase && typeof phase === 'object' && !Array.isArray(phase)) {
+          clearSelectedPasses((phase as Record<string, unknown>).stories);
+        }
+      }
+    }
+    durableAtomicWriteFile(runSpecPath, JSON.stringify(dispatchSpec, null, 2) + '\n');
+    startFromStoryId = undefined;
+
+    const executionWorkspacePath = fs.realpathSync(workspace.path);
+    const executionWorktreePath = fs.realpathSync(worktreePath ?? workspace.path);
+    await execute(
+      `UPDATE pipeline_runs
+          SET expected_story_ids = $1::text[], excluded_story_ids = $2::text[],
+              execution_workspace_path = $3, execution_worktree_path = $4
+        WHERE id = $5`,
+      [expectedStoryIds, excludedStoryIds, executionWorkspacePath, executionWorktreePath, runId],
+    );
     const manifestBundle = await resolveAndPersistDispatchManifests({
       workspaceId: workspace.id,
       specId: path.basename(specPath, '.json'),
@@ -2608,7 +2904,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
 
     const jobPayload = {
       runId,
+      workspaceId,
       specPath,
+      runSpecPath,
       workspacePath: workspace.path,
       agent: resolvedAgentType,
       model: finalAgentModel ?? null,
@@ -2621,9 +2919,9 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       mergeStrategy: resolvedMergeStrategy,
       wavePolicy,
       safetyOptions: {
-        deploy: autonomousSafety.deploy,
-        externalSend: autonomousSafety.externalSend,
-        policyLocked: autonomousSafety.policyLocked,
+        deploy: effectiveRunOptions.safety.deploy,
+        externalSend: effectiveRunOptions.safety.externalSend,
+        policyLocked: effectiveRunOptions.safety.policyLocked,
       },
       executionManifestPath: manifestBundle.path,
       envOverrides,
@@ -2646,34 +2944,31 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       ...(effectiveTriggerOptions ? { triggerOptions: effectiveTriggerOptions } : {}),
       ...(executionEnvironment ? { executionEnvironment } : {}),
       ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
+      ...(taskManifestCommandDenylist.length > 0 ? { commandDenylist: taskManifestCommandDenylist } : {}),
     };
 
-    let runnerJobId: string | undefined;
-    if (resolvedExecutionEnvironment.effective === 'local-user') {
-      const runnerJob = await createRunnerJob({
-        runId,
-        environmentId: resolvedExecutionEnvironment.effective,
-        payload: jobPayload,
-      });
-      runnerJobId = runnerJob.id;
-      logger.info(`[Pipeline] Enqueued local runner job for runId=${runId}`);
-    } else {
-      const boss = getBoss();
-      if (typeof boss.createQueue === 'function') {
-        await boss.createQueue('pipeline:run');
-      }
-      const jobId = await boss.send('pipeline:run', jobPayload, {
-        retryLimit: 0,
-        expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
-      });
-
-      if (jobId === null) {
-        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
-        throw new ServiceUnavailableError('Failed to enqueue pipeline:run job: pg-boss returned null (queue may be missing or not started)');
-      }
-
-      logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
+    if (!dispatchPublication || dispatchPublication.outcome !== 'acquired' || !dispatchPublication.owner) {
+      throw new ConflictError('Pipeline dispatch lacks an application outbox publication lease');
     }
+    const preparedPublication = await prepareDispatchPublication({
+      runId,
+      owner: dispatchPublication.owner,
+      requestHash: dispatchRequestHash,
+      effectiveOptionsHash: persistedDispatchOptionsHash,
+      payload: jobPayload,
+    });
+    if (process.env.NODE_ENV === 'test' && process.env.RORCA_TASK_MANIFEST_FAILPOINT === 'after_preparation_before_send') {
+      throw new Error('task_manifest_failpoint:after_preparation_before_send');
+    }
+    await publishPreparedDispatch({
+      runId,
+      owner: dispatchPublication.owner,
+      bossJobId: preparedPublication.bossJobId,
+      payloadHash: preparedPublication.payloadHash,
+      payload: jobPayload,
+    });
+
+    logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
 
     // Determine queue position for response (count jobs queued before this one)
     const queuePos = (await queryOne<{ count: string }>(
@@ -2686,10 +2981,21 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
     const capMode = (req as any)._capabilityMismatchMode;
     const executionReadiness = (req as any)._executionReadiness;
     const canonicalReadiness = (req as any)._specReadiness;
+    const taskResponseIdentity = taskManifestAuthorityRequested
+      ? await taskManifestResponseIdentity(runId, effectiveTaskManifestArtifacts)
+      : undefined;
     res.status(201).json({
       ok: true,
       runId,
       queued: true,
+      ...((req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution === true ? {
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'queued',
+          runId,
+          runStatus: 'queued',
+          reasonCode: 'task_manifest_queued',
+        }),
+      } : {}),
       specId: path.basename(specPath, '.json'),
       queuePosition: parseInt(queuePos, 10) + 1,
       worktreePath,
@@ -2714,11 +3020,11 @@ async function handlePipelineTrigger(req: Request, res: Response): Promise<void>
       lifecyclePhase: 'queued',
       lifecycle_phase: 'queued',
       executionEnvironment: resolvedExecutionEnvironment.effective,
-      ...(runnerJobId ? { runnerJobId } : {}),
       ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
       ...(effectiveManifestId ? { manifestId: effectiveManifestId } : {}),
       ...(effectiveTaskManifestArtifacts ? { artifacts: effectiveTaskManifestArtifacts } : {}),
       ...(effectiveTaskManifestArtifactRefs ? { artifactRefs: effectiveTaskManifestArtifactRefs } : {}),
+      ...(taskResponseIdentity ? { responseIdentity: taskResponseIdentity, workspaceId } : {}),
       ...(executionEnvironmentId ? { executionEnvironmentId } : {}),
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
@@ -2749,6 +3055,7 @@ const TaskManifestTriggerRequestSchema = z.object({
   includeGraph: z.boolean().optional(),
   forceSequential: z.boolean().optional(),
   queue: z.boolean().optional(),
+  humanApproval: ProviderHumanEventSchema.optional(),
 }).passthrough();
 
 type TaskManifestTriggerRequestBody = z.infer<typeof TaskManifestTriggerRequestSchema>;
@@ -2759,6 +3066,7 @@ type TaskManifestArtifactsResponse = {
   tasksMdPath: string;
   specPath: string;
   manifestHash: string;
+  syntheticSpecHash: string;
   reused: boolean;
   absolute: {
     artifactDir: string;
@@ -2899,6 +3207,14 @@ function assertTaskManifestSourceAuthority(
     );
   }
 
+  const slackSource = manifest.source.slack;
+  if (slackSource) {
+    if (!slackSource.teamId) {
+      throw validationErrorWithCode('Invalid source authority: Slack task manifests require source.slack.teamId', 'TASK_MANIFEST_SLACK_TEAM_REQUIRED');
+    }
+    assertProviderTenantWorkspaceBinding({ provider: 'slack', providerTenantId: slackSource.teamId, workspaceId: requestWorkspaceId });
+  }
+
   const sourceSpecPath = manifest.source.rorca?.specPath;
   if (sourceSpecPath && !sourceSpecPath.startsWith('forge/specs/')) {
     throw validationErrorWithCode(
@@ -2928,6 +3244,7 @@ function buildTaskManifestArtifactsResponse(
     tasksMdPath,
     specPath: envelope.relativeSpecPath,
     manifestHash: envelope.manifestHash,
+    syntheticSpecHash: envelope.syntheticSpecHash,
     reused: envelope.artifactReused,
     absolute: {
       artifactDir: envelope.artifactDir,
@@ -2956,7 +3273,7 @@ function buildTaskManifestArtifactRefs(artifacts: TaskManifestArtifactsResponse)
       kind: 'task-manifest',
       role: 'synthetic-spec',
       path: artifacts.specPath,
-      digest: artifacts.manifestHash,
+      digest: artifacts.syntheticSpecHash,
     },
   ];
 }
@@ -3039,23 +3356,34 @@ function resolveTaskManifestExecutionEnvironment(
   const bridgeSupported = hasExecutionEnvironmentSupport();
   const requestedEnvironment = body.executionEnvironment ?? manifest.execution.executionEnvironment ?? 'remote-rorca';
   const requestedEnvironmentId = body.executionEnvironmentId ?? manifest.execution.executionEnvironmentId;
-  const supportedEnvironment = requestedEnvironment === 'remote-rorca' || requestedEnvironment === 'local-user';
+  // External Hermes labels are advisory compatibility metadata, not authority
+  // to select a Rorca execution engine. Unknown labels fail safely onto the
+  // remote broker and are reported as unsupported. The recognized local-user
+  // value still traverses the strict resolver and fails before insertion when
+  // no signed local execution bridge is available.
+  const recognizedEnvironment = requestedEnvironment === 'remote-rorca' || requestedEnvironment === 'local-user';
+  const resolved = recognizedEnvironment
+    ? resolveExecutionEnvironment(requestedEnvironment)
+    : { requested: 'remote-rorca' as const, effective: 'remote-rorca' as const };
 
   return {
-    supported: bridgeSupported && supportedEnvironment,
-    executionEnvironment: requestedEnvironment === 'local-user' ? 'local-user' : 'remote-rorca',
+    supported: bridgeSupported && recognizedEnvironment,
+    executionEnvironment: resolved.effective,
     ...(requestedEnvironmentId ? { executionEnvironmentId: requestedEnvironmentId } : {}),
   };
 }
 
 type TaskManifestRunLookupRow = Pick<PipelineRunRow,
   'idempotency_key' | 'task_manifest_id' | 'task_manifest_artifacts' | 'trigger_options'
+  | 'effective_options' | 'task_manifest_authority_version'
 > & {
   id: number;
   spec_path: string;
   status: string;
   queue_position: number | null;
   triggered_via?: 'queue' | 'run_now' | null;
+  branch_name: string | null;
+  execution_worktree_path: string | null;
 };
 
 type TaskManifestRunReservation =
@@ -3075,6 +3403,7 @@ function buildPlannedTaskManifestEnvelope(workspacePath: string, manifest: TaskM
     manifestPath: paths.manifestPath,
     tasksMdPath: paths.tasksMdPath,
     manifestHash: computeTaskManifestHash(manifest),
+    syntheticSpecHash: computeSyntheticTaskManifestSpecHash(spec),
     artifactReused: false,
   };
 }
@@ -3095,6 +3424,7 @@ function buildTaskManifestTriggerOptions(input: {
   executionEnvironmentSupported: boolean;
   executionOptions: ResolvedExecutionOptions;
   sourceStoryIds: string[];
+  providerHumanReceiptId?: string | null;
 }): JsonRecord {
   const routeDecisionSummary = [
     input.manifest.routeDecision.route,
@@ -3106,6 +3436,8 @@ function buildTaskManifestTriggerOptions(input: {
     manifestId: input.manifest.manifestId,
     idempotencyKey: input.manifest.idempotencyKey,
     manifestHash: input.manifestHash,
+    syntheticSpecHash: input.artifacts.syntheticSpecHash,
+    providerHumanReceiptId: input.providerHumanReceiptId ?? null,
     sourceRefs: {
       ...input.manifest.source,
       sourceStoryIds: input.sourceStoryIds,
@@ -3158,7 +3490,9 @@ async function findTaskManifestRunByIdempotencyKey(
   idempotencyKey: string,
 ): Promise<TaskManifestRunLookupRow | undefined> {
   return queryOne<TaskManifestRunLookupRow>(
-    `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+    `SELECT id, spec_path, status, queue_position, triggered_via, branch_name, execution_worktree_path,
+            idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+            effective_options, task_manifest_authority_version
        FROM pipeline_runs
       WHERE workspace_id = $1
         AND idempotency_key = $2
@@ -3187,22 +3521,58 @@ function assertExistingTaskManifestRunMatchesHash(
   );
 }
 
-function buildTaskManifestReplayResponse(input: {
+async function taskManifestResponseIdentity(runId: number, artifacts: unknown): Promise<JsonRecord> {
+  const lineage = await queryOne<{
+    workspace_id: string; manifest_id: string; source_idempotency_key: string;
+    manifest_hash: string; synthetic_spec_hash: string; lineage_identity_hash: string;
+    provider_human_receipt_id: string | null;
+  }>(
+    `SELECT workspace_id, manifest_id, source_idempotency_key, manifest_hash,
+            synthetic_spec_hash, lineage_identity_hash, provider_human_receipt_id
+     FROM task_manifest_run_lineage WHERE run_id = $1`, [runId],
+  );
+  if (!lineage) throw new ConflictError('TaskManifest response lacks immutable run lineage');
+  return {
+    schemaVersion: 'rorca.task-manifest-response-identity.v1',
+    workspaceId: lineage.workspace_id,
+    runId,
+    manifestId: lineage.manifest_id,
+    idempotencyKey: lineage.source_idempotency_key,
+    manifestHash: lineage.manifest_hash,
+    syntheticSpecHash: lineage.synthetic_spec_hash,
+    lineageIdentityHash: lineage.lineage_identity_hash,
+    artifactDigest: retryHash(artifacts),
+    providerHumanReceiptId: lineage.provider_human_receipt_id,
+  };
+}
+
+async function buildTaskManifestReplayResponse(input: {
   row: TaskManifestRunLookupRow;
   manifest: TaskManifest;
   manifestHash: string;
   fallbackArtifacts: TaskManifestArtifactsResponse;
   fallbackArtifactRefs: JsonRecord[];
-}): JsonRecord {
+}): Promise<JsonRecord> {
   const artifacts = parseJsonRecordLike(input.row.task_manifest_artifacts) ?? input.fallbackArtifacts;
   const artifactRefs = getStoredArtifactRefsFromTriggerOptions(input.row.trigger_options) ?? input.fallbackArtifactRefs;
+  const runId = Number(input.row.id);
+  const disposition = replayDispositionForRunStatus(input.row.status);
+  const responseIdentity = await taskManifestResponseIdentity(runId, artifacts);
   return {
     ok: true,
+    workspaceId: responseIdentity.workspaceId,
     idempotent: true,
     reused: true,
     queued: input.row.status === 'queued',
-    runId: Number(input.row.id),
+    runId,
     status: input.row.status,
+    dispatchOutcome: dispatchOutcome({
+      disposition,
+      runId,
+      runStatus: input.row.status,
+      replayed: true,
+      reasonCode: `task_manifest_replay_${disposition}`,
+    }),
     queuePosition: input.row.queue_position,
     manifestId: input.row.task_manifest_id ?? input.manifest.manifestId,
     idempotencyKey: input.row.idempotency_key ?? input.manifest.idempotencyKey,
@@ -3210,6 +3580,7 @@ function buildTaskManifestReplayResponse(input: {
     artifacts,
     artifactRefs,
     manifestSource: buildManifestSourceFromRun(input.row),
+    responseIdentity,
   };
 }
 
@@ -3267,12 +3638,17 @@ async function reserveTaskManifestRun(input: {
   includeGraph: boolean;
   agentType: AgentType;
   agentModel: string | null;
+  effectiveOptions: EffectiveRunOptions;
+  requestHash: string;
+  providerHumanReceiptId: string | null;
 }): Promise<TaskManifestRunReservation> {
   return transaction(async (client) => {
     await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
 
     const existingResult = await client.query<TaskManifestRunLookupRow>(
-      `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+      `SELECT id, spec_path, status, queue_position, triggered_via, branch_name, execution_worktree_path,
+              idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+              effective_options, task_manifest_authority_version
          FROM pipeline_runs
         WHERE workspace_id = $1
           AND idempotency_key = $2
@@ -3284,6 +3660,26 @@ async function reserveTaskManifestRun(input: {
     const existing = existingResult.rows[0];
     if (existing) {
       assertExistingTaskManifestRunMatchesHash(existing, input.manifestHash, input.idempotencyKey);
+      if (!isEffectiveRunOptions(existing.effective_options)
+        || existing.effective_options.safety.deploy !== false
+        || existing.task_manifest_authority_version !== 1) {
+        if (existing.status !== 'queued') {
+          throw new ConflictError('Task manifest reservation is missing immutable authority and is no longer safely repairable');
+        }
+        const repaired = (await client.query<TaskManifestRunLookupRow>(
+          `UPDATE pipeline_runs
+           SET effective_options = $2::jsonb, task_manifest_authority_version = 1,
+               auto_merge = FALSE, merge_strategy = $3
+           WHERE id = $1 AND status = 'queued'
+           RETURNING id, spec_path, status, queue_position, triggered_via, branch_name,
+                     execution_worktree_path, idempotency_key, task_manifest_id,
+                     task_manifest_artifacts, trigger_options, effective_options,
+                     task_manifest_authority_version`,
+          [existing.id, JSON.stringify(input.effectiveOptions), input.mergeStrategy],
+        )).rows[0];
+        if (!repaired) throw new ConflictError('Task manifest reservation recovery lost its queued authority');
+        return { kind: 'existing', row: repaired };
+      }
       return { kind: 'existing', row: existing };
     }
 
@@ -3305,12 +3701,14 @@ async function reserveTaskManifestRun(input: {
          spec_path, workspace_id, status, trigger_type, queued_at, queue_position,
          triggered_via, auto_worktree, auto_merge, merge_strategy, terminal_mode,
          include_graph, agent, agent_type, agent_model,
-         idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+         idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+         effective_options, task_manifest_authority_version,
+         dispatch_request_hash, dispatch_effective_options_hash
        ) VALUES (
          $1, $2, 'queued', 'manual', NOW(), $3,
          $4, $5, false, $6, $7,
          $8, $9, $10, $11,
-         $12, $13, $14::jsonb, $15::jsonb
+         $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, 1, $17, $18
        )
        ON CONFLICT (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id, queue_position`,
@@ -3330,16 +3728,36 @@ async function reserveTaskManifestRun(input: {
         input.manifestId,
         JSON.stringify(input.artifacts),
         JSON.stringify(input.triggerOptions),
+        JSON.stringify(input.effectiveOptions),
+        input.requestHash,
+        retryHash(input.effectiveOptions),
       ],
     );
 
     const inserted = insertResult.rows[0];
     if (inserted) {
-      return { kind: 'created', runId: Number(inserted.id), queuePosition: inserted.queue_position };
+      const runId = Number(inserted.id);
+      await insertTaskManifestRunLineage(client, createTaskManifestRunLineage({
+        runId,
+        workspaceId: input.workspaceId,
+        rootRunId: runId,
+        parentRunId: null,
+        lineageDepth: 0,
+        manifestId: input.manifestId,
+        sourceIdempotencyKey: input.idempotencyKey,
+        manifestHash: input.manifestHash,
+        syntheticSpecHash: input.artifacts.syntheticSpecHash,
+        manifestPath: input.artifacts.manifestPath,
+        syntheticSpecPath: input.artifacts.specPath,
+        providerHumanReceiptId: input.providerHumanReceiptId,
+      }));
+      return { kind: 'created', runId, queuePosition: inserted.queue_position };
     }
 
     const racedResult = await client.query<TaskManifestRunLookupRow>(
-      `SELECT id, spec_path, status, queue_position, triggered_via, idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options
+      `SELECT id, spec_path, status, queue_position, triggered_via, branch_name, execution_worktree_path,
+              idempotency_key, task_manifest_id, task_manifest_artifacts, trigger_options,
+              effective_options, task_manifest_authority_version
          FROM pipeline_runs
         WHERE workspace_id = $1
           AND idempotency_key = $2
@@ -3357,14 +3775,8 @@ async function reserveTaskManifestRun(input: {
   });
 }
 
-async function deleteTaskManifestReservation(runId: number, idempotencyKey: string): Promise<void> {
-  await execute(
-    `DELETE FROM pipeline_runs
-      WHERE id = $1
-        AND idempotency_key = $2
-        AND status = 'queued'`,
-    [runId, idempotencyKey],
-  ).catch(() => undefined);
+async function claimTaskManifestPublication(runId: number, workspaceId: string): Promise<DispatchPublicationClaim> {
+  return claimDispatchPublication({ runId, workspaceId });
 }
 
 /**
@@ -3375,7 +3787,7 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *     summary: Trigger a bounded Hermes task manifest through the Rorca pipeline broker
  *     operationId: triggerTaskManifestPipelineRun
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Stable local task-manifest execution is safe for MCP/CLI because the route validates bounded Hermes manifests, requires workspaceId and idempotencyKey, rejects autoMerge=true and mergeStrategy=direct, and the manifest policy forbids deploys and credential-copying before any pg-boss job is inserted."
+ *     x-rorca-rationale: "Stable local task-manifest execution is safe for MCP/CLI because the route validates bounded Hermes manifests, requires workspaceId and idempotencyKey, requires a host-created isolated worktree, preserves an exact pr/draft-pr strategy, rejects auto-merge/branch-only delivery, and forbids deploys and credential-copying before any pg-boss job is inserted."
  *     x-rorca-public-api: true
  *     description: >
  *       Validates a Hermes task manifest, writes manifest.json/tasks.md plus an internal synthetic spec under
@@ -3398,9 +3810,9 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *               manifest: { type: object, description: "Hermes TaskManifest v1 payload" }
  *               idempotencyKey: { type: string, format: uuid, description: "Hermes-issued idempotency key; must match manifest.idempotencyKey" }
  *               dryRun: { type: boolean, default: false }
- *               autoWorktree: { type: boolean, default: true }
- *               autoMerge: { type: boolean, default: false, description: "Must be false; task manifests never auto-merge" }
- *               mergeStrategy: { type: string, enum: [pr, draft-pr, branch-only], default: draft-pr }
+ *               autoWorktree: { type: boolean, enum: [true], default: true, description: "Must be true; Rorca creates the isolated branch and worktree" }
+ *               autoMerge: { type: boolean, enum: [false], default: false, description: "Must be false; task manifests never auto-merge" }
+ *               mergeStrategy: { type: string, enum: [pr, draft-pr], default: draft-pr, description: "Must exactly match manifest.execution.mergeStrategy; branch-only is unsupported" }
  *               agentOverride: { type: string, enum: [claude, opencode, codex, pi] }
  *               modelOverride: { type: string }
  *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh] }
@@ -3408,6 +3820,10 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *               executionEnvironmentId: { type: string, description: "Optional execution-environment identifier when supported." }
  *               terminal_mode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
  *               terminalMode: { type: string, enum: [ansi-html, pty, native-pty], nullable: true }
+ *               humanApproval:
+ *                 type: object
+ *                 description: Exact signed provider-human command event required when an internal service such as Hermes relays non-dry execution authority
+ *                 required: [schemaVersion, issuerId, keyId, provider, providerTenantId, actorId, conversationId, threadId, messageId, occurredAt, normalizedCommandHash, ingressIdempotencyKey, signature]
  *     responses:
  *       200:
  *         description: Dry-run plan or idempotency conflict
@@ -3416,8 +3832,10 @@ async function deleteTaskManifestReservation(runId: number, idempotencyKey: stri
  *       202:
  *         description: Manifest accepted into the queue when queue=true
  *       400: { description: Invalid task manifest, missing workspace/idempotency, invalid source authority, or ineligible route decision }
- *       409: { description: Active workspace run conflict when autoWorktree=false }
- *       422: { description: Unsafe task-manifest execution policy such as autoMerge=true or mergeStrategy=direct }
+ *       401: { description: Internal service execution omitted the exact signed provider-human command event }
+ *       403: { description: Provider-human event signature, target, freshness, or tenant/workspace binding is invalid }
+ *       409: { description: Durable task-manifest reservation or publication conflict }
+ *       422: { description: Unsafe task-manifest execution policy such as autoMerge=true, autoWorktree=false, branch-only delivery, or a strategy mismatch }
  */
 async function handleTaskManifestTrigger(req: Request, res: Response): Promise<void> {
   try {
@@ -3445,32 +3863,53 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
 
     assertTaskManifestSourceAuthority(requestBody, manifest, requestWorkspaceId, requestIdempotencyKey);
     assertTaskManifestRouteDecisionAllowed(manifest);
+    const resolvedDryRun = requestBody.dryRun === true || manifest.policy.dryRun === true;
+    const providerHumanEvent = requestBody.humanApproval;
+    const internalServicePrincipal = !req.user
+      || req.user.email.toLowerCase().endsWith('@rorca.internal')
+      || req.user.id === 'system';
+    if (!resolvedDryRun && internalServicePrincipal && !providerHumanEvent) {
+      throw new AuthError('Internal services must relay the exact signed provider-human TaskManifest approval command');
+    }
+    let providerHumanAuthority: { receiptId: string; replayed: boolean; actorId: string } | null = null;
 
-    const resolvedAutoWorktree = requestBody.autoWorktree !== false;
-    const resolvedAutoMerge = requestBody.autoMerge === true;
-    const resolvedMergeStrategy = requestBody.mergeStrategy ?? manifest.execution.mergeStrategy;
-    if (resolvedAutoMerge && resolvedMergeStrategy === 'direct') {
+    if (requestBody.autoWorktree === false) {
       throw new UnprocessableError(
-        'Task manifest execution rejects autoMerge=true with mergeStrategy=direct; high-risk direct repair must use PR, draft-PR, or branch-only review.',
-        'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR',
-        { code: 'TASK_MANIFEST_HIGH_RISK_DIRECT_REPAIR' },
+        'Task manifest execution requires a host-created isolated worktree and branch',
+        'TASK_MANIFEST_ISOLATED_WORKTREE_REQUIRED',
+        { code: 'TASK_MANIFEST_ISOLATED_WORKTREE_REQUIRED' },
       );
     }
+    const resolvedAutoWorktree = true;
+    const resolvedAutoMerge = requestBody.autoMerge === true;
+    if (requestBody.mergeStrategy && requestBody.mergeStrategy !== manifest.execution.mergeStrategy) {
+      throw new UnprocessableError(
+        'Task manifest outer mergeStrategy must exactly match the host-frozen manifest execution strategy',
+        'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH',
+        { code: 'TASK_MANIFEST_MERGE_STRATEGY_MISMATCH' },
+      );
+    }
+    const resolvedMergeStrategy = manifest.execution.mergeStrategy;
     if (resolvedAutoMerge) {
       throw new UnprocessableError(
-        'Task manifest execution rejects autoMerge=true; use PR, draft-PR, or branch-only review',
+        'Task manifest execution rejects autoMerge=true; use PR or draft-PR review',
         'TASK_MANIFEST_AUTO_MERGE_REJECTED',
         { code: 'TASK_MANIFEST_AUTO_MERGE_REJECTED' },
       );
     }
-
-    if (resolvedMergeStrategy === 'direct') {
+    if (resolvedMergeStrategy === 'branch-only') {
       throw new UnprocessableError(
-        'Task manifest execution rejects mergeStrategy=direct; use pr, draft-pr, or branch-only',
-        'TASK_MANIFEST_DIRECT_MERGE_REJECTED',
-        { code: 'TASK_MANIFEST_DIRECT_MERGE_REJECTED' },
+        'Task manifest execution does not support branch-only delivery in the initial release; preserve pr or draft-pr review authority',
+        'TASK_MANIFEST_BRANCH_ONLY_REJECTED',
+        { code: 'TASK_MANIFEST_BRANCH_ONLY_REJECTED' },
       );
     }
+
+    // Reject deprecated local-user execution before workspace reads, artifact
+    // writes, idempotency reservations, run insertion, or queue dispatch.
+    const executionEnvironmentResolution = resolveTaskManifestExecutionEnvironment(requestBody, manifest);
+    const resolvedExecutionEnvironment = executionEnvironmentResolution.executionEnvironment;
+    const resolvedExecutionEnvironmentId = executionEnvironmentResolution.executionEnvironmentId;
 
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [requestWorkspaceId]) as
       { id: string; label: string; path: string; domain?: string } | undefined;
@@ -3479,17 +3918,11 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
     }
 
     const plannedEnvelope = buildPlannedTaskManifestEnvelope(workspace.path, manifest);
-    const plannedArtifacts = buildTaskManifestArtifactsResponse(plannedEnvelope);
-    const plannedArtifactRefs = buildTaskManifestArtifactRefs(plannedArtifacts);
     const resolvedTerminalMode = resolveRequestedTerminalMode(requestBody.terminal_mode ?? requestBody.terminalMode ?? manifest.execution.terminalMode);
     assertTerminalModeAvailable(resolvedTerminalMode);
-    const resolvedDryRun = requestBody.dryRun === true || manifest.policy.dryRun === true;
     const resolvedAgentOverride = requestBody.agentOverride ?? manifest.execution.agentOverride;
     const resolvedModelOverride = requestBody.modelOverride ?? manifest.execution.modelOverride;
     const resolvedEffortLevel = requestBody.effortLevel ?? manifest.execution.effortLevel;
-    const executionEnvironmentResolution = resolveTaskManifestExecutionEnvironment(requestBody, manifest);
-    const resolvedExecutionEnvironment = executionEnvironmentResolution.executionEnvironment;
-    const resolvedExecutionEnvironmentId = executionEnvironmentResolution.executionEnvironmentId;
 
     const taskManifestUser = await getEffectiveUser(req);
     const taskManifestWfConfig = await resolveWorkflowConfig('pipeline_execution', taskManifestUser?.id);
@@ -3504,24 +3937,6 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       activeAgentFallback: activeAgent,
       activeModelFallback: activeModel,
       log: logger,
-    });
-
-    const plannedTriggerOptions = buildTaskManifestTriggerOptions({
-      manifest,
-      manifestHash: plannedEnvelope.manifestHash,
-      artifacts: plannedArtifacts,
-      artifactRefs: plannedArtifactRefs,
-      autoWorktree: resolvedAutoWorktree,
-      mergeStrategy: resolvedMergeStrategy,
-      agentOverride: resolvedAgentOverride,
-      modelOverride: resolvedModelOverride,
-      effortLevel: resolvedEffortLevel,
-      terminalMode: resolvedTerminalMode,
-      executionEnvironment: resolvedExecutionEnvironment,
-      executionEnvironmentId: resolvedExecutionEnvironmentId,
-      executionEnvironmentSupported: executionEnvironmentResolution.supported,
-      executionOptions: taskManifestExecutionOptions,
-      sourceStoryIds: plannedEnvelope.spec.sourceStoryIds,
     });
 
     if (resolvedDryRun) {
@@ -3547,6 +3962,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
         executionEnvironmentSupported: executionEnvironmentResolution.supported,
         executionOptions: taskManifestExecutionOptions,
         sourceStoryIds: dryRunEnvelope.spec.sourceStoryIds,
+        providerHumanReceiptId: null,
       });
       const model = taskManifestExecutionOptions.finalAgentModel ?? DEFAULT_MODEL;
       const estimate = await estimateDryRunCost(
@@ -3559,9 +3975,28 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
         ok: true,
         dryRun: true,
         queued: false,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'pending_publication',
+          replayed: false,
+          retryable: false,
+          reasonCode: 'task_manifest_dry_run_preview',
+        }),
+        workspaceId: requestWorkspaceId,
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
         manifestHash: dryRunEnvelope.manifestHash,
+        responseIdentity: {
+          schemaVersion: 'rorca.task-manifest-response-identity.v1',
+          workspaceId: requestWorkspaceId,
+          runId: null,
+          manifestId: manifest.manifestId,
+          idempotencyKey: requestIdempotencyKey,
+          manifestHash: dryRunEnvelope.manifestHash,
+          syntheticSpecHash: dryRunArtifacts.syntheticSpecHash,
+          lineageIdentityHash: null,
+          artifactDigest: retryHash(dryRunArtifacts),
+          providerHumanReceiptId: null,
+        },
         artifacts: dryRunArtifacts,
         artifactRefs: dryRunArtifactRefs,
         manifestSource: buildManifestSourceFromRun({
@@ -3590,26 +4025,46 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       return;
     }
 
+    const immutableEffectiveOptions = buildEffectiveRunOptions({
+      model: taskManifestExecutionOptions.finalAgentModel ?? null,
+      effort: resolvedEffortLevel ?? null,
+      autoWorktree: resolvedAutoWorktree,
+      worktreePath: null,
+      branchName: null,
+      mergeStrategy: resolvedMergeStrategy,
+      autoMerge: false,
+      includeGraph: requestBody.includeGraph === true,
+      terminal: resolvedTerminalMode,
+      policyLocked: true,
+      deploy: false,
+      externalSend: true,
+    });
+    // Existing rows are resolved after deterministic artifact verification and
+    // reservation repair below. A queued immediate reservation with no frozen
+    // branch/execution path is resumable and must not be mistaken for a terminal
+    // idempotent replay after response loss.
     const existingIdempotentRun = await findTaskManifestRunByIdempotencyKey(requestWorkspaceId, requestIdempotencyKey);
     if (existingIdempotentRun) {
       assertExistingTaskManifestRunMatchesHash(existingIdempotentRun, plannedEnvelope.manifestHash, requestIdempotencyKey);
-      res.status(200).json(buildTaskManifestReplayResponse({
-        row: existingIdempotentRun,
-        manifest,
-        manifestHash: plannedEnvelope.manifestHash,
-        fallbackArtifacts: plannedArtifacts,
-        fallbackArtifactRefs: plannedArtifactRefs,
-      }));
-      return;
     }
 
-    const activeConflict = await getTaskManifestActiveConflict(requestWorkspaceId, resolvedAutoWorktree);
+    const activeConflict = existingIdempotentRun
+      ? null
+      : await getTaskManifestActiveConflict(requestWorkspaceId, resolvedAutoWorktree);
     if (activeConflict) {
       res.status(200).json({
         ok: false,
         conflict: true,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'conflict',
+          runId: activeConflict.activeRunId ?? null,
+          runStatus: activeConflict.activeRunId ? 'active' : null,
+          retryable: true,
+          reasonCode: 'task_manifest_active_workspace_conflict',
+        }),
         activeRunId: activeConflict.activeRunId,
         reason: activeConflict.reason,
+        workspaceId: requestWorkspaceId,
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
         manifestHash: plannedEnvelope.manifestHash,
@@ -3617,14 +4072,51 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       return;
     }
 
+    providerHumanAuthority = providerHumanEvent
+      ? await verifyAndPersistProviderHumanAuthority({
+        workspaceId: requestWorkspaceId,
+        purpose: 'task_manifest_dispatch',
+        targetHash: plannedEnvelope.manifestHash,
+        event: providerHumanEvent,
+      })
+      : null;
+
+    // Materialize and hash immutable artifacts before reserving lineage. A crash
+    // may leave deterministic proposal files, but can never leave a lineage row
+    // that points at bytes which were not independently verified first.
+    const envelope = await writeTaskManifestExecutionEnvelope({
+      workspacePath: workspace.path,
+      manifest,
+    });
+    const artifacts = buildTaskManifestArtifactsResponse(envelope);
+    const artifactRefs = buildTaskManifestArtifactRefs(artifacts);
+    const triggerOptions = buildTaskManifestTriggerOptions({
+      manifest,
+      manifestHash: envelope.manifestHash,
+      artifacts,
+      artifactRefs,
+      autoWorktree: resolvedAutoWorktree,
+      mergeStrategy: resolvedMergeStrategy,
+      agentOverride: resolvedAgentOverride,
+      modelOverride: resolvedModelOverride,
+      effortLevel: resolvedEffortLevel,
+      terminalMode: resolvedTerminalMode,
+      executionEnvironment: resolvedExecutionEnvironment,
+      executionEnvironmentId: resolvedExecutionEnvironmentId,
+      executionEnvironmentSupported: executionEnvironmentResolution.supported,
+      executionOptions: taskManifestExecutionOptions,
+      sourceStoryIds: envelope.spec.sourceStoryIds,
+      providerHumanReceiptId: providerHumanAuthority?.receiptId ?? null,
+    });
+
     const reservation = await reserveTaskManifestRun({
       workspaceId: requestWorkspaceId,
-      specPath: plannedEnvelope.relativeSpecPath,
+      specPath: envelope.relativeSpecPath,
       idempotencyKey: requestIdempotencyKey,
       manifestId: manifest.manifestId,
-      manifestHash: plannedEnvelope.manifestHash,
-      artifacts: plannedArtifacts,
-      triggerOptions: plannedTriggerOptions,
+      manifestHash: envelope.manifestHash,
+      artifacts,
+      triggerOptions,
       queue: requestBody.queue === true,
       autoWorktree: resolvedAutoWorktree,
       mergeStrategy: resolvedMergeStrategy,
@@ -3632,65 +4124,56 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       includeGraph: requestBody.includeGraph === true,
       agentType: taskManifestExecutionOptions.resolvedAgentType,
       agentModel: taskManifestExecutionOptions.finalAgentModel ?? null,
+      effectiveOptions: immutableEffectiveOptions,
+      requestHash: pipelineTriggerRequestHash(requestBody as Record<string, unknown>),
+      providerHumanReceiptId: providerHumanAuthority?.receiptId ?? null,
     });
-
-    if (reservation.kind === 'existing') {
-      res.status(200).json(buildTaskManifestReplayResponse({
-        row: reservation.row,
-        manifest,
-        manifestHash: plannedEnvelope.manifestHash,
-        fallbackArtifacts: plannedArtifacts,
-        fallbackArtifactRefs: plannedArtifactRefs,
-      }));
-      return;
+    if (reservation.kind === 'created'
+      && process.env.NODE_ENV === 'test'
+      && process.env.RORCA_TASK_MANIFEST_FAILPOINT === 'after_reservation_before_preparation') {
+      throw new Error('task_manifest_failpoint:after_reservation_before_preparation');
     }
 
-    let envelope = plannedEnvelope;
-    let artifacts = plannedArtifacts;
-    let artifactRefs = plannedArtifactRefs;
-    let triggerOptions = plannedTriggerOptions;
-    try {
-      envelope = await writeTaskManifestExecutionEnvelope({
-        workspacePath: workspace.path,
-        manifest,
-      });
-      artifacts = buildTaskManifestArtifactsResponse(envelope);
-      artifactRefs = buildTaskManifestArtifactRefs(artifacts);
-      triggerOptions = buildTaskManifestTriggerOptions({
-        manifest,
-        manifestHash: envelope.manifestHash,
-        artifacts,
-        artifactRefs,
-        autoWorktree: resolvedAutoWorktree,
-        mergeStrategy: resolvedMergeStrategy,
-        agentOverride: resolvedAgentOverride,
-        modelOverride: resolvedModelOverride,
-        effortLevel: resolvedEffortLevel,
-        terminalMode: resolvedTerminalMode,
-        executionEnvironment: resolvedExecutionEnvironment,
-        executionEnvironmentId: resolvedExecutionEnvironmentId,
-        executionEnvironmentSupported: executionEnvironmentResolution.supported,
-        executionOptions: taskManifestExecutionOptions,
-        sourceStoryIds: envelope.spec.sourceStoryIds,
-      });
-      await execute(
-        `UPDATE pipeline_runs
-            SET task_manifest_artifacts = $1::jsonb,
-                trigger_options = $2::jsonb
-          WHERE id = $3`,
-        [JSON.stringify(artifacts), JSON.stringify(triggerOptions), reservation.runId],
-      );
-    } catch (artifactError) {
-      await deleteTaskManifestReservation(reservation.runId, requestIdempotencyKey);
-      throw artifactError;
+    let dispatchRunId: number;
+    if (reservation.kind === 'existing') {
+      dispatchRunId = Number(reservation.row.id);
+      const verifiedLineage = await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+      if (providerHumanAuthority
+        && verifiedLineage.lineage.providerHumanReceiptId !== providerHumanAuthority.receiptId) {
+        throw new ConflictError('TaskManifest replay differs from the immutable provider-human authority receipt');
+      }
+      if (reservation.row.status !== 'queued') {
+        res.status(200).json(await buildTaskManifestReplayResponse({
+          row: reservation.row,
+          manifest,
+          manifestHash: envelope.manifestHash,
+          fallbackArtifacts: artifacts,
+          fallbackArtifactRefs: artifactRefs,
+        }));
+        return;
+      }
+    } else {
+      dispatchRunId = reservation.runId;
+      const verifiedLineage = await loadAndVerifyTaskManifestRunLineage(dispatchRunId, workspace.path);
+      if (verifiedLineage.lineage.providerHumanReceiptId !== (providerHumanAuthority?.receiptId ?? null)) {
+        throw new ConflictError('TaskManifest reservation did not bind the exact provider-human authority receipt');
+      }
     }
 
     if (requestBody.queue === true) {
+      const responseIdentity = await taskManifestResponseIdentity(dispatchRunId, artifacts);
       res.status(202).json({
         ok: true,
         queued: true,
-        runId: reservation.runId,
-        queuePosition: reservation.queuePosition,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'queued',
+          runId: dispatchRunId,
+          runStatus: 'queued',
+          reasonCode: 'task_manifest_queued',
+        }),
+        runId: dispatchRunId,
+        workspaceId: requestWorkspaceId,
+        queuePosition: reservation.kind === 'created' ? reservation.queuePosition : reservation.row.queue_position,
         manifestId: manifest.manifestId,
         idempotencyKey: requestIdempotencyKey,
         manifestHash: envelope.manifestHash,
@@ -3702,9 +4185,47 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
           task_manifest_artifacts: artifacts,
           trigger_options: triggerOptions,
         }),
+        responseIdentity,
       });
       return;
     }
+
+    const publication = await claimTaskManifestPublication(dispatchRunId, requestWorkspaceId);
+    if (publication.outcome !== 'acquired') {
+      if (publication.outcome === 'published' && reservation.kind === 'existing') {
+        res.status(200).json(await buildTaskManifestReplayResponse({
+          row: reservation.row,
+          manifest,
+          manifestHash: envelope.manifestHash,
+          fallbackArtifacts: artifacts,
+          fallbackArtifactRefs: artifactRefs,
+        }));
+        return;
+      }
+      const responseIdentity = await taskManifestResponseIdentity(dispatchRunId, artifacts);
+      res.status(202).json({
+        ok: true,
+        queued: true,
+        runId: dispatchRunId,
+        workspaceId: requestWorkspaceId,
+        manifestId: manifest.manifestId,
+        idempotencyKey: requestIdempotencyKey,
+        manifestHash: envelope.manifestHash,
+        artifacts,
+        artifactRefs,
+        dispatchOutcome: dispatchOutcome({
+          disposition: 'pending_publication',
+          runId: dispatchRunId,
+          runStatus: 'queued',
+          replayed: true,
+          retryable: true,
+          reasonCode: 'task_manifest_publication_lease_held',
+        }),
+        responseIdentity,
+      });
+      return;
+    }
+    (req as Request & { _dispatchPublication?: DispatchPublicationClaim })._dispatchPublication = publication;
 
     req.body = {
       specPath: envelope.relativeSpecPath,
@@ -3715,7 +4236,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       dryRun: false,
       triggerType: 'manual',
       queue: false,
-      reservedRunId: reservation.runId,
+      reservedRunId: dispatchRunId,
       forceSequential: true,
       orchestrationMode: 'sequential',
       parallelism: 1,
@@ -3736,6 +4257,7 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
       ...(executionEnvironmentResolution.supported && resolvedExecutionEnvironmentId ? { executionEnvironmentId: resolvedExecutionEnvironmentId } : {}),
     };
 
+    (req as Request & { _taskManifestExecution?: boolean })._taskManifestExecution = true;
     await handlePipelineTrigger(req, res);
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Task manifest trigger');
@@ -3743,7 +4265,6 @@ async function handleTaskManifestTrigger(req: Request, res: Response): Promise<v
 }
 
 router.post('/task-manifests/trigger', validateBody(TaskManifestTriggerRequestSchema), handleTaskManifestTrigger);
-router.post('/task-manifest/trigger', validateBody(TaskManifestTriggerRequestSchema), handleTaskManifestTrigger);
 
 // ─── POST /api/pipeline/context-preview — Preview context routing per story ───
 
@@ -3751,6 +4272,8 @@ router.post('/task-manifest/trigger', validateBody(TaskManifestTriggerRequestSch
  * @swagger
  * /api/pipeline/context-preview:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Preview context routing for each story in a spec
  *     operationId: previewContextRouting
@@ -3945,6 +4468,8 @@ router.post('/context-preview', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/orchestration-preview:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Preview auto-orchestration mode for a spec
  *     operationId: previewOrchestrationMode
@@ -4002,420 +4527,27 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/pipeline/quick-run — Brief → single-story spec → immediate run ─
-// Accepts a plain-English brief, generates a 1-story spec, writes it directly
-// to approved/ (no review queue), emits spec_approved WAL, triggers execution.
+// ─── POST /api/pipeline/quick-run — retired unsafe API-side orchestrator ──────
 
 /**
  * @swagger
  * /api/pipeline/quick-run:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
- *     summary: Quick-run — generate a 1-story spec from a brief and execute immediately
+ *     summary: Retired quick-run endpoint
  *     operationId: quickRunPipeline
- *     description: |
- *       Generates a single-story spec from a plain-English brief, writes it directly to
- *       approved (no review queue), and immediately triggers pipeline execution.
- *
- *       The spec generation prompt incorporates a layered context cascade in this order:
- *       1. **Direction Stack (L1-L3)** — synthesized from direction_layers table:
- *          L1 (global engineering principles), L2 (domain conventions matched by workspace.domain),
- *          L3 (project-specific context scoped to this workspace). Merged via synthesize().
- *       2. **MEMORY.md** — episodic ledger from workspace root (first 2000 chars).
- *          Contains timestamped Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha entries.
- *       3. **Installed Skills** — list of skills from installed_skills table (name + description).
- *          Informs the LLM which reusable skill files are available for the generated story.
- *       All three context sources are best-effort: silently omitted if missing or on error.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId, brief]
- *             properties:
- *               workspaceId: { type: string }
- *               brief: { type: string, description: "Plain-English description of what to build" }
- *               model: { type: string, description: "LLM model to use for spec generation" }
+ *     description: This legacy API-side execution path is retired. Persist and approve a spec, then use the canonical worker-backed pipeline trigger API.
  *     responses:
- *       202:
- *         description: Quick-run started
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 runId: { type: integer }
- *                 specId: { type: string }
- *       400: { description: "Missing required fields" }
- *       404: { description: "Workspace not found" }
- *       409: { description: "Active run conflict or budget cap exceeded" }
+ *       409:
+ *         description: Quick-run is retired; no spec, run, WAL, environment load, or subprocess mutation occurs.
  */
-router.post('/quick-run', async (req: Request, res: Response) => {
-  try {
-    const { workspaceId, brief, model: requestedModel } = req.body;
-
-    if (!workspaceId || !brief) {
-      throw new ValidationError('Missing required fields: workspaceId, brief');
-      return;
-    }
-
-    // 1. Look up workspace
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
-      { id: string; label: string; path: string; domain?: string } | undefined;
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
-    // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
-
-    // 3. Budget cap guard
-    const budgetStatus = await checkBudgetThresholds(workspaceId);
-    if (budgetStatus.capExceeded) {
-      throw new ConflictError('Budget cap exceeded for this period');
-      return;
-    }
-
-    // 4. Conflict detection
-    const activeRun = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
-    if (activeRun) {
-      res.json({ conflict: true, activeRunId: activeRun.id });
-      return;
-    }
-
-    // 5. Resolve model — from request only, no hidden DB fallbacks
-    const resolvedModel: string = requestedModel ?? DEFAULT_MODEL;
-
-    // 6. Resolve vault creds for LLM call
-    const user = await getEffectiveUser(req);
-    let vaultCreds: { apiKey?: string; baseUrl?: string } = {};
-    if (user?.id) {
-      const vaultProvider = resolveVaultProvider(resolvedModel);
-      if (vaultProvider) {
-        const result = await getVaultKey(user.id, vaultProvider);
-        if (result) vaultCreds = { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
-      }
-      if (!vaultCreds.apiKey) {
-        const compat = await getVaultKey(user.id, 'openai-compat');
-        if (compat) vaultCreds = { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
-      }
-      if (!vaultCreds.apiKey) {
-        const anthropic = await getVaultKey(user.id, 'anthropic');
-        if (anthropic) vaultCreds = { apiKey: anthropic.key };
-      }
-    }
-
-    // Context cascade: direction stack → MEMORY.md → installed skills → instructions
-    // Each layer is best-effort (silently omitted on error or absence):
-    //   1. Direction Stack (L1–L3): global engineering principles → domain conventions → project context
-    //   2. MEMORY.md: episodic ledger at workspace root, capped at 2000 chars
-    //   3. Installed Skills: names + descriptions from installed_skills table
-    // Layers are assembled in this order and prepended to the LLM instructions block.
-    // An empty layer is filtered out — the prompt degrades gracefully to bare instructions.
-
-    // 7. Synthesize direction stack (L1–L3) for this workspace
-    let directionContext = '';
-    try {
-      const domain = workspace.domain ?? '';
-      const [l1Row, l2Row, l3Row] = await Promise.all([
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = '' AND COALESCE(team_id, '') = '' LIMIT 1`, []),
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id, '') = '' AND (domain = $1 OR COALESCE(domain, '') = '') AND COALESCE(team_id, '') = '' ORDER BY (domain = $1) DESC LIMIT 1`, [domain]),
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = '' LIMIT 1`, [workspaceId]),
-      ]);
-      directionContext = synthesize({ l1: l1Row?.content_yaml, l2: l2Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: brief });
-    } catch (err: unknown) {
-      // Silently skip — direction context is best-effort
-      if (err instanceof Error) void err.message;
-    }
-
-    // 8. Generate 1-story spec via LLM
-    // CTM-006: Route quick-run context injection through the canonical workspace-context path.
-    // Validate the .rorca / AGENTS.md / MEMORY.md contract once, then resolve MEMORY.md and
-    // installed skills against it so quick-run specs are never context blind by accident.
-    const routingContract = validateRoutingContract(workspace.path);
-
-    // Read MEMORY.md from workspace root (best-effort, silent on error).
-    // Keep the root-relative read so the contract's resolved path can never break a
-    // workspace whose ledger lives at the conventional root MEMORY.md.
-    let memoryContent = '';
-    try {
-      memoryContent = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
-    } catch (err: unknown) {
-      // ENOENT or any read error — fall back to the contract-resolved ledger (also nonfatal)
-      if (err instanceof Error) void err.message;
-      memoryContent = readContractMemory(workspace.path, routingContract);
-    }
-
-    // Fetch installed skills for this workspace (best-effort, silent on error)
-    let installedSkills: Array<{ name: string; description: string | null }> = [];
-    try {
-      installedSkills = await query<{ name: string; description: string | null }>(
-        `SELECT name, description FROM installed_skills ORDER BY name`,
-        [],
-      );
-    } catch (err: unknown) {
-      // DB error — silently skip
-      if (err instanceof Error) void err.message;
-    }
-
-    // Build ordered, non-empty context blocks via the single deterministic assembler.
-    const { blocks: contextBlocks } = buildQuickRunContextBlocks({
-      directionContext,
-      memoryContent,
-      installedSkills,
-    });
-
-    const instructions = [
-      '=== INSTRUCTIONS: READ THIS FIRST ===',
-      'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
-      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
-      'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
-      'If you output anything other than raw JSON, the system will fail.',
-      '=== END INSTRUCTIONS ===',
-      '',
-      `TASK: Generate a software specification JSON with exactly 1 user story.`,
-      `Brief: ${brief}`,
-      '',
-      'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
-      '',
-      'JSON schema:',
-      '{"stories":[{"id":"QR-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":[]}]}',
-      '',
-      'Rules:',
-      '- Generate exactly 1 story with id "QR-001"',
-      '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
-      '- acceptanceCriteria must be specific and testable',
-      '- dependsOn must be an empty array (single story has no deps)',
-      '- The description should be detailed enough for an engineer to implement',
-      '- Your entire response must be valid JSON parseable by JSON.parse()',
-    ].join('\n');
-
-    const quickRunPrompt = contextBlocks.length > 0
-      ? `${contextBlocks.join('\n\n')}\n\n${instructions}`
-      : instructions;
-
-    const llmResult = await chatComplete(
-      [{ role: 'user', content: quickRunPrompt }],
-      { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
-    );
-    const rawResponse = llmResult.text;
-
-    // 8. Parse JSON
-    let parsed: { stories: Array<{ id: string; title: string; description: string; acceptanceCriteria: string[]; dependsOn: string[] }> };
-    try {
-      const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-      const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-      const jsonStart = jsonStr.indexOf('{');
-      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
-    } catch {
-      res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
-      return;
-    }
-
-    if (!Array.isArray(parsed.stories) || parsed.stories.length === 0) {
-      res.status(500).json({ error: 'Invalid spec structure from LLM' });
-      return;
-    }
-
-    // Enforce single story only; keep all acceptance criteria returned by the model.
-    const story = parsed.stories[0];
-
-    // 9. Build slug and write spec directly to approved/
-    const slug = `qr-${brief.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50)}-${Date.now()}`;
-    const approvedDir = path.join(workspace.path, 'forge', 'specs', 'approved');
-    fs.mkdirSync(approvedDir, { recursive: true });
-
-    const specJson = {
-      title: brief.slice(0, 120),
-      generatedAt: new Date().toISOString(),
-      model: resolvedModel,
-      source: 'quick-run',
-      userStories: [{
-        id: story.id || 'QR-001',
-        title: story.title,
-        description: story.description,
-        acceptanceCriteria: story.acceptanceCriteria || [],
-        dependsOn: [],
-        passes: false,
-      }],
-    };
-
-    const specPath = path.join(approvedDir, `${slug}.json`);
-    fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');
-    const relativeSpecPath = `forge/specs/approved/${slug}.json`;
-
-    // 10. Emit spec_approved WAL event with actor: 'quick-run'
-    const walApproveEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_approved', $1, $2, $3)` + ' RETURNING *', [slug, workspaceId, JSON.stringify({ actor: 'quick-run', brief: brief.slice(0, 200), model: resolvedModel })]);
-    broadcastAll(walApproveEvent!);
-
-    // 11. Trigger pipeline execution (same logic as /trigger)
-    const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
-    const hasBashRunLoop = fs.existsSync(runLoopSh);
-    const hasTsRunLoop = fs.existsSync(runLoopTs);
-    if (!hasBashRunLoop && !hasTsRunLoop) {
-      throw new UnprocessableError(`No run-loop engine found for workspace`);
-      return;
-    }
-    const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
-
-    const runResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES ($1, $2, 'running', 'quick-run') RETURNING id`, [relativeSpecPath, workspaceId]);
-    const runId = normalizeWorkerRunId(runResult!.id);
-
-    // Build clean env
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-        env[k] = v;
-      }
-    }
-    env['RORCA_PROCESS_ROLE'] = 'engine';
-    const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
-    for (const [k, v] of Object.entries(workspaceEnvVars)) {
-      env[k] = v;
-    }
-
-    // Inject vault API keys
-    if (user?.id) {
-      const anthropicVaultKey = await getVaultKey(user.id, 'anthropic');
-      if (anthropicVaultKey) env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
-      const openaiVaultKey = await getVaultKey(user.id, 'openai-compat');
-      if (openaiVaultKey) {
-        env['OPENAI_API_KEY'] = openaiVaultKey.key;
-        if (openaiVaultKey.baseUrl) env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
-      }
-      const openrouterVaultKey = await getVaultKey(user.id, 'openrouter');
-      if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
-
-    }
-
-    // Inject agent profile
-    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
-    if (activeProfile) {
-      if (activeProfile.system_prompt_override) env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
-      const tools = (Array.isArray(activeProfile.allowed_tools) ? activeProfile.allowed_tools : JSON.parse(activeProfile.allowed_tools)) as string[];
-      if (tools.length > 0) env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
-      if (activeProfile.model_override) env['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
-    }
-
-    // Spawn run-loop
-    const logPath = workspaceLogPath(workspace.path, runId);
-    await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [logPath, runId]);
-    const logFd = fs.openSync(logPath, 'a');
-    let child: ReturnType<typeof spawn>;
-
-    if (useTypescriptRunLoop) {
-      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
-      const backendPort = process.env.PORT || '3030';
-      child = spawn(tsxBin, [
-        runLoopTs,
-        '--json', specPath,
-        '--cwd', workspace.path,
-        '--run-id', String(runId),
-        '--port', backendPort,
-        '--parallelism', '1',
-      ], {
-        cwd: workspace.path,
-        stdio: ['ignore', logFd, logFd],
-        detached: true,
-        env,
-      });
-    } else {
-      const scriptInCwd = path.join(workspace.path, 'forge', 'run-loop.sh');
-      child = spawn('bash', [scriptInCwd, '--json', specPath], {
-        cwd: workspace.path,
-        stdio: ['ignore', logFd, logFd],
-        detached: true,
-        env,
-      });
-    }
-    fs.closeSync(logFd);
-    child.unref();
-
-    if (child.pid) {
-      await execute(`UPDATE pipeline_runs SET pid = $1 WHERE id = $2`, [child.pid, runId]);
-    }
-
-    // Set up output buffer
-    const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
-    outputBuffers.set(runId, buf);
-
-    let tailPos = 0;
-    const tailInterval = setInterval(() => {
-      try {
-        const stat = fs.statSync(logPath);
-        if (stat.size > tailPos) {
-          const fd = fs.openSync(logPath, 'r');
-          const newBytes = Buffer.alloc(stat.size - tailPos);
-          fs.readSync(fd, newBytes, 0, newBytes.length, tailPos);
-          fs.closeSync(fd);
-          tailPos = stat.size;
-          const text = newBytes.toString('utf8');
-          buf.chunks.push(text);
-          buf.subscribers.forEach(cb => cb(text));
-        }
-      } catch { /* transient read error */ }
-    }, 200);
-
-    // Handle process exit
-    child.on('exit', async (code) => {
-      clearInterval(tailInterval);
-      try {
-        const stat = fs.statSync(logPath);
-        if (stat.size > tailPos) {
-          const fd = fs.openSync(logPath, 'r');
-          const remaining = Buffer.alloc(stat.size - tailPos);
-          fs.readSync(fd, remaining, 0, remaining.length, tailPos);
-          fs.closeSync(fd);
-          buf.chunks.push(remaining.toString('utf8'));
-          buf.subscribers.forEach(cb => cb(remaining.toString('utf8')));
-        }
-      } catch { /* ignore */ }
-
-      if (false /* pg pool always available */) {
-        buf.done = true;
-        buf.subscribers.clear();
-        return;
-      }
-
-      const status = code === 0 ? 'done' : 'failed';
-      await execute(`UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`, [status, runId]);
-
-      // FR-005: Mark spec as completed when run succeeds
-      if (status === 'done') markSpecCompleted(relativeSpecPath);
-
-      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
-      synthesizeRunMemory(runId, workspaceId).catch(() => {});
-
-      const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
-      const postRunResults = await runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
-      if (postRunResults.length > 0) {
-        const hookOutput = postRunResults.map(r =>
-          `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
-          (r.exitCode !== 0 ? `\r\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\r\n` : '\r\n')
-        ).join('');
-        buf.chunks.push(hookOutput);
-        buf.subscribers.forEach(cb => cb(hookOutput));
-        fs.appendFileSync(logPath, hookOutput);
-      }
-
-      const walFinishEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code, source: 'quick-run' })]);
-      broadcastAll(walFinishEvent!);
-
-      // PR-RQ-1: Advance run queue — promote next queued run if any
-      advanceQueue(workspaceId);
-
-      buf.done = true;
-      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
-      buf.subscribers.clear();
-      setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
-    });
-
-    res.status(202).json({ runId, specId: slug });
-  } catch (error: any) {
-    handleRouteError(res, error, '[Pipeline] Quick-run');
-  }
+router.post('/quick-run', (_req: Request, res: Response) => {
+  res.status(409).json({
+    error: 'quick_run_retired',
+    message: 'Quick-run is retired. Persist and approve a spec, then use the canonical pipeline trigger API.',
+  });
 });
 
 // ─── POST /api/pipeline/runs — Create a pipeline run ────────────────────────
@@ -4424,6 +4556,8 @@ router.post('/quick-run', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Create a pipeline run record
  *     operationId: createPipelineRun
@@ -4556,6 +4690,8 @@ router.get('/runs', authRequired, async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/compare:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Compare two pipeline runs side-by-side
  *     operationId: comparePipelineRuns
@@ -5021,6 +5157,25 @@ async function listContextTraceRoots(
 // continuation runs that did not emit CTM artifacts, reconstructs trace-like
 // metadata from story_started WAL payloads and story token rows so the Context
 // tab can still explain CAG/RAG/KG/prompt context channels.
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/context-inspector-events:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Read bounded context-inspector metadata for a run
+ *     operationId: getPipelineRunContextInspectorEvents
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Context trace reconstruction exposes operator diagnostics and raw-reference metadata, so it remains an operator-only read surface."
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Bounded context trace metadata or reconstructed fallback events }
+ *       400: { description: Invalid run ID }
+ *       404: { description: Run not found }
+ */
 router.get('/runs/:runId/context-inspector-events', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -5789,7 +5944,7 @@ const PipelineRetrySchema = z.object({
   storyIds: z.array(z.string().trim().min(1).max(256)).max(100).optional(),
   forceSequential: z.boolean().optional(),
   previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
-  approvalToken: z.string().trim().min(8).max(512).optional(),
+  approvalReceipt: z.string().trim().min(64).max(4096).optional(),
   cancelPreview: z.boolean().optional(),
   safeMode: z.boolean().optional(),
   approvedPreview: z.record(z.string(), z.unknown()).optional(),
@@ -5843,9 +5998,9 @@ const PipelineRetrySchema = z.object({
  *               previewIdentity:
  *                 type: object
  *                 description: Unexpired self-verifying identity returned with the packet
- *               approvalToken:
+ *               approvalReceipt:
  *                 type: string
- *                 description: Existing explicit operator approval token required when the preview marks requiresApproval
+ *                 description: One-time expiring Rorca-issued human approval receipt required when the preview marks requiresApproval
  *               cancelPreview:
  *                 type: boolean
  *                 description: Cancel this preview before dispatch
@@ -5855,6 +6010,126 @@ const PipelineRetrySchema = z.object({
  *       404: { description: "Run not found" }
  *       409: { description: "Retry job already queued for this run" }
  */
+const RetryHumanApprovalSchema = z.object({
+  approvedPreview: z.record(z.string(), z.unknown()),
+  previewIdentity: z.object({
+    schemaVersion: z.literal('retry-preview-identity.v1'),
+    previewHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    originalRunId: z.number().int().positive(),
+    expiresAt: z.string().datetime(),
+    signature: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  }).strict(),
+  rationale: z.string().trim().min(10).max(2000),
+  humanApproval: ProviderHumanEventSchema.optional(),
+}).strict();
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/retry-approval:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Issue exact human authority for a destructive governed retry
+ *     operationId: issuePipelineRetryHumanApproval
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Only an authenticated workspace owner or admin may issue a one-time packet-bound retry receipt; service identities and Hermes cannot self-approve."
+ *     x-rorca-mcp: false
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [approvedPreview, previewIdentity, rationale]
+ *             additionalProperties: false
+ *             properties:
+ *               approvedPreview: { type: object }
+ *               previewIdentity: { type: object }
+ *               rationale: { type: string, minLength: 10, maxLength: 2000 }
+ *     responses:
+ *       201: { description: One-time expiring approval receipt }
+ *       401: { description: Authentication required }
+ *       403: { description: Human workspace approval authority required }
+ *       409: { description: Preview or idempotency binding conflict }
+ */
+export async function issueRetryHumanApprovalHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const originalRunId = Number(req.params.runId);
+    if (!Number.isSafeInteger(originalRunId) || originalRunId <= 0) throw new ValidationError('Invalid runId');
+    const run = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [originalRunId]);
+    if (!run) throw new NotFoundError('Run not found');
+    await assertPipelineWorkspaceAccess(req, run.workspace_id);
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+    if (!idempotencyKey) throw new ValidationError('Idempotency-Key header is required');
+
+    const packet = req.body.approvedPreview as unknown as RetryPreviewPacket;
+    const identity = req.body.previewIdentity as RetryPreviewIdentity;
+    if (!verifyRetryPreview(packet) || packet.originalRunId !== originalRunId) {
+      throw new ConflictError('Approval requires the exact self-verifying retry preview packet');
+    }
+    const identityCheck = verifyRetryPreviewIdentity(identity, packet);
+    if (!identityCheck.valid) throw new ConflictError('Retry preview identity is expired, invalid, or mismatched');
+    if (!packet.requiresApproval) throw new ConflictError('Retry preview does not require human approval');
+    const targetHash = providerHumanActionHash({
+      purpose: 'retry_approval',
+      workspaceId: run.workspace_id,
+      originalRunId,
+      previewHash: packet.previewHash,
+      previewIdentityHash: retryHash(identity),
+      scopeHash: retryHash(packet.scope.executable.map((entry) => entry.storyId)),
+      expiresAt: identity.expiresAt,
+    });
+    const principal = req.body.humanApproval
+      ? await (async () => {
+        const authority = await verifyAndPersistProviderHumanAuthority({
+          workspaceId: run.workspace_id,
+          purpose: 'retry_approval',
+          targetHash,
+          event: req.body.humanApproval,
+        });
+        return {
+          principalType: 'provider_human' as const,
+          principalId: authority.actorId,
+          principalAuthId: authority.receiptId,
+          principalDisplayLabel: `${req.body.humanApproval.provider}:${authority.actorId}`,
+          sourceChannel: 'provider' as const,
+          providerHumanReceiptId: authority.receiptId,
+          provider: req.body.humanApproval.provider,
+          providerTenantId: req.body.humanApproval.providerTenantId,
+        };
+      })()
+      : await assertHumanRetryApprover(req.user, run.workspace_id);
+
+    const issued = await issueGovernedRetryHumanApproval({
+      principal,
+      workspaceId: run.workspace_id,
+      originalRunId,
+      packet,
+      previewIdentity: identity,
+      rationale: req.body.rationale,
+      idempotencyKey,
+    });
+    res.status(201).json({
+      ok: true,
+      approvalReceipt: issued.receipt,
+      approvalId: issued.approvalId,
+      expiresAt: issued.expiresAt,
+      replayed: issued.replayed,
+    });
+  } catch (error) {
+    handleRouteError(res, error, '[Pipeline] Issue retry human approval');
+  }
+}
+
+router.post('/runs/:runId/retry-approval', validateBody(RetryHumanApprovalSchema), issueRetryHumanApprovalHandler);
 router.post('/runs/:runId/retry', validateBody(PipelineRetrySchema), retryPipelineRunHandler);
 
 export async function retryPipelineRunHandler(req: Request, res: Response): Promise<void> {
@@ -5867,11 +6142,11 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       return;
     }
 
-    const { storyIds, forceSequential, previewHash, approvalToken, cancelPreview, safeMode, approvedPreview: approvedPreviewRaw, previewIdentity } = req.body as {
+    const { storyIds, forceSequential: _forceSequential, previewHash, approvalReceipt, cancelPreview, safeMode, approvedPreview: approvedPreviewRaw, previewIdentity } = req.body as {
       storyIds?: string[];
       forceSequential?: boolean;
       previewHash?: string;
-      approvalToken?: string;
+      approvalReceipt?: string;
       cancelPreview?: boolean;
       approvedPreview?: RetryPreviewPacket;
       previewIdentity?: RetryPreviewIdentity;
@@ -5887,6 +6162,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       return;
     }
     const originalRun = normalizePipelineRun(originalRunRow);
+    await assertPipelineWorkspaceAccess(req, originalRun.workspace_id);
 
     // Only retry runs that have terminal failure states
     if (!['failed', 'done', 'completed', 'partial_failure'].includes(originalRun.status)) {
@@ -5903,7 +6179,6 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new NotFoundError('Workspace not found');
       return;
     }
-
     // Cancellation is authorized by the exact signed packet, not by a fresh
     // scope calculation. It must remain available when the source spec or Git
     // head drifts after approval, and it linearizes before any new side effect.
@@ -5936,12 +6211,24 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       }
     }
 
-    const passReconciliation = await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)({
+    const verifiedTaskManifestLineage = typeof originalRun.task_manifest_id === 'string' && originalRun.task_manifest_id.length > 0
+      ? await loadAndVerifyTaskManifestRunLineage(originalRunId, workspace.path)
+      : null;
+    const taskManifestSynthetic = verifiedTaskManifestLineage !== null;
+    const passReconciliation: PassReconciliationReport = taskManifestSynthetic ? {
+      workspaceId: originalRun.workspace_id,
+      specId: path.basename(originalRun.spec_path, '.json'),
+      specPath: originalRun.spec_path,
+      specRevision: `task-manifest:${originalRun.task_manifest_id}`,
+      blocking: false,
+      repairedStoryIds: [],
+      stories: [],
+    } : await (previewHash ? reconcileApprovedSpecPasses : inspectApprovedSpecPasses)({
       workspaceId: originalRun.workspace_id,
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
     });
-    assertReconciliationAllowsAutomaticScope(passReconciliation);
+    if (!taskManifestSynthetic) assertReconciliationAllowsAutomaticScope(passReconciliation);
     const reconciliationByStory = new Map(passReconciliation.stories.map((story) => [story.storyId, story]));
 
     // 2. Find all stories and their latest status from the original run
@@ -5954,7 +6241,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     }
 
     // Fallback: if story_results is empty (subprocess HTTP calls failed), derive from spec JSON
-    if (latestByStory.size === 0 && originalRun.spec_path) {
+    if (latestByStory.size === 0 && originalRun.spec_path && !taskManifestSynthetic) {
       try {
         const wsRow = await queryOne('SELECT path FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as { path: string } | undefined;
         if (wsRow) {
@@ -5985,13 +6272,25 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const failedStories = Array.from(latestByStory.values()).filter((s) => {
       const reconciliation = reconciliationByStory.get(s.story_id);
       return (s.status === 'fail' || s.status === 'skip')
-        && reconciliation?.status === 'consistent-not-passed'
-        && !reconciliation.reasonCodes.includes('EXCLUDED_STORY');
+        && (taskManifestSynthetic || reconciliation?.status === 'consistent-not-passed')
+        && (taskManifestSynthetic || !reconciliation!.reasonCodes.includes('EXCLUDED_STORY'));
     });
+    const predecessorAuthority = await inspectRunHostAuthority(originalRunId);
+    const exactPredecessorPasses = new Map((predecessorAuthority?.stories ?? [])
+      .filter(story => story.status === 'pass' && story.commitSha
+        && predecessorAuthority?.authoritativePassedStoryIds.includes(story.storyId))
+      .map(story => [story.storyId, story]));
+    const projectedPassedIds = Array.from(latestByStory.values())
+      .filter(s => reconciliationByStory.get(s.story_id)?.status === 'consistent-passed')
+      .map(s => s.story_id);
+    if (projectedPassedIds.some(storyId => !exactPredecessorPasses.has(storyId))) {
+      throw new ConflictError('Retry cannot omit a prior pass without exact linked predecessor host authority');
+    }
     const passedStories = Array.from(latestByStory.values()).filter((s) => {
       const reconciliation = reconciliationByStory.get(s.story_id);
       return s.status === 'pass'
-        && (reconciliation?.status === 'consistent-passed' || reconciliation?.status === 'safely-repairable');
+        && (reconciliation?.status === 'consistent-passed' || reconciliation?.status === 'safely-repairable')
+        && exactPredecessorPasses.has(s.story_id);
     });
 
     if (failedStories.length === 0) {
@@ -6019,6 +6318,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         worktreePath: originalRun.worktree_path,
         expectedBranchName: originalRun.branch_name ?? null,
         expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+        allowRorcaRuntimeMetadata: true,
       })
       : null;
 
@@ -6046,13 +6346,20 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     let retryModel = originalEffectiveOptions.model ?? originalRun.agent_model ?? null;
     let retryEffort = originalEffectiveOptions.effort;
     if (retryAgent === 'pi') {
-      const piStatus = piDetector.detectPi();
-      if (!piStatus.piInstalled || !piStatus.piBinPath) throw new ValidationError('pi_preflight:not_installed');
+      // A retry can reuse only the already-frozen ordinary local Pi posture;
+      // all other retries remain on the Linux bwrap probe path.
+      const piInspectionOptions = originalEffectiveOptions.safety.ordinaryLocalPi === true
+        ? { sandboxMode: 'darwin-local-pi' as const }
+        : undefined;
+      const inspection = piDetector.inspectPi(piInspectionOptions);
+      if (!inspection.status.piInstalled || !inspection.status.piBinPath) {
+        throw new ValidationError(`pi_preflight:${inspection.failureCode ?? 'pi_not_installed'}`);
+      }
       try {
         const selection = preflightPiModelAndEffort(
           retryModel,
           retryEffort,
-          piDetector.listPiModels(piStatus.piBinPath),
+          piDetector.listPiModels(inspection.status.piBinPath, piInspectionOptions),
           DEFAULT_PI_MODEL,
         );
         retryModel = selection.model;
@@ -6141,33 +6448,23 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
           sourceCommit: null,
         });
       }
-      const closeoutRows = await query<{ id: number; runId: string; status: string }>(
-        `SELECT id, payload->>'run_id' AS "runId", payload->>'status' AS status
-         FROM wal_events
-         WHERE event_type = 'run_closeout' AND (payload->>'run_id')::bigint = ANY($1::bigint[])
-         ORDER BY id`,
-        [originalRunLineage],
-      );
-      const retryTargetCwd = originalRun.worktree_path ?? workspace.path;
-      const integratedRevision = execSync('git rev-parse HEAD', { cwd: retryTargetCwd, encoding: 'utf8' }).trim();
-      const integrationAncestry = integrationRows.map((row) => row.resultingHead).filter((head): head is string => Boolean(head));
-      const acceptedByRun = new Map<number, string[]>();
-      for (const decision of decisions.filter((row) => row.status === 'accepted')) {
-        acceptedByRun.set(Number(decision.runId), [...(acceptedByRun.get(Number(decision.runId)) ?? []), decision.storyId]);
+      const closeoutEvidence = await loadHostRunCloseoutEvidence(originalRunLineage);
+      const targetCloseout = closeoutEvidence.find((row) => row.runId === originalRunId);
+      if (!targetCloseout || !originalRun.branch_name) {
+        throw new ConflictError('Canonical host closeout is unavailable for the retry target');
       }
-      const closeoutEvidence: RetryRunCloseoutEvidence[] = closeoutRows.map((row) => ({
-        runId: Number(row.runId),
-        status: ['done', 'completed', 'failed', 'partial_failure'].includes(row.status)
-          ? row.status as RetryRunCloseoutEvidence['status']
-          : 'failed',
-        integratedRevision,
-        integrationAncestry: [...integrationAncestry, integratedRevision],
-        acceptedStoryIds: acceptedByRun.get(Number(row.runId)) ?? [],
-        evidenceIdentity: `wal:run_closeout:${row.id}`,
-      }));
+      const retryTargetCwd = originalRun.worktree_path ?? workspace.path;
+      const checkout = assertCanonicalRunCheckout({
+        cwd: retryTargetCwd,
+        repositoryTopLevel: workspace.path,
+        branchName: originalRun.branch_name,
+        expectedHead: targetCloseout.integratedRevision,
+      });
+      assertOrderedCommitAncestry(checkout.cwd, targetCloseout.integrationAncestry, targetCloseout.integratedRevision);
       try {
         authoritativeScope = deriveAuthoritativeRetryScope({
           originalRunLineage,
+          targetRunId: originalRunId,
           completions: completionEvidence,
           integrations: integrationRows,
           closeouts: closeoutEvidence,
@@ -6190,7 +6487,9 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       agent: retryAgent,
       model: retryModel,
       effort: retryEffort,
-      terminalMode: originalRun.terminal_mode,
+      // Safe retries are unattended continuations. Never replay an interactive
+      // PTY failure into another approval/prompt stall.
+      terminalMode: enforceSafeRetry ? 'ansi-html' : originalRun.terminal_mode,
       includeGraph: originalRun.include_graph ?? originalEffectiveOptions.graph.enabled,
       worktree: {
         ...originalEffectiveOptions.worktree,
@@ -6200,7 +6499,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         ? { strategy: 'branch-only', autoMerge: false }
         : { strategy: retrySafety.mergeStrategy, autoMerge: retrySafety.autoMerge },
       safety: {
-        deploy: enforceSafeRetry ? false : retrySafety.deploy,
+        deploy: taskManifestSynthetic || enforceSafeRetry ? false : retrySafety.deploy,
         externalSend: enforceSafeRetry ? false : retrySafety.externalSend,
         policyLocked: retrySafety.policyLocked,
         allowBackendJest: false,
@@ -6212,13 +6511,14 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       || replayedOptions.merge.strategy === 'direct'
       || replayedOptions.safety.deploy
       || replayedOptions.safety.externalSend;
-    const highRisk = destructiveReplay || Boolean(worktreePreflight && worktreePreflight.classification !== 'fresh');
-    const retryParallelRequested = forceSequential === false && (originalRun.parallelism ?? 1) > 1;
+    // Governed retry has no independent production-wave receipt/envelope in
+    // this contract version. Never inherit wave authority from the source run
+    // or from forceSequential=false; retries remain explicitly sequential.
     const retryWavePolicy = enforceWaveParallelPolicy({
       source: 'pipeline-retry',
-      requestedMode: retryParallelRequested ? 'wave-parallel' : 'sequential',
-      requestedParallelism: retryParallelRequested ? (originalRun.parallelism ?? 1) : 1,
-      forceSequential: forceSequential !== false || highRisk || approvedPreviewRaw?.forceSequential === true || isPtyTerminalMode(originalRun.terminal_mode),
+      requestedMode: 'sequential',
+      requestedParallelism: 1,
+      forceSequential: true,
     }, currentWaveParallelPolicyEnvironment());
     const retryOrchestration = {
       mode: retryWavePolicy.mode,
@@ -6239,7 +6539,25 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       // Preview is deliberately read-only: no approval row, WAL record, run, or
       // queue job exists until the caller dispatches this exact expiring packet.
       const identity = createRetryPreviewIdentity(retryPreview);
-      res.status(200).json({ ok: true, preview: retryPreview, previewIdentity: identity, worktreePreflight, passReconciliation });
+      const humanApprovalTargetHash = retryPreview.requiresApproval
+        ? providerHumanActionHash({
+          purpose: 'retry_approval',
+          workspaceId: originalRun.workspace_id,
+          originalRunId,
+          previewHash: retryPreview.previewHash,
+          previewIdentityHash: retryHash(identity),
+          scopeHash,
+          expiresAt: identity.expiresAt,
+        })
+        : null;
+      res.status(200).json({
+        ok: true,
+        preview: retryPreview,
+        previewIdentity: identity,
+        humanApprovalTargetHash,
+        worktreePreflight,
+        passReconciliation,
+      });
       return;
     }
 
@@ -6297,8 +6615,8 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       throw new ConflictError('Retry scope differs from the approved preview; generate a new preview');
     }
     const approvedPreview = approvedPreviewRaw;
-    if (approvedPreview.requiresApproval && !approvalToken) {
-      throw new ForbiddenError('Retry preview requires the existing explicit operator approval path before destructive options may be replayed');
+    if (approvedPreview.requiresApproval && !approvalReceipt) {
+      throw new ForbiddenError('Retry preview requires an exact Rorca-issued human approval receipt');
     }
     if (unsafeWorktree) {
       await refuseAbandonedGovernedRetryPreparation({
@@ -6324,7 +6642,18 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     const sequenceOffset = seqRow?.max_seq ?? 0;
     const retryTerminalMode = normalizeTerminalMode(approvedPreview.options.terminalMode);
     const retryParallelism = retryWavePolicy.parallelism;
+    const originalTaskTriggerOptions = taskManifestSynthetic
+      ? parseJsonRecordLike(originalRun.trigger_options)
+      : null;
     const retryTriggerOptions = {
+      ...(taskManifestSynthetic ? {
+        manifestHash: verifiedTaskManifestLineage!.lineage.manifestHash,
+        syntheticSpecHash: verifiedTaskManifestLineage!.lineage.syntheticSpecHash,
+        policySummary: {
+          ...(parseJsonRecordLike(originalTaskTriggerOptions?.policySummary) ?? {}),
+          deploysAllowed: false,
+        },
+      } : {}),
       orchestrationMode: retryWavePolicy.mode,
       parallelism: retryWavePolicy.parallelism,
       orchestration: retryOrchestration,
@@ -6362,13 +6691,13 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         preparation_owner: string | null; preparation_lease_expires_at: Date | string | null;
         preparation_lease_live: boolean;
         retry_run_id: number | string | null; workspace_id: string; original_run_id: number | string;
-        idempotency_key: string | null; packet: RetryPreviewPacket;
+        idempotency_key: string | null; packet: RetryPreviewPacket; human_approval_id: string | null;
       }>(
         `SELECT preview_hash, status, preparation_state, preparation_owner,
                 preparation_lease_expires_at,
                 (preparation_owner IS NOT NULL AND preparation_lease_expires_at > NOW()) AS preparation_lease_live,
                 retry_run_id, workspace_id,
-                original_run_id, idempotency_key, packet
+                original_run_id, idempotency_key, packet, human_approval_id
          FROM pipeline_retry_previews
          WHERE preview_hash = $1 OR (workspace_id = $2 AND idempotency_key = $3)
          ORDER BY (preview_hash = $1) DESC
@@ -6387,7 +6716,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
                      'preparing',$10,NOW() + INTERVAL '5 minutes',1)`,
           [
             previewHash, originalRunId, originalRun.workspace_id, scopeHash,
-            JSON.stringify(approvedPreview), approvalToken ? retryHash({ approvalToken }) : null,
+            JSON.stringify(approvedPreview), null,
             retryHash(previewIdentity), previewIdentity.expiresAt, dispatchIdempotencyKey,
             preparationOwner,
           ],
@@ -6397,9 +6726,12 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
             (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path,
              retried_from_run_id, parallelism, terminal_mode, agent, agent_type, agent_model,
              auto_worktree, auto_merge, include_graph, merge_strategy, effective_options,
-             trigger_options, orchestration_mode)
+             trigger_options, orchestration_mode, expected_story_ids, excluded_story_ids,
+             execution_workspace_path, execution_worktree_path,
+             predecessor_pass_story_ids, predecessor_authority_hash,
+             task_manifest_id, task_manifest_artifacts, task_manifest_authority_version)
            VALUES ($1,$2,'queued','retry',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-                   $15::jsonb,$16::jsonb,$17)
+                   $15::jsonb,$16::jsonb,$17,$18::text[],'{}'::text[],$19,$20,$21::text[],$22,$23,$24::jsonb,$25)
            RETURNING id`,
           [
             originalRun.spec_path, originalRun.workspace_id, originalRun.branch_name,
@@ -6408,13 +6740,62 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
             approvedPreview.options.worktree.enabled, approvedPreview.options.merge.autoMerge,
             approvedPreview.options.includeGraph, approvedPreview.options.merge.strategy,
             JSON.stringify(retryEffectiveOptions), JSON.stringify(retryTriggerOptions), retryWavePolicy.mode,
+            storiesToRetry.map(story => story.story_id),
+            fs.realpathSync(workspace.path),
+            fs.realpathSync(approvedPreview.options.worktree.path ?? workspace.path),
+            [...exactPredecessorPasses.keys()].sort(),
+            exactPredecessorPasses.size > 0
+              ? linkedPredecessorAuthorityHash(originalRunId, [...exactPredecessorPasses.values()].map(story => ({
+                storyId: story.storyId,
+                resultId: story.resultId,
+                commitSha: story.commitSha!,
+              })))
+              : null,
+            originalRun.task_manifest_id ?? null,
+            originalRun.task_manifest_artifacts == null
+              ? null
+              : JSON.stringify(originalRun.task_manifest_artifacts),
+            taskManifestSynthetic ? 1 : null,
           ],
         );
         const runId = normalizeWorkerRunId(runResult.rows[0].id);
+        if (verifiedTaskManifestLineage) {
+          const parent = verifiedTaskManifestLineage.lineage;
+          await insertTaskManifestRunLineage(client, createTaskManifestRunLineage({
+            runId,
+            workspaceId: originalRun.workspace_id,
+            rootRunId: parent.rootRunId,
+            parentRunId: originalRunId,
+            lineageDepth: parent.lineageDepth + 1,
+            manifestId: parent.manifestId,
+            sourceIdempotencyKey: parent.sourceIdempotencyKey,
+            manifestHash: parent.manifestHash,
+            syntheticSpecHash: parent.syntheticSpecHash,
+            manifestPath: parent.manifestPath,
+            syntheticSpecPath: parent.syntheticSpecPath,
+            providerHumanReceiptId: parent.providerHumanReceiptId,
+          }));
+        }
+        let humanApprovalId: string | null = null;
+        if (approvedPreview.requiresApproval) {
+          const consumed = await consumeGovernedRetryHumanApproval(client, {
+            receipt: approvalReceipt!,
+            workspaceId: originalRun.workspace_id,
+            originalRunId,
+            previewHash,
+            packetHash: retryHash(approvedPreview),
+            previewIdentityHash: retryHash(previewIdentity),
+            scopeHash,
+            dispatchIdempotencyKey,
+            retryRunId: runId,
+          });
+          humanApprovalId = consumed.approvalId;
+        }
         await client.query(
-          `UPDATE pipeline_retry_previews SET retry_run_id = $2
+          `UPDATE pipeline_retry_previews
+           SET retry_run_id = $2, human_approval_id = $4
            WHERE preview_hash = $1 AND status = 'approved' AND preparation_owner = $3`,
-          [previewHash, runId, preparationOwner],
+          [previewHash, runId, preparationOwner, humanApprovalId],
         );
         return { action: 'prepare', runId, state: 'preparing' };
       }
@@ -6427,6 +6808,23 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       ) throw new ConflictError('Retry dispatch Idempotency-Key was reused with a different preview');
 
       const runId = existing.retry_run_id == null ? null : normalizeWorkerRunId(existing.retry_run_id);
+      if (approvedPreview.requiresApproval && runId !== null) {
+        if (!approvalReceipt) throw new ForbiddenError('Exact approval receipt is required to replay this destructive retry');
+        const consumed = await consumeGovernedRetryHumanApproval(client, {
+          receipt: approvalReceipt,
+          workspaceId: originalRun.workspace_id,
+          originalRunId,
+          previewHash,
+          packetHash: retryHash(approvedPreview),
+          previewIdentityHash: retryHash(previewIdentity),
+          scopeHash,
+          dispatchIdempotencyKey,
+          retryRunId: runId,
+        });
+        if (existing.human_approval_id !== consumed.approvalId) {
+          throw new ConflictError('Retry preview is bound to a different human approval receipt');
+        }
+      }
       if (existing.status === 'dispatched' && runId !== null) return { action: 'duplicate', runId };
       if (existing.status === 'cancelled' || existing.status === 'refused') {
         return { action: 'terminal', terminal: existing.status, runId };
@@ -6500,14 +6898,33 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         runId: reservation.runId,
         changeKind: 'retry_dispatched',
       });
-      res.status(200).json({ ok: true, queued: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+      res.status(200).json({
+        ok: true, queued: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({ disposition: 'already_queued', runId: reservation.runId, runStatus: 'queued', replayed: true, reasonCode: 'retry_already_queued' }),
+      });
       return;
     }
     if (reservation.action === 'terminal') {
-      throw new ConflictError(`Retry preview is ${reservation.terminal} and no longer dispatchable`);
+      const refused = reservation.terminal === 'refused';
+      res.status(200).json({
+        ok: !refused, queued: false, terminal: reservation.terminal, duplicate: true,
+        runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({
+          disposition: refused ? 'refused' : 'terminal_failure',
+          runId: reservation.runId,
+          runStatus: reservation.terminal,
+          replayed: true,
+          retryable: false,
+          reasonCode: `retry_terminal_${reservation.terminal}`,
+        }),
+      });
+      return;
     }
     if (reservation.action === 'pending') {
-      res.status(200).json({ ok: true, queued: false, pending: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+      res.status(200).json({
+        ok: true, queued: false, pending: true, duplicate: true, runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({ disposition: 'pending_publication', runId: reservation.runId, runStatus: 'queued', replayed: true, reasonCode: 'retry_publication_pending' }),
+      });
       return;
     }
 
@@ -6541,7 +6958,18 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       });
       if (publication.outcome === 'cancelled' || publication.outcome === 'refused') {
         ownedRetryPreparation = null;
-        res.status(200).json({ ok: true, queued: false, terminal: publication.outcome, duplicate: true, runId: reservation.runId, originalRunId, previewHash });
+        res.status(200).json({
+          ok: publication.outcome !== 'refused', queued: false, terminal: publication.outcome, duplicate: true,
+          runId: reservation.runId, originalRunId, previewHash,
+          dispatchOutcome: dispatchOutcome({
+            disposition: publication.outcome === 'refused' ? 'refused' : 'terminal_failure',
+            runId: reservation.runId,
+            runStatus: publication.outcome,
+            replayed: true,
+            retryable: false,
+            reasonCode: `retry_terminal_${publication.outcome}`,
+          }),
+        });
         return;
       }
       if (publication.outcome !== 'published') {
@@ -6554,7 +6982,10 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         runId: reservation.runId,
         changeKind: 'retry_dispatched',
       });
-      res.status(200).json({ ok: true, queued: true, duplicate: true, recovered: true, runId: reservation.runId, originalRunId, previewHash });
+      res.status(200).json({
+        ok: true, queued: true, duplicate: true, recovered: true, runId: reservation.runId, originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({ disposition: 'already_queued', runId: reservation.runId, runStatus: 'queued', replayed: true, reasonCode: 'retry_publication_recovered' }),
+      });
       return;
     }
     const newRunId = reservation.runId;
@@ -6569,6 +7000,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         worktreePath: originalRun.worktree_path,
         expectedBranchName: originalRun.branch_name ?? null,
         expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+        allowRorcaRuntimeMetadata: true,
       });
       await execute(
         `UPDATE pipeline_retry_previews
@@ -6581,6 +7013,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
         worktreePath: originalRun.worktree_path,
         expectedBranchName: originalRun.branch_name ?? null,
         expectedDirtyPaths: ['.rorca/progress', '.rorca/run-state.json', 'progress.txt'],
+        allowRorcaRuntimeMetadata: true,
       });
       if (!worktreePreflight.ok) {
         preparationRefusalReason = `worktree_refresh_failed:${worktreePreflight.reason}`;
@@ -6627,11 +7060,14 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     //     Include all stories so dependency resolution works correctly — passed stories
     //     (passes:true) are skipped naturally by the engine.
     const specJson = buildGovernedRetrySpec(sourceSpecJson, approvedPreview.scope);
-    const retrySpecName = `retry-${newRunId}.json`;
-    const retrySpecDir = path.join(workspace.path, 'forge', 'specs', 'approved');
-    const retrySpecPath = path.join(retrySpecDir, retrySpecName);
-    fs.mkdirSync(retrySpecDir, { recursive: true });
-    fs.writeFileSync(retrySpecPath, JSON.stringify(specJson, null, 2));
+    const retrySpecPath = deriveRunSpecPath({
+      runId: Number(newRunId),
+      sourceSpecPath: path.join(workspace.path, originalRun.spec_path),
+      workspacePath: workspace.path,
+      worktreePath: approvedPreview.options.worktree.path,
+      retry: true,
+    });
+    durableAtomicWriteFile(retrySpecPath, JSON.stringify(specJson, null, 2) + '\n');
 
     let preparationState = resumedPreparationState;
     if (preparationState === 'preparing') {
@@ -6734,7 +7170,16 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       });
       throw new ConflictError('Generated retry execution plan differs from the approved preview');
     }
+    if (planComparison.actual.length === 0) throw new ConflictError('Retry run has no frozen expected stories');
+    await execute('UPDATE pipeline_runs SET expected_story_ids = $1::text[], excluded_story_ids = $2::text[] WHERE id = $3', [
+      [...new Set(planComparison.actual)].sort(),
+      [],
+      newRunId,
+    ]);
 
+    const verifiedRetryTaskLineage = taskManifestSynthetic
+      ? await loadAndVerifyTaskManifestRunLineage(Number(newRunId), workspace.path)
+      : null;
     const queuePayloadAuthority = {
       runId: Number(newRunId),
       originalRunId,
@@ -6743,8 +7188,10 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       previewHash,
       approvedPreview: approvedPreview as unknown as Record<string, unknown>,
       generatedPlanHash: planComparison.scopeHash,
+      taskManifestLineageHash: verifiedRetryTaskLineage?.lineage.lineageIdentityHash ?? null,
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
+      runSpecPath: retrySpecPath,
       retrySpecPath,
       agent: approvedPreview.options.agent,
       model: approvedPreview.options.model,
@@ -6797,6 +7244,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
       approvedPreviewHash: previewHash,
       scopeHash,
       evidenceHash: effectiveAuthority.evidenceHash,
+      taskManifestLineageHash: verifiedRetryTaskLineage?.lineage.lineageIdentityHash ?? null,
       storyAttempts: retriedStoryInfo.map((story) => ({
         ...story,
         sourceRunId: originalRunId,
@@ -6896,8 +7344,15 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     if (publication.outcome === 'cancelled' || publication.outcome === 'refused') {
       ownedRetryPreparation = null;
       res.status(200).json({
-        ok: true, queued: false, terminal: publication.outcome, runId: newRunId,
+        ok: publication.outcome !== 'refused', queued: false, terminal: publication.outcome, runId: newRunId,
         originalRunId, previewHash,
+        dispatchOutcome: dispatchOutcome({
+          disposition: publication.outcome === 'refused' ? 'refused' : 'terminal_failure',
+          runId: newRunId,
+          runStatus: publication.outcome,
+          retryable: false,
+          reasonCode: `retry_terminal_${publication.outcome}`,
+        }),
       });
       return;
     }
@@ -6917,6 +7372,7 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
     res.status(201).json({
       ok: true,
       queued: true,
+      dispatchOutcome: dispatchOutcome({ disposition: 'queued', runId: newRunId, runStatus: 'queued', reasonCode: 'retry_queued' }),
       runId: newRunId,
       originalRunId,
       queuePosition: 1,
@@ -6940,99 +7396,33 @@ export async function retryPipelineRunHandler(req: Request, res: Response): Prom
   }
 }
 
-// ─── POST /api/pipeline/runs/:runId/retry-merge — Retry a failed worktree merge ─
-// Re-enqueues the merge job for a run whose merge_status is 'failed'.
+// ─── POST /api/pipeline/runs/:runId/retry-merge — Retired legacy actuator ───
 
 /**
  * @swagger
  * /api/pipeline/runs/{runId}/retry-merge:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
- *     summary: Retry a failed worktree auto-merge
+ *     summary: Retired manual merge retry actuator
  *     operationId: retryMerge
- *     description: Re-enqueues a pipeline:merge pg-boss job for a run whose merge_status is 'failed'. Resets merge_status to 'merging'.
+ *     description: Returns a truthful conflict. Exact release intents retry through the canonical periodic reconciler; historical runs cannot be upgraded safely from branch-name-only state.
  *     parameters:
  *       - in: path
  *         name: runId
  *         required: true
  *         schema: { type: string, pattern: '^[0-9]+$' }
  *     responses:
- *       200: { description: "Merge job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: string }, queued: { type: boolean } } } } } }
- *       404: { description: "Run not found" }
- *       409: { description: "merge_status is not failed" }
+ *       400: { description: "Invalid run id" }
+ *       409: { description: "Manual actuator retired; canonical reconciliation is automatic" }
  */
-router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
-  try {
-    const runIdText = String(req.params.runId);
-    if (!/^[1-9][0-9]*$/.test(runIdText)) {
-      throw new ValidationError('Invalid runId');
-    }
-    const runId = normalizeWorkerRunId(runIdText);
-
-    const run = await queryOne<{
-      id: string;
-      merge_status: string | null;
-      branch_name: string | null;
-      worktree_path: string | null;
-      workspace_id: string;
-      auto_merge: boolean | null;
-      merge_strategy: string | null;
-      agent_type: string | null;
-      agent_model: string | null;
-    }>(
-      'SELECT id, merge_status, branch_name, worktree_path, workspace_id, auto_merge, merge_strategy, agent_type, agent_model FROM pipeline_runs WHERE id = $1',
-      [runId],
-    );
-
-    if (!run) {
-      throw new NotFoundError('Run', String(runId));
-    }
-
-    if (run.merge_status !== 'failed') {
-      throw new ConflictError(
-        `Cannot retry merge: merge_status is '${run.merge_status ?? 'null'}', expected 'failed'`,
-      );
-    }
-
-    if (!run.branch_name) {
-      throw new ConflictError('Cannot retry merge: run has no branch_name (not a worktree run)');
-    }
-    if (run.auto_merge !== true || run.merge_strategy !== 'direct') {
-      throw new ConflictError('Cannot retry merge: only autoMerge=true direct runs may merge into the base branch');
-    }
-    if (!['claude', 'opencode', 'codex', 'pi'].includes(run.agent_type ?? '')) {
-      throw new ConflictError('Cannot retry merge: persisted configured agent is missing or invalid');
-    }
-
-    // Reset merge_status to 'merging' — use rowCount to detect race condition
-    const { rowCount } = await execute(
-      `UPDATE pipeline_runs SET merge_status = 'merging' WHERE id = $1 AND merge_status = 'failed'`,
-      [runId],
-    );
-
-    if (rowCount === 0) {
-      throw new ConflictError('Merge status was already changed by another request');
-    }
-
-    // Enqueue pipeline:merge job
-    await getBoss().send('pipeline:merge', {
-      runId,
-      branch: run.branch_name,
-      workspaceId: run.workspace_id,
-      posture: { agent: run.agent_type as 'claude' | 'opencode' | 'codex' | 'pi', model: run.agent_model, source: 'manual-retry' },
-    }, {
-      retryLimit: 0,
-      expireInSeconds: 3600, // 1 hour
-    });
-
-    logger.info({ runId, branch: run.branch_name }, '[Pipeline] Enqueued pipeline:merge retry job');
-
-    res.status(200).json({ ok: true, runId, queued: true });
-  } catch (error: any) {
-    // AppError subclasses are caught and serialized by the centralized error handler
-    logger.error({ error }, '[Pipeline] retry-merge error');
-    throw error;
-  }
+router.post('/runs/:runId/retry-merge', (req: Request, _res: Response) => {
+  const runIdText = String(req.params.runId);
+  if (!/^[1-9][0-9]*$/.test(runIdText)) throw new ValidationError('Invalid runId');
+  throw new ConflictError(
+    'Manual retry-merge is retired: exact release intents retry automatically; historical branch-only merge state cannot be authorized safely.',
+  );
 });
 
 // ─── POST /api/pipeline/runs/:runId/pause — Pause a running pipeline ─────────
@@ -7042,6 +7432,8 @@ router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/pause:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Pause a running pipeline
  *     operationId: pausePipelineRun
@@ -7122,6 +7514,8 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/resume:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Resume a paused pipeline
  *     operationId: resumePipelineRun
@@ -7190,6 +7584,8 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/context:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Inject context into a blocked (HITL) pipeline run and resume
  *     operationId: injectPipelineContext
@@ -7285,9 +7681,10 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
 });
 
 // ─── POST /api/pipeline/runs/:runId/cancel — Cancel a queued or running pipeline ─
-// Queued path: calls getBoss().cancel(String(runId)) to remove the pg-boss job
-//   before the worker picks it up, then marks the run as cancelled immediately.
-// Running path: sends a 'pipeline:cancel' job to the worker, returns 200 immediately.
+// Queued path: application state terminalizes synchronously under the run and
+//   cancellation locks; pg-boss delivery is irrelevant to canonical authority.
+// Running path: sends a 'pipeline:cancel' notification to the worker after the
+//   durable intent commits; restart reconciliation is independent of delivery.
 //   The worker owns SIGTERM → SIGKILL sequencing and DB/WAL updates for this path.
 // Completed/cancelled: returns 409 Conflict.
 
@@ -7302,8 +7699,8 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  *     x-rorca-rationale: "Cancelling a local run is a core operator action required by the stable open-source CLI surface."
  *     x-rorca-public-api: true
  *     description: >
- *       For queued runs: removes the pg-boss job and marks the run as cancelled immediately.
- *       For running runs: delivers a pipeline:cancel job to the worker (which sends SIGTERM then SIGKILL after 10s) and returns 200 immediately — DB and WAL updates happen asynchronously in the worker.
+ *       For queued runs: atomically marks application run/publication/cancellation authority cancelled without relying on transport.
+ *       For running runs: persists cancellation intent, notifies the worker, and returns immediately; the worker re-reads child, engine PID, and PTY process state before terminalizing, while startup reconciliation recovers lost notifications.
  *       Returns 409 if the run is already completed or cancelled.
  *     parameters:
  *       - in: path
@@ -7334,88 +7731,65 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     }
 
     await assertPipelineWorkspaceAccess(req, run.workspace_id);
-    const { status } = run;
+    const governedCancellation = await requestGovernedRetryRunCancellation({
+      runId,
+      workspaceId: run.workspace_id,
+      requestedBy: req.user?.id ?? 'unknown',
+      reason: 'operator_cancelled_run',
+    });
+    if (governedCancellation.outcome !== 'not_governed_retry') {
+      if (governedCancellation.outcome === 'cancelled_before_claim') {
+        if (governedCancellation.bossJobId) {
+          await getBoss().cancel('pipeline:retry', governedCancellation.bossJobId);
+        }
+        res.json({ ok: true, runId, status: 'cancelled', governedRetry: true });
+        return;
+      }
+      if (governedCancellation.outcome === 'termination_required') {
+        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
+        res.json({ ok: true, runId, status: 'cancelling', governedRetry: true });
+        return;
+      }
+      res.json({ ok: true, runId, status: 'terminal', governedRetry: true });
+      return;
+    }
 
-    // Already done — conflict
-    if (status !== 'queued' && status !== 'running' && status !== 'paused') {
+    const { status } = run;
+    if (!['queued', 'starting', 'running', 'paused'].includes(status)) {
       throw new ConflictError(`Run is already ${status} and cannot be cancelled`);
     }
 
-    if (status === 'queued') {
-      // ── Queued path ──────────────────────────────────────────────────────
-      // Attempt to remove the pg-boss job before the worker picks it up.
-      // pg-boss requires UUID job IDs — look up by payload runId.
-      const jobRow = await queryOne<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
-        [String(runId)]
-      );
-      if (jobRow) {
-        await getBoss().cancel('pipeline:run', jobRow.id);
+    // Persist application authority first under the run lock. pg-boss is only a
+    // notification transport; no job-table state can override this request.
+    const cancellationStatus = await transaction(async (client) => {
+      const locked = (await client.query<{ status: string; workspace_id: string }>(
+        'SELECT status, workspace_id FROM pipeline_runs WHERE id = $1 FOR UPDATE', [runId],
+      )).rows[0];
+      if (!locked || locked.workspace_id !== run.workspace_id
+        || !['queued', 'starting', 'running', 'paused'].includes(locked.status)) {
+        throw new ConflictError(`Run changed to ${locked?.status ?? 'missing'} before cancellation authority was recorded`);
       }
-
-      // Re-read status: if the worker picked up the job between our check and
-      // cancel, the run may have already transitioned to 'running'. Fall through.
-      const refreshed = await queryOne<{ status: string }>(
-        'SELECT status FROM pipeline_runs WHERE id = $1',
-        [runId],
+      await client.query(
+        `INSERT INTO pipeline_run_cancellation_requests (run_id, workspace_id, requested_by, reason)
+         VALUES ($1,$2,$3,'operator_cancelled_run')
+         ON CONFLICT (run_id) DO NOTHING`,
+        [runId, run.workspace_id, req.user?.id ?? 'unknown'],
       );
-
-      if (refreshed && (refreshed.status === 'running' || refreshed.status === 'paused')) {
-        // Worker picked it up — delegate to the running path
-        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
-        res.json({ ok: true, runId, status: 'cancelling' });
-        return;
+      return locked.status;
+    });
+    if (cancellationStatus === 'queued') {
+      const terminal = await terminalizeCanonicalCancellation({
+        runId,
+        source: 'api_cancel_queued',
+        processQuiescent: true,
+      });
+      if (!['terminalized', 'already_terminal'].includes(terminal.outcome)) {
+        throw new ConflictError(`Queued cancellation did not converge: ${terminal.outcome}`);
       }
-
-      // Mark run as cancelled in DB (it's still queued or the job was removed)
-      await execute(
-        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queue_position = NULL WHERE id = $1`,
-        [runId],
-      );
-      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_cancel' });
-
-      // Recalculate queue positions for remaining queued runs
-      const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
-      recalculateQueuePositions(run.workspace_id);
-
-      // Emit WAL event
-      const walEvent = await queryOne<WalEvent>(
-        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
-        [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString() })],
-      );
-      if (walEvent) broadcastAll(walEvent);
-
       res.json({ ok: true, runId, status: 'cancelled' });
       return;
     }
-
-    // ── Running / paused path ─────────────────────────────────────────────
-    // Deliver cancel job to the worker for SIGTERM/SIGKILL sequencing.
     await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
-
-    // If both the engine and its independently tracked PTY process are gone,
-    // finalize inline. A dead wrapper PID alone is not enough: the forkpty child
-    // may still be alive and must remain visible to the worker cancellation job.
-    const ptyHealth = await getRunPtySessionHealth(runId);
-    const pidAlive = run.pid ? isPidAlive(run.pid) : false;
-    if (mayFinalizePtyCancellationInline(pidAlive, ptyHealth?.status)) {
-      // Process is already gone — handle cancellation inline
-      await execute(
-        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,
-        [runId],
-      );
-      await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'pid_not_alive' });
-      const walEvent = await queryOne<WalEvent>(
-        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
-        [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString(), reason: 'pid_not_alive' })],
-      );
-      if (walEvent) broadcastAll(walEvent);
-      res.json({ ok: true, runId, status: 'cancelled' });
-      return;
-    }
-
-    // The worker owns process-tree termination. Do not race it with a direct
-    // PID signal here: a stale/recycled PID must not be targeted by the API.
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
     // AppError subclasses are caught and serialized by the centralized error handler
@@ -7432,10 +7806,12 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Cancel a queued pipeline run
  *     operationId: cancelQueuedRun
- *     description: Cancels a queued run by marking it as failed with finished_at set. Only works for runs with status='queued'. Returns 409 if the run is already active or completed.
+ *     description: Cancels a queued run by atomically terminalizing application run and dispatch-publication state. Only works for runs with status='queued'. Returns 409 if the run is already active or completed.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -7462,30 +7838,55 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
     }
 
     await assertPipelineWorkspaceAccess(req, run.workspace_id);
+    const governedCancellation = await requestGovernedRetryRunCancellation({
+      runId,
+      workspaceId: run.workspace_id,
+      requestedBy: req.user?.id ?? 'unknown',
+      reason: 'operator_deleted_queued_run',
+    });
+    if (governedCancellation.outcome !== 'not_governed_retry') {
+      if (governedCancellation.outcome === 'termination_required') {
+        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
+        res.json({ ok: true, runId, status: 'cancelling', governedRetry: true });
+        return;
+      }
+      if (governedCancellation.outcome !== 'cancelled_before_claim') {
+        throw new ConflictError(`Governed retry cancellation is ${governedCancellation.outcome}`);
+      }
+      if (governedCancellation.bossJobId) {
+        await getBoss().cancel('pipeline:retry', governedCancellation.bossJobId);
+      }
+      res.json({ ok: true, runId, status: 'cancelled', governedRetry: true });
+      return;
+    }
     if (run.status !== 'queued') {
       throw new ConflictError(`Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE`);
       return;
     }
 
-    // Remove the pg-boss job before the worker picks it up.
-    // pg-boss requires UUID job IDs — look up by payload runId.
-    const jobRow = await queryOne<{ id: string }>(
-      `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
-      [String(runId)]
-    );
-    if (jobRow) {
-      await getBoss().cancel('pipeline:run', jobRow.id);
+    await transaction(async (client) => {
+      const locked = (await client.query<{ status: string }>(
+        'SELECT status FROM pipeline_runs WHERE id = $1 FOR UPDATE', [runId],
+      )).rows[0];
+      if (!locked || locked.status !== 'queued') {
+        throw new ConflictError(`Run changed to '${locked?.status ?? 'missing'}' before queued cancellation was recorded`);
+      }
+      await client.query(
+        `INSERT INTO pipeline_run_cancellation_requests (run_id, workspace_id, requested_by, reason)
+         VALUES ($1,$2,$3,'operator_deleted_queued_run')
+         ON CONFLICT (run_id) DO NOTHING`,
+        [runId, run.workspace_id, req.user?.id ?? 'unknown'],
+      );
+    });
+    const terminal = await terminalizeCanonicalCancellation({
+      runId,
+      source: 'api_delete_queued',
+      processQuiescent: true,
+    });
+    if (!['terminalized', 'already_terminal'].includes(terminal.outcome)) {
+      throw new ConflictError(`Queued deletion cancellation did not converge: ${terminal.outcome}`);
     }
-
-    // Mark as cancelled
-    await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
-    await transitionRunLifecycle(runId, 'cancelled', { owner: 'pipeline_api', reason: 'queued_delete' });
-
-    // Recalculate positions for remaining queued runs
-    const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
-    recalculateQueuePositions(run.workspace_id);
-
-    res.json({ ok: true, runId });
+    res.json({ ok: true, runId, status: 'cancelled' });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Delete queued run');
   }
@@ -7500,9 +7901,9 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Resize the live PTY terminal for a running pipeline run
  *     operationId: resizePipelineRunPty
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Terminal resize is a local run-control operation for an already-running user-owned pipeline."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Terminal resize requires the operator-only generation credential and is excluded from MCP."
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: runId
@@ -7530,6 +7931,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
     const generationToken = typeof req.body?.generationToken === 'string' ? req.body.generationToken : '';
 
     if (isNaN(runId)) throw new ValidationError('Invalid runId');
+    if (!isSuperUser(req.user)) throw new ForbiddenError('PTY controls require local operator admin access');
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(generationToken)) {
       throw new ValidationError('generationToken must be a UUID');
     }
@@ -7574,9 +7976,9 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Send keyboard input to the live PTY for a running pipeline run
  *     operationId: sendPipelineRunInput
- *     x-rorca-tier: public
- *     x-rorca-rationale: "PTY stdin is local interactive run control for an already-running user-owned pipeline in single-user mode."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "PTY stdin requires the operator-only generation credential and is excluded from MCP."
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: runId
@@ -7603,6 +8005,7 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
     if (isNaN(runId)) {
       throw new ValidationError('Invalid runId');
     }
+    if (!isSuperUser(req.user)) throw new ForbiddenError('PTY controls require local operator admin access');
     if (!PTY_AVAILABLE) {
       throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
     }
@@ -7670,6 +8073,12 @@ router.post('/runs/:runId/input', async (req: Request, res: Response) => {
  *     operationId: getPipelinePtyControl
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "The generation credential grants terminal input/resize authority and must remain operator-only and outside SSE telemetry."
+ *     x-rorca-mcp: false
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
  *     responses:
  *       200: { description: Active generation identity and control credential }
  *       404: { description: Run or active PTY generation not found }
@@ -7693,9 +8102,9 @@ router.get('/runs/:runId/pty/control', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Fetch a validated PTY terminal-state checkpoint
  *     operationId: getPipelinePtyCheckpoint
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only, checksummed terminal recovery state for local run reattachment."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Serialized terminal state can contain sensitive operator/model content and remains operator-only outside MCP."
+ *     x-rorca-mcp: false
  *     parameters:
  *       - in: path
  *         name: runId
@@ -7714,6 +8123,7 @@ router.get('/runs/:runId/pty/checkpoints/:checkpointId', async (req: Request, re
   const runId = Number(req.params.runId);
   const checkpointId = String(req.params.checkpointId);
   if (!Number.isSafeInteger(runId) || runId <= 0) throw new ValidationError('Invalid runId');
+  if (!isSuperUser(req.user)) throw new ForbiddenError('PTY checkpoints require local operator admin access');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(checkpointId)) {
     throw new ValidationError('checkpointId must be a UUID');
   }
@@ -7756,9 +8166,10 @@ router.get('/runs/:runId/pty/checkpoints/:checkpointId', async (req: Request, re
  *     summary: Stream raw terminal output (SSE)
  *     operationId: streamPipelineOutput
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for CLI/MCP reattachment."
+ *     x-rorca-rationale: "Read-only live run output is core local execution telemetry for REST/CLI reattachment; streaming responses are not MCP tools."
  *     x-rorca-public-api: true
- *     description: Server-Sent Events stream of base64 terminal deltas. Authoritative run_meta always precedes terminal_reset/checkpoint_ready and ordered chunk replay. New event IDs scope cursors to the selected output store and PTY generation; numeric Last-Event-ID remains accepted for old clients. PostgreSQL notifications are wakeups for committed-row queries, bounded polling recovers lost notifications, and slow consumers receive a retryable cursor-preserving disconnect.
+ *     x-rorca-mcp: false
+ *     description: Server-Sent Events stream of base64 terminal deltas. Authoritative run_meta always precedes terminal_reset/checkpoint_ready and ordered chunk replay. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated generation-aware PTY capture store. New event IDs scope cursors to the selected output store and PTY generation; numeric Last-Event-ID remains accepted for old clients. PostgreSQL notifications are wakeups for committed-row queries, bounded polling recovers lost notifications, and slow consumers receive a retryable cursor-preserving disconnect.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -7868,7 +8279,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   let hasResumeCursor = resumeCursor !== null;
   let lastSequence = resumeCursor?.sequence ?? 0;
   const generationReaderEnabled = isPtyGenerationReaderEnabled();
-  const preselectedPtyGeneration = isPtyTerminalMode(normalizeTerminalMode(runRow.terminal_mode)) && generationReaderEnabled
+  // Structured Pi runs persist generation-scoped transcript evidence even when
+  // their renderer remains ansi-html. Resolve the generation independently of
+  // renderer choice so API/UI transcript discovery is never lost.
+  const preselectedPtyGeneration = generationReaderEnabled
     ? await getRunPtyGeneration(runId, requestedGenerationToken)
     : null;
   if (requestedGenerationToken && !preselectedPtyGeneration) {
@@ -7919,6 +8333,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const runIsTerminalAtOpen = terminalStatuses.includes(runRow.status);
   const configuredPtyMode = isPtyTerminalMode(requestedTerminalMode);
   const requestedPtyMode = configuredPtyMode && generationReaderEnabled;
+  const selectedEvidenceGeneration = preselectedPtyGeneration;
   let selectedPtyGeneration = requestedPtyMode ? preselectedPtyGeneration : null;
   // A synthetic legacy generation backed only by run_output_chunks is ANSI
   // evidence, not proof that a requested PTY ever started. Treating it as PTY
@@ -7979,7 +8394,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     return;
   }
 
-  const evidenceAvailabilityAtOpen = await getRunOutputEvidenceAvailability(outputGenerationId);
+  const evidenceGenerationId = selectedEvidenceGeneration?.generationId ?? null;
+  const evidenceAvailabilityAtOpen = await getRunOutputEvidenceAvailability(evidenceGenerationId);
   const checkpointSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyCheckpointSequence ?? 0);
   const firstRetainedSequenceAtOpen = Number(ptyHealthPayloadAtOpen?.ptyFirstRetainedSequence ?? 1);
   // This authoritative identity frame must precede reset/checkpoint and deltas.
@@ -7990,6 +8406,12 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     output_source: replaySource,
     outputGenerationId,
     output_generation_id: outputGenerationId,
+    evidenceGenerationId,
+    evidence_generation_id: evidenceGenerationId,
+    evidenceStoryId: selectedEvidenceGeneration?.storyId ?? null,
+    evidence_story_id: selectedEvidenceGeneration?.storyId ?? null,
+    evidenceAttempt: selectedEvidenceGeneration?.attempt ?? null,
+    evidence_attempt: selectedEvidenceGeneration?.attempt ?? null,
     storyId: selectedPtyGeneration?.storyId ?? null,
     story_id: selectedPtyGeneration?.storyId ?? null,
     attempt: selectedPtyGeneration?.attempt ?? null,
@@ -8523,106 +8945,111 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 });
 
-// ─── Token usage recording helper ─────────────────────────────────────────────
-// Inserts into token_usage table with cost calculation from model_pricing.
-// Called by both the POST endpoint and WAL auto-record.
+// ─── POST /api/pipeline/story-result — Disabled-by-default compatibility ingress ──
+// Integrated results are process-local host writes and can never cross HTTP.
 
-interface ModelPricingRow {
-  model_id: string;
-  input_cost_per_1k: number;
-  output_cost_per_1k: number;
+async function gateLegacyStoryResultIngress(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (!req.user) throw new AuthError('Authentication required');
+    if (body.integrated !== undefined || body.commitSha !== undefined || body.commitMessage !== undefined) {
+      throw new ValidationError('Integrated result and commit identity are host-only');
+    }
+    if (process.env.RORCA_ENABLE_LEGACY_STORY_RESULT_INGRESS !== '1') {
+      throw new ForbiddenError('Legacy story-result HTTP ingress is disabled');
+    }
+    const runId = Number(body.runId);
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new ValidationError('runId must be a positive integer');
+    }
+    const run = await queryOne<{ workspace_id: string; membership_role: string | null }>(`
+      SELECT pr.workspace_id,
+             (SELECT wm.role FROM workspace_members wm
+               WHERE wm.workspace_id = pr.workspace_id AND wm.user_auth_id = $2
+               LIMIT 1) AS membership_role
+        FROM pipeline_runs pr
+       WHERE pr.id = $1
+    `, [runId, req.user.supabaseId]);
+    if (!run) throw new NotFoundError('Pipeline run', String(runId));
+    if (!isSuperUser(req.user) && !['admin', 'owner'].includes(run.membership_role ?? '')) {
+      throw new ForbiddenError('Workspace admin access is required');
+    }
+    // pg BIGSERIAL values are decoded as strings by default. Normalize the
+    // validated route value before handing it to strict persistence authority.
+    body.runId = runId;
+    body.workspaceId = run.workspace_id;
+    body.integrated = false;
+    next();
+  } catch (error) {
+    handleRouteError(res, error, '[Pipeline] Story result ingress gate');
+  }
 }
-
-async function recordTokenUsage(
-  runId: number,
-  storyId: string,
-  inputTokens: number,
-  outputTokens: number,
-  model?: string,
-  reasoningTokens?: number,
-  explicitCostUsd?: number,
-) {
-  const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
-  if (!run) return;
-
-  const modelName = model || 'unknown';
-  const pricing = await queryOne('SELECT * FROM model_pricing WHERE model_id = $1', [modelName]) as ModelPricingRow | undefined;
-
-  const derivedCostUsd = pricing
-    ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
-    : 0;
-  const costUsd = explicitCostUsd ?? derivedCostUsd;
-
-  await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, reasoning_tokens, cost_usd)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, reasoningTokens ?? 0, Math.round(costUsd * 1_000_000) / 1_000_000]);
-}
-
-// ─── POST /api/pipeline/story-result — Record story outcome from run-loop.ts ──
-// Called by the TypeScript run-loop to insert story_results rows.
 
 /**
  * @swagger
  * /api/pipeline/story-result:
  *   post:
  *     tags: [Pipeline]
- *     summary: Record a story outcome from the execution engine
+ *     summary: Record a legacy non-integrated story outcome
  *     operationId: recordStoryResult
  *     x-rorca-tier: admin
- *     x-rorca-rationale: "Internal execution-engine closeout write — operator-only because it mutates canonical story result metadata."
- *     description: Called by run-loop.ts or execution-engine.ts to insert a story_results row after a story finishes. Also records token usage into the analytics table when tokens are present.
+ *     x-rorca-rationale: "Disabled-by-default legacy compatibility proposal write; workspace-admin only and never governing."
+ *     description: Disabled-by-default, workspace-admin compatibility ingress for inert non-integrated outcome proposals. Integrated/commit identity is always rejected; compatibility rows are excluded from worker completion and GitHub release authority.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [runId, storyId, status]
+ *             required: [runId, storyId, status, idempotencyKey]
  *             properties:
  *               runId: { type: integer, description: "Pipeline run ID" }
  *               storyId: { type: string, description: "Story ID (e.g. US-001)" }
  *               status: { type: string, enum: [pass, fail, skip, excluded] }
  *               worktreePath: { type: string, nullable: true }
  *               worktreeBranch: { type: string, nullable: true }
- *               commitSha: { type: string, nullable: true, description: "Host-observed story/worktree branch commit" }
- *               commitMessage: { type: string, nullable: true }
  *               inputTokens: { type: integer, nullable: true }
  *               outputTokens: { type: integer, nullable: true }
+ *               reasoningTokens: { type: integer, nullable: true }
  *               modelUsed: { type: string, nullable: true }
  *               costUsd: { type: number, nullable: true }
  *               logPath: { type: string, nullable: true }
+ *               reason: { type: string, nullable: true }
  *               blockedBy: { type: array, items: { type: string }, nullable: true }
  *               activeSkills: { type: array, items: { type: string }, nullable: true }
  *               completionPacket: { type: object, nullable: true, description: "Bounded agent proposal plus host closeout status; never grants lifecycle authority." }
+ *               idempotencyKey: { type: string, maxLength: 256, description: "Stable immutable result ingest identity." }
  *               rejectionEvidence: { description: "Arbitrary rejected value; accepted only for fail outcomes and stored as bounded, secret/path-redacted portable evidence." }
  *     responses:
- *       201: { description: "Story result recorded" }
- *       400: { description: "Missing required fields or invalid status" }
+ *       200: { description: "Exact compatibility proposal duplicate recognized" }
+ *       201: { description: "Non-governing compatibility proposal recorded" }
+ *       400: { description: "Missing required fields, invalid status, or forbidden integrated identity" }
+ *       401: { description: "Authentication required" }
+ *       403: { description: "Ingress disabled or workspace administrator authority required" }
+ *       404: { description: "Pipeline run not found" }
+ *       409: { description: "Idempotency key conflicts with another immutable proposal" }
  *       500: { description: "Internal server error" }
  */
-router.post('/story-result', async (req: Request, res: Response) => {
+router.post('/story-result', gateLegacyStoryResultIngress, requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const {
-      runId, storyId, status, worktreePath, worktreeBranch, commitSha, commitMessage,
+      runId, storyId, status, worktreePath, worktreeBranch,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills, completionPacket, idempotencyKey, rejectionEvidence,
-      integrationFinalization,
+      logPath, reason, blockedBy, activeSkills, completionPacket, idempotencyKey,
+      rejectionEvidence,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
-      worktreePath?: string; worktreeBranch?: string; commitSha?: string; commitMessage?: string;
+      worktreePath?: string; worktreeBranch?: string; integrated?: boolean; commitSha?: string; commitMessage?: string;
       inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
-      logPath?: string; blockedBy?: string[]; activeSkills?: string[];
+      logPath?: string; reason?: string; blockedBy?: string[]; activeSkills?: string[];
       completionPacket?: Record<string, unknown>;
       idempotencyKey?: string;
+      workspaceId?: string;
       rejectionEvidence?: unknown;
-      integrationFinalization?: {
-        attempt: number;
-        resultingHead: string;
-        finalizationIdentity: {
-          idempotencyKey: string;
-          revision: string;
-          receiptHash: string;
-        };
-      };
     };
 
     if (!runId || !storyId || !status) {
@@ -8634,24 +9061,10 @@ router.post('/story-result', async (req: Request, res: Response) => {
       throw new ValidationError(`Invalid status: ${status}`);
       return;
     }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'integrationFinalization')) {
+      throw new ValidationError('integrationFinalization is accepted only by the host execution boundary');
+    }
 
-    if (commitSha && !/^[0-9a-f]{40}$/i.test(commitSha)) {
-      throw new ValidationError('commitSha must be a full git SHA');
-    }
-    if (integrationFinalization) {
-      const finalization = integrationFinalization.finalizationIdentity;
-      if (status !== 'pass'
-        || !Number.isSafeInteger(integrationFinalization.attempt)
-        || integrationFinalization.attempt < 1
-        || !/^[0-9a-f]{40}$/i.test(integrationFinalization.resultingHead)
-        || !finalization
-        || finalization.idempotencyKey !== idempotencyKey
-        || !/^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/.test(finalization.idempotencyKey)
-        || finalization.revision !== integrationFinalization.resultingHead
-        || !/^[0-9a-f]{64}$/i.test(finalization.receiptHash)) {
-        throw new ValidationError('integrationFinalization is invalid or does not match the pass idempotency identity');
-      }
-    }
     if (completionPacket !== undefined && (completionPacket === null || Array.isArray(completionPacket) || typeof completionPacket !== 'object')) {
       throw new ValidationError('completionPacket must be an object');
     }
@@ -8667,134 +9080,33 @@ router.post('/story-result', async (req: Request, res: Response) => {
       ? { ...(safeCompletionPacket ?? {}), rejectionEvidence: portableRejection }
       : safeCompletionPacket;
 
-    const projection = await queryOne<{
-      workspace_id: string;
-      spec_path: string;
-      branch_name: string | null;
-      manifest_hash: string | null;
-      spec_revision: string | null;
-      story_revision: string | null;
-      closeout_decision_id: string | null;
-    }>(`
-      SELECT pr.workspace_id, pr.spec_path, pr.branch_name,
-             sem.manifest_hash, sem.spec_revision, sem.story_revision,
-             scd.decision_id AS closeout_decision_id
-      FROM pipeline_runs pr
-      LEFT JOIN LATERAL (
-        SELECT manifest_hash, spec_revision, story_revision
-        FROM story_execution_manifests
-        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
-        ORDER BY attempt DESC, created_at DESC LIMIT 1
-      ) sem ON TRUE
-      LEFT JOIN LATERAL (
-        SELECT decision_id
-        FROM story_closeout_decisions
-        WHERE workspace_id = pr.workspace_id AND run_id = pr.id AND story_id = $2
-          AND manifest_hash = sem.manifest_hash
-        ORDER BY attempt DESC, created_at DESC LIMIT 1
-      ) scd ON TRUE
-      WHERE pr.id = $1
-    `, [runId, storyId]);
-    if (!projection) throw new NotFoundError('Pipeline run not found');
-    const specId = path.basename(projection.spec_path, '.json');
+    const outcome = await persistCanonicalStoryResult({
+      runId,
+      storyId,
+      status: status as CanonicalStoryResultStatus,
+      worktreePath,
+      worktreeBranch,
+      integrated: false,
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      modelUsed,
+      costUsd,
+      logPath,
+      reason,
+      blockedBy,
+      activeSkills,
+      completionPacket: persistedCompletionPacket,
+      idempotencyKey,
+      expectedWorkspaceId: String((req.body as Record<string, unknown>).workspaceId),
+    });
 
-    const storyResultSql = `INSERT INTO story_results (
-         run_id, story_id, status, finished_at, worktree_path, worktree_branch,
-         input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by,
-         active_skills, completion_packet, spec_id, spec_revision, story_revision,
-         manifest_hash, closeout_decision_id, ingest_key
-       ) VALUES (
-         $1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
-         $14, $15, $16, $17, $18, $19
-       )
-       ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
-       RETURNING id`;
-    const storyResultParams = [runId, storyId, status,
-      worktreePath ?? null, worktreeBranch ?? null,
-      inputTokens ?? null, outputTokens ?? null,
-      modelUsed ?? null, costUsd ?? null,
-      logPath ?? null,
-      blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
-      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
-      persistedCompletionPacket ? JSON.stringify(persistedCompletionPacket) : null,
-      specId,
-      projection.spec_revision,
-      projection.story_revision,
-      projection.manifest_hash,
-      projection.closeout_decision_id,
-      idempotencyKey ?? null,
-    ];
-
-    const inserted = integrationFinalization
-      ? await transaction(async client => {
-        const ledgerResult = await client.query<{
-          state: string;
-          resulting_head: string | null;
-          finalization_identity: Record<string, unknown> | null;
-        }>(
-          `SELECT state, resulting_head, finalization_identity
-             FROM story_integration_ledger
-            WHERE run_id = $1 AND story_id = $2 AND attempt = $3
-            FOR UPDATE`,
-          [runId, storyId, integrationFinalization.attempt],
-        );
-        const ledger = ledgerResult.rows[0];
-        if (!ledger
-          || !['integrated_validated', 'finalized'].includes(ledger.state)
-          || ledger.resulting_head?.trim() !== integrationFinalization.resultingHead) {
-          throw new ConflictError('Wave integration ledger is not validated for this exact pass projection');
-        }
-        if (ledger.state === 'finalized') {
-          const prior = ledger.finalization_identity;
-          if (!prior
-            || prior.idempotencyKey !== integrationFinalization.finalizationIdentity.idempotencyKey
-            || prior.revision !== integrationFinalization.finalizationIdentity.revision
-            || prior.receiptHash !== integrationFinalization.finalizationIdentity.receiptHash) {
-            throw new ConflictError('Wave integration finalization identity changed during replay');
-          }
-        }
-        const result = await client.query<{ id: number }>(storyResultSql, storyResultParams);
-        if (ledger.state === 'integrated_validated') {
-          const finalized = await client.query(
-            `UPDATE story_integration_ledger
-                SET state = 'finalized', finalization_identity = $4::jsonb, finalized_at = NOW()
-              WHERE run_id = $1 AND story_id = $2 AND attempt = $3
-                AND state = 'integrated_validated'`,
-            [
-              runId, storyId, integrationFinalization.attempt,
-              JSON.stringify(integrationFinalization.finalizationIdentity),
-            ],
-          );
-          if (finalized.rowCount !== 1) throw new ConflictError('Wave integration finalization lost its state fence');
-        }
-        return result.rows[0];
-      })
-      : await queryOne<{ id: number }>(storyResultSql, storyResultParams);
-
-    if (inserted && status === 'pass' && commitSha) {
-      await execute(`
-        INSERT INTO story_commits (
-          story_id, spec_id, workspace_id, run_id, commit_sha, commit_message, author, pushed_at, branch_name, observed_source
-        ) VALUES ($1,$2,$3,$4,$5,$6,'rorca-execution-engine',NOW(),$7,'worktree_branch')
-        ON CONFLICT DO NOTHING
-      `, [
-        storyId,
-        specId,
-        projection.workspace_id,
-        runId,
-        commitSha,
-        commitMessage?.trim() || `story(${storyId}): host-observed output`,
-        worktreeBranch ?? projection.branch_name,
-      ]);
-    }
-
-    // Only the first ingest records analytics. A retry after a response timeout
-    // returns the original logical result without double-accounting.
-    if (inserted && ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0))) {
-      await recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed, reasoningTokens ?? 0, costUsd);
-    }
-
-    res.status(inserted ? 201 : 200).json({ ok: true, duplicate: !inserted });
+    res.status(outcome.duplicate ? 200 : 201).json({
+      ok: true,
+      duplicate: outcome.duplicate,
+      governing: false,
+      outcome: outcome.duplicate ? 'exact_compatibility_duplicate' : 'compatibility_proposal_recorded',
+    });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Story result');
   }
@@ -8807,10 +9119,12 @@ router.post('/story-result', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/tokens:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Record token usage for a story
  *     operationId: recordStoryTokenUsage
- *     description: Updates the story_results row with token counts and records an entry in the token_usage analytics table. Called by run-loop.ts or external callers.
+ *     description: Compatibility accounting for legacy unkeyed story results. Canonical keyed results are immutable and return 409; their accounting is written with the result transaction.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -8834,6 +9148,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
  *       200: { description: "Token usage recorded" }
  *       400: { description: "Invalid runId or missing token counts" }
  *       404: { description: "Story result not found for this run and story" }
+ *       409: { description: "Canonical keyed result accounting is immutable" }
  *       500: { description: "Internal server error" }
  */
 router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Response) => {
@@ -8849,32 +9164,22 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
       return;
     }
 
-    if (inputTokens == null && outputTokens == null) {
-      throw new ValidationError('At least one of inputTokens or outputTokens required');
+    if (inputTokens == null && outputTokens == null && reasoningTokens == null && costUsd == null) {
+      throw new ValidationError('At least one accounting value is required');
       return;
     }
 
-    // Find the latest story_result row for this run + storyId
-    const row = await queryOne(`SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runId, storyId]) as { id: number } | undefined;
+    const outcome = await persistLegacyStoryResultAccounting({
+      runId,
+      storyId,
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      modelUsed: model,
+      costUsd,
+    });
 
-    if (!row) {
-      throw new NotFoundError('Story result not found');
-      return;
-    }
-
-    await execute(
-      `UPDATE story_results
-       SET input_tokens = COALESCE($1, input_tokens),
-           output_tokens = COALESCE($2, output_tokens),
-           cost_usd = COALESCE($3, cost_usd)
-       WHERE id = $4`,
-      [inputTokens ?? null, outputTokens ?? null, costUsd ?? null, row.id],
-    );
-
-    // Also record into token_usage analytics table
-    await recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model, reasoningTokens ?? 0, costUsd);
-
-    res.json({ ok: true });
+    res.json({ ok: true, duplicate: outcome.duplicate, storyResultId: outcome.storyResultId });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Record tokens');
   }
@@ -8887,6 +9192,8 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/output:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get last N lines of a story's output
  *     operationId: getStoryOutput
@@ -9070,6 +9377,8 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/log:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Stream per-story log output via SSE
  *     operationId: streamStoryLog
@@ -9311,6 +9620,8 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
  * @swagger
  * /api/pipeline/runs/{runId}/stories/{storyId}/stream:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Stream per-story prose output via SSE (DB-backed)
  *     operationId: streamStoryOutput
@@ -9468,6 +9779,8 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  * @swagger
  * /api/pipeline/stream:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Stream WAL events (SSE)
  *     operationId: streamPipelineEvents
@@ -9612,6 +9925,8 @@ export async function cleanupOldLogs(): Promise<number> {
  * @swagger
  * /api/pipeline/runs/{runId}/commits:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get git commits for a pipeline run's branch
  *     operationId: getPipelineRunCommits
@@ -9706,6 +10021,8 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/skills:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get per-story skill usage data for a specific pipeline run
  *     tags: [Pipeline]
  *     parameters:
@@ -9870,6 +10187,8 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{runId}/wal-events:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get all WAL events for a specific run
  *     tags: [Pipeline]
  *     parameters:
@@ -9931,6 +10250,9 @@ export async function cleanupOrphanRuns(): Promise<number> {
     // worker_heartbeat table may not exist on first startup — proceed with cleanup
   }
 
+  // Resolve configuration before examining application rows. Invalid queue
+  // authority must fail the reconciliation batch without touching run state.
+  const pgBossJobTable = getPgBossTableSql('job');
   const staleRuns = await query(`SELECT id, pid, opencode_server_pid, workspace_id, agent_type FROM pipeline_runs WHERE status IN ('running', 'paused')`) as Array<{
     id: number;
     pid: number | null;
@@ -9944,18 +10266,21 @@ export async function cleanupOrphanRuns(): Promise<number> {
   let cleaned = 0;
 
   for (const run of staleRuns) {
-    // Skip runs with an active or queued pg-boss job — includes 'retry' state which was previously missed
+    // Skip runs with an active or queued pg-boss job — includes 'retry' state which was previously missed.
+    // Queue-evidence failure is not evidence of abandonment: preserve canonical
+    // application state and retry reconciliation on a later startup.
     try {
       const pgBossJob = await queryOne<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active', 'retry') LIMIT 1`,
+        `SELECT id FROM ${pgBossJobTable} WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active', 'retry') LIMIT 1`,
         [String(run.id)]
       );
       if (pgBossJob) {
         logger.info(`[Cleanup] Skipping run ${run.id} — active pg-boss job ${pgBossJob.id} found`);
         continue;
       }
-    } catch {
-      // pgboss schema may not exist yet — treat as no active job, proceed with cleanup
+    } catch (error) {
+      logger.error({ error, runId: run.id }, '[Cleanup] Queue evidence unavailable; preserving application run state');
+      continue;
     }
 
     // Only clean up runs whose PID is no longer alive
@@ -10015,11 +10340,13 @@ export async function cleanupOrphanRuns(): Promise<number> {
  * @swagger
  * /api/pipeline/queue:
  *   post:
- *     summary: Smart run trigger — start immediately or queue if a run is active
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
+ *     summary: Retired manifestless smart-run compatibility route
  *     description: >
- *       Checks for an active run in the workspace. If none, triggers the run immediately.
- *       If one is active, queues the run and returns its position. Accepts workspaceId + specId
- *       (filename slug) instead of specPath for convenience.
+ *       Release-1 execution requires a bounded TaskManifest and uses
+ *       /api/pipeline/task-manifests/trigger with queue=true. This legacy native
+ *       route returns a typed redirect before workspace, Git, run, or queue mutation.
  *     tags: [Pipeline]
  *     requestBody:
  *       required: true
@@ -10079,6 +10406,11 @@ router.post('/queue', async (req: Request, res: Response) => {
       throw new ValidationError('workspaceId and specId are required');
       return;
     }
+    assertReleaseOnePipelineExecutionRequest({
+      autoWorktree: true,
+      mergeStrategy: 'draft-pr',
+      taskManifestAuthority: false,
+    });
 
     // Validate workspace exists
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -10153,6 +10485,8 @@ router.post('/queue', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{id}/dlq:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get DLQ entry for a run
  *     operationId: getRunDlq
@@ -10200,7 +10534,7 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
       data: unknown;
     }>(
       `SELECT id, output, retrycount, archivedon, data
-       FROM pgboss.archive
+       FROM ${getPgBossTableSql('archive')}
        WHERE name IN ('pipeline:run', 'pipeline:retry')
          AND state = 'failed'
          AND data->>'runId' = $1
@@ -10236,6 +10570,8 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/runs/{id}/dlq/retry:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Retry a run from the DLQ
  *     operationId: retryRunFromDlq
@@ -10509,7 +10845,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       `SELECT (j.data->>'runId') AS run_id,
               pr.spec_path,
               j.created_on::text AS started_at
-       FROM   pgboss.job j
+       FROM   ${getPgBossTableSql('job')} j
        LEFT   JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::bigint
        WHERE  j.name = 'pipeline:run'
          AND  j.state = 'active'`,
@@ -10524,7 +10860,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
 
     // ── 3. Queue depth (pending pipeline:run jobs) ──────────────────────────
     const queueDepthRow = await queryOne<{ cnt: string }>(
-      `SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE name = 'pipeline:run' AND state = 'created'`,
+      `SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE name = 'pipeline:run' AND state = 'created'`,
     ).catch(() => ({ cnt: '0' }));
     const queueDepth = parseInt(queueDepthRow?.cnt ?? '0', 10);
 
@@ -10535,7 +10871,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       timezone: string | null;
     }
     const scheduleRows = await query<ScheduleRow>(
-      `SELECT name, cron, timezone FROM pgboss.schedule ORDER BY name`,
+      `SELECT name, cron, timezone FROM ${getPgBossTableSql('schedule')} ORDER BY name`,
     ).catch(() => [] as ScheduleRow[]);
 
     const scheduledJobs = scheduleRows.map(r => ({
@@ -10546,13 +10882,13 @@ router.get('/worker/health', async (req: Request, res: Response) => {
 
     // ── 5. DLQ depth (failed archived jobs) ────────────────────────────────
     const dlqRow = await queryOne<{ cnt: string }>(
-      `SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = 'failed'`,
+      `SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = 'failed'`,
     ).catch(() => ({ cnt: '0' }));
     const dlqDepth = parseInt(dlqRow?.cnt ?? '0', 10);
 
     // ── 6. pg-boss schema version ───────────────────────────────────────────
     const versionRow = await queryOne<{ version: string }>(
-      `SELECT version FROM pgboss.version LIMIT 1`,
+      `SELECT version FROM ${getPgBossTableSql('version')} LIMIT 1`,
     ).catch(() => undefined);
     const pgBossVersion = versionRow?.version ?? 'unknown';
 
@@ -10603,20 +10939,20 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       queueRows,
       latencyRow,
     ] = await Promise.all([
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['created']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['active']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['failed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'24 hours\'', ['completed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'24 hours\'', ['failed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'7 days\'', ['failed']).catch(() => ({ cnt: '0' })),
-      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive').catch(() => ({ cnt: '0' })),
-      queryOne<AgeRow>('SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_on)))::integer AS age_seconds FROM pgboss.job WHERE state = $1', ['created']).catch(() => ({ age_seconds: null })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['created']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['active']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = $1 AND archived_on > NOW() - INTERVAL '24 hours'`, ['completed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = $1 AND archived_on > NOW() - INTERVAL '24 hours'`, ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')} WHERE state = $1 AND archived_on > NOW() - INTERVAL '7 days'`, ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>(`SELECT COUNT(*)::text AS cnt FROM ${getPgBossTableSql('archive')}`).catch(() => ({ cnt: '0' })),
+      queryOne<AgeRow>(`SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_on)))::integer AS age_seconds FROM ${getPgBossTableSql('job')} WHERE state = $1`, ['created']).catch(() => ({ age_seconds: null })),
       query<QueueRow>(
         `SELECT name,
                 COUNT(*) FILTER (WHERE state = 'created')::text AS pending,
                 COUNT(*) FILTER (WHERE state = 'active')::text AS active,
                 COUNT(*) FILTER (WHERE state = 'failed')::text AS failed
-         FROM pgboss.job
+         FROM ${getPgBossTableSql('job')}
          GROUP BY name
          ORDER BY name`,
       ).catch(() => [] as QueueRow[]),
@@ -10628,7 +10964,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
            MIN(EXTRACT(EPOCH FROM (started_on - created_on)))                                                             AS min_pickup_seconds,
            MAX(EXTRACT(EPOCH FROM (started_on - created_on)))                                                             AS max_pickup_seconds,
            COUNT(*)::text                                                                                                  AS sample_count
-         FROM pgboss.archive
+         FROM ${getPgBossTableSql('archive')}
          WHERE started_on IS NOT NULL
            AND created_on IS NOT NULL
            AND archived_on > NOW() - INTERVAL '24 hours'
@@ -10754,6 +11090,8 @@ router.get('/worker/health', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/orphan-sweep:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Trigger immediate orphan process sweep
  *     description: Scans for pipeline runs with status='running' that belong to other workers or have no worker_id (orphaned), kills their processes, and marks runs as failed. Callable from API process (currentWorkerId is undefined, sweeps ALL stale runs).
  *     tags:
@@ -10934,6 +11272,8 @@ router.get('/queue/health', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/queue/failed-jobs:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List failed pg-boss jobs
  *     description: Returns a paginated list of failed pg-boss jobs from both pgboss.job (recent unarchived failures) and pgboss.archive (archived failures within the last 30 days). Each entry is enriched with the corresponding pipeline_runs row where the job's data.runId matches.
  *     tags:
@@ -11026,11 +11366,11 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
     // UNION of unarchived failed jobs + archived failed jobs (last 30 days)
     const unionSql = `
       SELECT id, name, data, state, retry_count, retry_limit, output, completed_on, 'job' AS source
-      FROM pgboss.job
+      FROM ${getPgBossTableSql('job')}
       WHERE state = 'failed'
       UNION ALL
       SELECT id, name, data, state, retry_count, retry_limit, output, completed_on, 'archive' AS source
-      FROM pgboss.archive
+      FROM ${getPgBossTableSql('archive')}
       WHERE state = 'failed'
         AND archived_on > NOW() - INTERVAL '30 days'
     `;
@@ -11116,8 +11456,10 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/queue/failed-jobs/{jobId}/retry:
  *   post:
- *     summary: Re-enqueue a failed pg-boss job
- *     description: Reads the failed job from pgboss.archive or pgboss.job by its UUID, extracts the original queue name and payload, and re-inserts it as a fresh job via boss.send(). Used by operators to manually retry a failed job after fixing the underlying issue.
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
+ *     summary: Generic transport retry is disabled
+ *     description: Generic pg-boss replay cannot establish application-owned retry authority. Operators must use the run retry or spec repair APIs, which validate canonical state and create durable publication intent.
  *     tags:
  *       - Pipeline
  *     parameters:
@@ -11129,65 +11471,14 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
  *           format: uuid
  *         description: pg-boss job UUID
  *     responses:
- *       200:
- *         description: Job successfully re-enqueued
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 newJobId:
- *                   type: string
- *                   description: UUID of the newly created job
- *                 message:
- *                   type: string
- *                   example: Job requeued
- *               required: [newJobId, message]
- *       404:
- *         description: Job not found in pgboss.job or pgboss.archive
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *               required: [error]
- *       500:
- *         description: Internal server error
+ *       422:
+ *         description: Generic transport replay is unsupported; use an application-owned retry endpoint
  */
-router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Response) => {
-  const { jobId } = req.params;
-
+router.post('/queue/failed-jobs/:jobId/retry', async (_req: Request, res: Response) => {
   try {
-    interface JobLookupRow {
-      id: string;
-      name: string;
-      data: Record<string, unknown> | null;
-    }
-
-    // Look up in pgboss.job first (very recent failures), then pgboss.archive
-    const job = await queryOne<JobLookupRow>(
-      `SELECT id, name, data FROM pgboss.job WHERE id = $1 AND state = 'failed'
-       UNION ALL
-       SELECT id, name, data FROM pgboss.archive WHERE id = $1 AND state = 'failed'
-       LIMIT 1`,
-      [jobId],
+    throw new UnprocessableError(
+      'Generic pg-boss retry is disabled because transport rows are not retry authority; use the pipeline run retry or spec repair API',
     );
-
-    if (!job) {
-      throw new NotFoundError(`Failed job ${jobId} not found`);
-    }
-
-    const boss = getBoss();
-    const newJobId = await boss.send(job.name, job.data ?? {});
-
-    if (!newJobId) {
-      return res.status(500).json({ error: 'boss.send() returned null — queue may not exist or boss is not running' });
-    }
-
-    logger.info({ jobId, newJobId, queueName: job.name }, '[Pipeline] failed job re-enqueued');
-    res.json({ newJobId, message: 'Job requeued' });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Pipeline] Failed job retry');
   }
@@ -11199,6 +11490,8 @@ router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Respons
  * @swagger
  * /api/pipeline/queue/health-history:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Queue health time-series data
  *     operationId: getQueueHealthHistory
@@ -11305,6 +11598,8 @@ router.get('/queue/health-history', async (req: Request, res: Response) => {
  * @swagger
  * /api/pipeline/queue/{workspaceId}:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Pipeline]
  *     summary: Get queue state for a workspace
  *     operationId: getWorkspaceQueueState

@@ -183,7 +183,7 @@ describe('golden PTY terminal parity harness', () => {
         console.warn(buildGoldenDiffReport(fixture, replayed, comparison.chunkIds, availability));
       }
 
-      assertGoldenReplay(fixture, replayed, comparison.chunkIds, availability);
+      assertGoldenReplay(fixture, replayed, chunkEvents.map((event) => event.id), availability);
     });
   }
 });

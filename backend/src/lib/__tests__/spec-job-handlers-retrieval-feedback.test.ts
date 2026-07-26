@@ -28,6 +28,7 @@ jest.mock('../../db/index', () => ({
 jest.mock('../llm-client', () => ({
   chatComplete: (...args: unknown[]) => mockChatComplete(...args),
   DEFAULT_MODEL: 'test-model',
+  getModelInfo: jest.fn(() => ({ providerType: 'claude-cli' })),
   isValidModel: jest.fn(() => true),
 }));
 
@@ -255,6 +256,9 @@ describe('spec-job handlers retrieval feedback wiring', () => {
           finished_at: null,
           created_at: new Date('2026-01-01T00:00:00.000Z'),
         };
+      }
+      if (sql.includes('COALESCE(save_generation, id::bigint) AS save_generation')) {
+        return { save_generation: 777 };
       }
       if (sql.includes('FROM spec_generation_logs')) return { context_summary_json: priorSummary };
       if (sql.includes('INSERT INTO wal_events')) return { id: 1 };

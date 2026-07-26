@@ -1,15 +1,20 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
-import { execSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
-jest.mock('child_process');
-
-const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+const mockProbeSync = jest.fn();
+const mockProbe = jest.fn();
+jest.mock('../autonomous-cli-probe', () => ({
+  probeAutonomousCliSync: (...args: unknown[]) => mockProbeSync(...args),
+  probeAutonomousCli: (...args: unknown[]) => mockProbe(...args),
+}));
 
 const mockLoggerError = jest.fn();
 const mockLoggerInfo = jest.fn();
@@ -17,171 +22,68 @@ jest.mock('../logger', () => ({
   logger: { error: (...args: unknown[]) => mockLoggerError(...args), info: (...args: unknown[]) => mockLoggerInfo(...args), warn: jest.fn(), debug: jest.fn() },
 }));
 
-// Import semverGte directly — it's a pure function, no module state issues
-import { semverGte } from '../opencode-detector';
+import { detectOpenCode, detectOpenCodeAsync, MIN_OPENCODE_VERSION, requireOpenCode, semverGte } from '../opencode-detector';
 
-describe('opencode-detector', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    delete process.env.OPENCODE_BIN;
-  });
+let temp: string;
+let binary: string;
+let originalPath: string | undefined;
 
-  describe('semverGte', () => {
-    it('returns true for equal versions', () => {
-      expect(semverGte('0.1.0', '0.1.0')).toBe(true);
-    });
+beforeEach(() => {
+  jest.clearAllMocks();
+  delete process.env.OPENCODE_BIN;
+  originalPath = process.env.PATH;
+  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-opencode-detector-'));
+  binary = path.join(temp, 'opencode');
+  fs.writeFileSync(binary, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  process.env.PATH = `${temp}${path.delimiter}${originalPath ?? ''}`;
+  mockProbeSync.mockReturnValue({ status: 0, signal: null, stdout: 'opencode v0.2.0\n', stderr: '' });
+  mockProbe.mockResolvedValue({ status: 0, signal: null, stdout: 'opencode v0.2.0\n', stderr: '' });
+});
 
-    it('returns true for greater major', () => {
-      expect(semverGte('1.0.0', '0.9.9')).toBe(true);
-    });
+afterEach(() => {
+  process.env.PATH = originalPath;
+  delete process.env.OPENCODE_BIN;
+  fs.rmSync(temp, { recursive: true, force: true });
+  jest.restoreAllMocks();
+});
 
-    it('returns true for greater minor', () => {
-      expect(semverGte('0.2.0', '0.1.9')).toBe(true);
-    });
+test('semver comparison remains stable', () => {
+  expect(semverGte('0.1.0', '0.1.0')).toBe(true);
+  expect(semverGte('1.0.0', '0.9.9')).toBe(true);
+  expect(semverGte('0.0.9', '0.1.0')).toBe(false);
+  expect(semverGte('0.1.0-beta.1', '0.1.0')).toBe(true);
+});
 
-    it('returns true for greater patch', () => {
-      expect(semverGte('0.1.1', '0.1.0')).toBe(true);
-    });
+test('sync and async detection execute version only through sandboxed probe helper', async () => {
+  expect(detectOpenCode()).toMatchObject({ opencodeInstalled: true, opencodeVersion: '0.2.0', opencodeBinPath: fs.realpathSync(binary) });
+  expect(await detectOpenCodeAsync()).toMatchObject({ opencodeInstalled: true, opencodeVersion: '0.2.0', opencodeBinPath: fs.realpathSync(binary) });
+  expect(mockProbeSync).toHaveBeenCalledWith(fs.realpathSync(binary), ['--version'], { timeoutMs: 5_000 });
+  expect(mockProbe).toHaveBeenCalledWith(fs.realpathSync(binary), ['--version'], { timeoutMs: 1_000 });
+});
 
-    it('returns false for lesser version', () => {
-      expect(semverGte('0.0.9', '0.1.0')).toBe(false);
-    });
+test('configured binary is probed without PATH execution and failed probe remains installed/unknown', () => {
+  process.env.OPENCODE_BIN = binary;
+  mockProbeSync.mockReturnValue({ status: 1, signal: null, stdout: '', stderr: 'failed' });
+  expect(detectOpenCode()).toEqual({ opencodeInstalled: true, opencodeVersion: null, opencodeBinPath: fs.realpathSync(binary) });
+});
 
-    it('strips prerelease for comparison', () => {
-      expect(semverGte('0.1.0-beta.1', '0.1.0')).toBe(true);
-    });
-  });
+test('missing binary is unavailable without executing a finder subprocess', () => {
+  process.env.PATH = temp;
+  fs.unlinkSync(binary);
+  expect(detectOpenCode()).toEqual({ opencodeInstalled: false, opencodeVersion: null, opencodeBinPath: null });
+  expect(mockProbeSync).not.toHaveBeenCalled();
+});
 
-  describe('detectOpenCode', () => {
-    // Use direct import since detectOpenCode uses the mocked child_process
-    const { detectOpenCode } = require('../opencode-detector');
+test('requireOpenCode enforces minimum and logs accepted versions', () => {
+  const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+  mockProbeSync.mockReturnValueOnce({ status: 0, signal: null, stdout: '0.0.1', stderr: '' });
+  requireOpenCode();
+  expect(mockExit).toHaveBeenCalledWith(1);
+  expect(mockLoggerError).toHaveBeenCalledWith(expect.stringContaining(`below minimum required ${MIN_OPENCODE_VERSION}`));
 
-    it('returns installed=false when binary not found', () => {
-      mockedExecSync.mockImplementation(() => {
-        throw new Error('not found');
-      });
-
-      const result = detectOpenCode();
-
-      expect(result.opencodeInstalled).toBe(false);
-      expect(result.opencodeVersion).toBeNull();
-      expect(result.opencodeBinPath).toBeNull();
-    });
-
-    it('resolves binary via which and parses version', () => {
-      mockedExecSync
-        .mockReturnValueOnce('/usr/local/bin/opencode\n' as any)  // which opencode
-        .mockReturnValueOnce('opencode v0.2.0\n' as any);          // opencode --version
-
-      const result = detectOpenCode();
-
-      expect(result.opencodeInstalled).toBe(true);
-      expect(result.opencodeVersion).toBe('0.2.0');
-      expect(result.opencodeBinPath).toBe('/usr/local/bin/opencode');
-    });
-
-    it('uses OPENCODE_BIN env var when set', () => {
-      process.env.OPENCODE_BIN = '/custom/path/opencode';
-      mockedExecSync.mockReturnValueOnce('0.1.0\n' as any); // --version
-
-      const result = detectOpenCode();
-
-      expect(result.opencodeBinPath).toBe('/custom/path/opencode');
-      expect(result.opencodeVersion).toBe('0.1.0');
-      // which should NOT have been called
-      expect(mockedExecSync).not.toHaveBeenCalledWith(
-        'which opencode',
-        expect.anything()
-      );
-    });
-
-    it('handles --version failure gracefully', () => {
-      mockedExecSync
-        .mockReturnValueOnce('/usr/local/bin/opencode\n' as any)  // which
-        .mockImplementationOnce(() => { throw new Error('segfault'); }); // --version
-
-      const result = detectOpenCode();
-
-      expect(result.opencodeInstalled).toBe(true);
-      expect(result.opencodeVersion).toBeNull();
-      expect(result.opencodeBinPath).toBe('/usr/local/bin/opencode');
-    });
-
-    it('parses version with prerelease suffix', () => {
-      mockedExecSync
-        .mockReturnValueOnce('/usr/local/bin/opencode\n' as any)
-        .mockReturnValueOnce('opencode 1.0.0-beta.3\n' as any);
-
-      const result = detectOpenCode();
-
-      expect(result.opencodeVersion).toBe('1.0.0-beta.3');
-    });
-  });
-
-  describe('requireOpenCode', () => {
-    const { requireOpenCode, MIN_OPENCODE_VERSION } = require('../opencode-detector');
-    let mockExit: jest.SpyInstance;
-
-    beforeEach(() => {
-      mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-      mockLoggerError.mockClear();
-      mockLoggerInfo.mockClear();
-    });
-
-    afterEach(() => {
-      mockExit.mockRestore();
-    });
-
-    it('exits with code 1 when opencode not installed', () => {
-      mockedExecSync.mockImplementation(() => {
-        throw new Error('not found');
-      });
-
-      requireOpenCode();
-
-      expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockLoggerError).toHaveBeenCalledWith(
-        expect.stringContaining('OpenCode not installed. Run: npm i -g opencode')
-      );
-    });
-
-    it('exits with code 1 when version is below minimum', () => {
-      mockedExecSync
-        .mockReturnValueOnce('/usr/local/bin/opencode\n' as any)
-        .mockReturnValueOnce('opencode v0.0.1\n' as any);
-
-      requireOpenCode();
-
-      expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockLoggerError).toHaveBeenCalledWith(
-        expect.stringContaining(`below minimum required ${MIN_OPENCODE_VERSION}`)
-      );
-    });
-
-    it('logs success when opencode is found and version is sufficient', () => {
-      mockedExecSync
-        .mockReturnValueOnce('/usr/local/bin/opencode\n' as any)
-        .mockReturnValueOnce('opencode v0.1.0\n' as any);
-
-      const result = requireOpenCode();
-
-      expect(mockExit).not.toHaveBeenCalled();
-      expect(mockLoggerInfo).toHaveBeenCalledWith(
-        expect.stringContaining('Detected opencode 0.1.0')
-      );
-      expect(result.opencodeInstalled).toBe(true);
-    });
-
-    it('does not exit when version is unknown (binary exists but version parse fails)', () => {
-      mockedExecSync
-        .mockReturnValueOnce('/usr/local/bin/opencode\n' as any)
-        .mockImplementationOnce(() => { throw new Error('no output'); });
-
-      const result = requireOpenCode();
-
-      expect(mockExit).not.toHaveBeenCalled();
-      expect(result.opencodeInstalled).toBe(true);
-      expect(result.opencodeVersion).toBeNull();
-    });
-  });
+  mockExit.mockClear();
+  mockProbeSync.mockReturnValueOnce({ status: 0, signal: null, stdout: '0.1.0', stderr: '' });
+  expect(requireOpenCode().opencodeInstalled).toBe(true);
+  expect(mockExit).not.toHaveBeenCalled();
+  expect(mockLoggerInfo).toHaveBeenCalledWith(expect.stringContaining('Detected opencode 0.1.0'));
 });

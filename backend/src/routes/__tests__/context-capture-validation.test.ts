@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ValidationError } from '../../lib/errors';
-import { ContextCaptureEventJobPayload } from '../../lib/pg-boss-schemas';
+import { ContextCaptureEventJobPayload } from '../../lib/context-capture-contracts';
 import { normalizeContextEventPayload } from '../context-capture';
 
 const baseInput = {
@@ -165,7 +165,7 @@ describe('context-capture route validation helpers', () => {
     const monitoring = source.slice(source.indexOf('/api/context-capture/{workspaceId}/monitoring'), source.indexOf("router.get('/:workspaceId/stream'"));
     expect(monitoring).toContain('x-rorca-tier: admin');
     expect(monitoring).toContain('getContextCaptureMonitoring');
-    expect(monitoring).toContain('readCaptureDaemonMonitoring');
+    expect(monitoring).toContain('readDaemonStatus');
     expect(monitoring).toContain('monitoring.distillation.activeErrors > 0');
     expect(monitoring).toContain('distillation_events_error');
     expect(monitoring).toContain('distillation_historical_errors_accepted');
@@ -179,8 +179,10 @@ describe('context-capture route validation helpers', () => {
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS payload JSONB');
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''");
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS rule TEXT NOT NULL DEFAULT ''");
-    expect(distillation).toMatch(/payload, title, rule, status, category/);
-    expect(imports).toMatch(/payload, title, rule, status, category/);
+    for (const requiredColumn of ['payload', 'title', 'rule', 'review_status', 'suggested_category']) {
+      expect(distillation).toContain(requiredColumn);
+      expect(imports).toContain(requiredColumn);
+    }
   });
 
   test('bootstrap verification locks queue, redaction, and ignore paths to canonical locations', () => {

@@ -264,7 +264,7 @@ export default function RunTranscript({
       )}
 
       <div className="shrink-0 border-t border-border bg-panel px-2 sm:px-3 py-2 flex flex-wrap items-center gap-2">
-        {(hasMore || (active && items.length > 0)) && (
+        {(hasMore || active) && (
           <button
             onClick={() => void loadPage(cursor, false)}
             disabled={loading}

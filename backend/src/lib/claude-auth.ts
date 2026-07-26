@@ -8,10 +8,8 @@
 /**
  * OC-025: Claude Subscription Auth Detection
  *
- * Detects Claude CLI authentication state by:
- * 1. Reading ~/.claude/.credentials.json (newer CLI versions)
- * 2. Falling back to ~/Library/Application Support/Claude/config.json (oauth:tokenCache field)
- * 3. Final fallback: running `claude --version` to check binary availability
+ * Detects Claude CLI authentication state from credential files and checks
+ * binary availability without executing the model CLI.
  *
  * Provides login/logout by delegating to `claude auth login` / `claude auth logout`.
  * Polls for credential file changes after triggering login, fires SSE event when authenticated.
@@ -59,33 +57,21 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-// ─── CLI detection ───────────────────────────────────────────────────────────
-
-let cachedCliVersion: string | null = null;
+// ─── Process-free CLI availability detection ────────────────────────────────
 
 function detectClaudeCli(): { installed: boolean; version?: string } {
-  if (cachedCliVersion) return { installed: true, version: cachedCliVersion };
 
-  try {
-    const { execFileSync } = require('child_process') as typeof import('child_process');
-    // Must unset CLAUDECODE to avoid "cannot run inside another session" error
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
-    delete env.CLAUDE_CODE_ENTRYPOINT;
-
-    const output = execFileSync('claude', ['--version'], {
-      encoding: 'utf8',
-      timeout: 5000,
-      env,
-    }).trim();
-
-    // Output format: "2.1.42 (Claude Code)" or similar
-    const version = output.split(/\s/)[0] || output;
-    cachedCliVersion = version;
-    return { installed: true, version };
-  } catch {
-    return { installed: false };
+  const configured = process.env.CLAUDE_BIN?.trim();
+  const candidates = configured
+    ? [configured]
+    : (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, 'claude'));
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return { installed: true };
+    } catch { /* continue */ }
   }
+  return { installed: false };
 }
 
 // ─── Read credentials ────────────────────────────────────────────────────────
@@ -171,9 +157,8 @@ export function getClaudeAuthState(): ClaudeAuthState {
     };
   }
 
-  // Strategy 3: CLI exists = assume connected (Claude CLI requires auth to function)
-  // If `claude --version` succeeds, the binary is installed. The actual auth check
-  // happens when the pipeline tries to spawn `claude --print`.
+  // Strategy 3: CLI exists = assume connected (Claude CLI requires auth to function).
+  // The actual auth check happens inside the sandboxed model launch.
   if (cli.installed) {
     return {
       connected: true,
@@ -305,9 +290,6 @@ export async function triggerClaudeLogout(): Promise<{ success: boolean; error?:
     child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
 
     child.on('close', (code) => {
-      // Clear CLI version cache (might change auth state detection)
-      cachedCliVersion = null;
-
       if (code === 0) {
         // Fire SSE event for disconnect
         broadcastAll({

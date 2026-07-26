@@ -483,11 +483,15 @@ async function enqueueStage(input: {
       stageKey: input.stage.stageKey,
       status: 'failed',
       reason: 'enqueue_failed',
+      allowedCurrentStatuses: ['queued'],
       ...(job ? { jobId: job.id } : {}),
       errorMessage: message,
     });
     logger.warn({ err: error, component: 'post-save-workflow', runId: input.run.id, stage: input.stage.stageKey }, '[post-save-workflow] durable enqueue failed');
-    return false;
+    // The pending -> queued claim was a durable transition even when enqueue or
+    // its failed-state write races. Refresh once so downstream stages observe
+    // the resulting queued/running/failed authority.
+    return true;
   }
 }
 
@@ -496,7 +500,7 @@ async function blockStageAndDependents(input: {
   stageKey: SpecPostSaveWorkflowStageKey;
   blockedBy: PostSaveWorkflowStage;
   message: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const blocked = await updateStageStatus({
     runId: input.run.id,
     stageKey: input.stageKey,
@@ -506,7 +510,7 @@ async function blockStageAndDependents(input: {
     errorMessage: input.message,
     details: asJsonValue({ blockedByStage: input.blockedBy.stageKey, blockedByReason: input.blockedBy.reason }),
   });
-  if (!blocked) return;
+  if (!blocked) return false;
 
   for (const dependent of dependentsOf(input.stageKey)) {
     await blockStageAndDependents({
@@ -516,6 +520,7 @@ async function blockStageAndDependents(input: {
       message: `Blocked because ${input.stageKey} did not complete successfully`,
     });
   }
+  return true;
 }
 
 async function ensureStageGraphMaterialized(run: PostSaveWorkflowRun, input: StartSpecPostSaveWorkflowInput): Promise<void> {
@@ -536,17 +541,17 @@ async function advanceReadyStages(run: PostSaveWorkflowRun, options: { workspace
       if (stage.status !== 'pending' || !stage.requested) continue;
       const failed = failedDependency(stage.stageKey, byKey);
       if (failed) {
-        await blockStageAndDependents({
+        const blocked = await blockStageAndDependents({
           run,
           stageKey: stage.stageKey,
           blockedBy: failed,
           message: `Blocked because ${failed.stageKey} did not complete successfully`,
         });
-        progressed = true;
+        progressed = blocked || progressed;
         continue;
       }
       if (!dependenciesSatisfied(stage.stageKey, byKey)) continue;
-      await enqueueStage({
+      const enqueued = await enqueueStage({
         run,
         stage,
         workspaceId: options.workspaceId,
@@ -554,9 +559,10 @@ async function advanceReadyStages(run: PostSaveWorkflowRun, options: { workspace
         reason: 'durable_job_enqueued_after_dependency',
         memory: options.memory,
       });
-      // Refresh after both success and enqueue failure. A failed required stage
-      // must durably block its dependents even when no worker will run.
-      progressed = true;
+      // Refresh only after this invocation durably claimed the stage. A failed
+      // enqueue still counts because the claim and failed-state transition must
+      // be observed before blocking dependents. A lost CAS must terminate.
+      progressed = enqueued || progressed;
     }
   }
 }

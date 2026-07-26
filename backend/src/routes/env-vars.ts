@@ -31,6 +31,9 @@ const SECRET_MASK = '••••••';
  * @swagger
  * /api/workspaces/{workspaceId}/env-vars:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-native-authority: local-admin
+ *     x-rorca-rationale: "Dashboard-only local-administrator environment configuration; excluded from autonomous/MCP exposure and protected by the native human-authority gate."
  *     tags: [Environment Variables]
  *     summary: List environment variables for a workspace
  *     operationId: listEnvVars
@@ -97,6 +100,9 @@ router.get('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/env-vars:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-native-authority: local-admin
+ *     x-rorca-rationale: "Dashboard-only local-administrator environment configuration; excluded from autonomous/MCP exposure and protected by the native human-authority gate."
  *     tags: [Environment Variables]
  *     summary: Create or update an environment variable
  *     operationId: upsertEnvVar
@@ -190,6 +196,9 @@ router.post('/', async (req: Request, res: Response) => {
  * @swagger
  * /api/workspaces/{workspaceId}/env-vars/{key}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-native-authority: local-admin
+ *     x-rorca-rationale: "Dashboard-only local-administrator environment configuration; excluded from autonomous/MCP exposure and protected by the native human-authority gate."
  *     tags: [Environment Variables]
  *     summary: Delete an environment variable
  *     operationId: deleteEnvVar

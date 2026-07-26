@@ -5,163 +5,494 @@
  * See LICENSE file in the project root for full license text.
  */
 
-/**
- * US-030: Create GitHub Check Runs for pipeline runs.
- *
- * Subscribes to WAL events (run_started, story_passed, story_failed, story_skipped, run_finished)
- * and manages a GitHub Check Run lifecycle via the Checks API.
- *
- * On run start: POST /repos/:owner/:repo/check-runs with status='in_progress'.
- * On story completion: PATCH output.summary with per-story results table (debounced).
- * On run completion: PATCH with conclusion and annotations for failed stories.
- *
- * Error tolerance: GitHub API failures NEVER block pipeline execution.
- * All failures logged to integration_audit_log.
- */
+/** Restart-safe, exact-SHA GitHub Check Run projection. */
 
-import { execSync } from 'child_process';
-import { subscribe, broadcastAll, type WalEvent } from './sse-hub';
-import { query, queryOne, execute } from '../db/index';
-import { decryptToken } from './auth-utils';
+import { createHash, randomUUID } from 'crypto';
+import {
+  broadcastAll,
+  subscribeDurable,
+  type WalEvent,
+} from './sse-hub';
+import { execute, query, queryOne, transaction } from '../db/index';
+import { resolveWorkspaceGitHubToken, type ResolvedGitHubToken } from './github-token-resolver';
+import {
+  getGithubRepositoryAuthority,
+  githubRepoApiUrl,
+  isFullGitObjectId,
+} from './github-repository-authority';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-interface GitHubWebhookRow {
-  workspace_id: string;
-  repo_owner: string;
-  repo_name: string;
-}
-
-interface GitHubConnectionRow {
-  encrypted_token: string;
-}
+import {
+  extractGithubProviderError,
+  formatGithubProviderError,
+  sanitizeGithubProviderException,
+} from './github-provider-error';
+import {
+  authorizeCanonicalWalEvent,
+  authorizeCompleteTerminalRun,
+  type CompleteTerminalRun,
+} from './github-poster-authority';
+import { ConflictError } from './errors';
+import { assertCanonicalRunCheckout } from './run-git-authority';
+import { withGithubRepositoryAuthorityLock } from './release-identity';
 
 interface PipelineRunRow {
-  id: number;
   worktree_path: string | null;
   workspace_id: string;
-  spec_path: string;
   branch_name: string | null;
-}
-
-interface WorkspaceRow {
-  path: string;
-}
-
-interface StoryResultRow {
-  story_id: string;
-  status: string;
-  reason: string | null;
-  finished_at: string | null;
+  execution_workspace_path: string | null;
+  execution_worktree_path: string | null;
+  terminal_checkout_sha: string | null;
+  release_authorized_sha: string | null;
+  release_execution_workspace_path: string | null;
+  release_execution_worktree_path: string | null;
+  release_identity_hash: string | null;
+  workspace_path: string;
 }
 
 interface StoryProgress {
   storyId: string;
   title: string;
-  status: 'pass' | 'fail' | 'skip' | 'in_progress';
+  status: 'pass' | 'fail' | 'skip';
   reason?: string;
 }
 
-interface CheckRunState {
-  checkRunId: number;
-  workspaceId: string;
-  owner: string;
-  repo: string;
-  stories: Map<string, StoryProgress>;
-  pendingFlush: ReturnType<typeof setTimeout> | null;
-}
-
-// GitHub Check Run annotation
 interface CheckAnnotation {
   path: string;
   start_line: number;
   end_line: number;
-  annotation_level: 'failure' | 'warning' | 'notice';
+  annotation_level: 'failure';
   message: string;
   title: string;
 }
 
+interface ProjectionPayload {
+  runId: number;
+  stories: StoryProgress[];
+  title: string;
+  summary: string;
+  text: string;
+  annotations: CheckAnnotation[];
+  counts: { passed: number; failed: number; skipped: number; total: number };
+}
+
+interface ProjectionRow {
+  run_id: number | string;
+  workspace_id: string;
+  spec_id: string;
+  desired_event_id: number;
+  desired_event_identity_hash: string;
+  desired_state: 'in_progress' | 'completed';
+  head_sha: string;
+  conclusion: 'success' | 'failure' | 'neutral' | null;
+  desired_payload: ProjectionPayload | string;
+  desired_payload_hash: string;
+  external_id: string;
+  projection_status: 'pending' | 'processing' | 'retry' | 'uncertain' | 'projected' | 'completed' | 'blocked';
+  check_run_id: number | string | null;
+  provider_head_sha: string | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  attempts: number;
+  next_attempt_at: string | null;
+  repository_owner: string;
+  repository_name: string;
+  repository_authority_source: 'github-app-installation' | 'pat-oauth-fallback';
+  repository_binding_id: string | null;
+  repository_installation_id: number | string | null;
+  repository_id: number | string | null;
+}
+
+interface ProjectionClaim extends ProjectionRow {
+  claim_token: string;
+  desired_payload: ProjectionPayload;
+}
+
 const CHECK_RUN_NAME = 'Rorca Pipeline';
+const EXTERNAL_ID_VERSION = 'v1';
+const RECONCILE_INTERVAL_MS = 30_000;
+let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+const scheduledRuns = new Set<number>();
 
-// Active check runs keyed by runId
-const activeCheckRuns = new Map<number, CheckRunState>();
-
-// Debounce interval: batch story updates into a single PATCH every 5s
-const DEBOUNCE_MS = 5000;
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-async function getGithubToken(): Promise<string | null> {
-  const row = await queryOne<GitHubConnectionRow>(
-    'SELECT encrypted_token FROM github_connections LIMIT 1',
-  );
-  if (!row) return null;
-  return decryptToken(row.encrypted_token);
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
-async function getRepoInfo(workspaceId: string): Promise<{ owner: string; repo: string } | null> {
-  const row = await queryOne<GitHubWebhookRow>(
-    'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1',
-    [workspaceId],
-  );
-  if (!row) return null;
-  return { owner: row.repo_owner, repo: row.repo_name };
+function hash(value: unknown): string {
+  return createHash('sha256').update(stableJson(value)).digest('hex');
 }
 
-async function resolveBranchHead(runId: number | null, workspaceId: string): Promise<string | null> {
-  let cwd: string | null = null;
+function externalId(runId: number): string {
+  return `rorca:pipeline-run:${runId}:${EXTERNAL_ID_VERSION}`;
+}
 
-  if (runId) {
-    const run = await queryOne<PipelineRunRow>(
-      'SELECT worktree_path, workspace_id FROM pipeline_runs WHERE id = $1',
-      [runId],
-    );
-    if (run?.worktree_path) {
-      cwd = run.worktree_path;
+function buildRunViewUrl(runId: number): string {
+  return `${process.env.RORCA_BASE_URL || 'http://localhost:5210'}/runs/${runId}`;
+}
+
+function parseProjectionPayload(value: ProjectionRow['desired_payload']): ProjectionPayload {
+  const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value;
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    throw new ConflictError('GitHub Check Run projection payload is invalid');
+  }
+  return parsed as ProjectionPayload;
+}
+
+async function resolveBranchHead(runId: number, workspaceId: string): Promise<string | null> {
+  const run = await queryOne<PipelineRunRow>(`
+    SELECT pr.worktree_path, pr.workspace_id, pr.branch_name,
+           pr.execution_workspace_path, pr.execution_worktree_path,
+           pr.terminal_checkout_sha, ri.authorized_sha AS release_authorized_sha,
+           ri.execution_workspace_path AS release_execution_workspace_path,
+           ri.execution_worktree_path AS release_execution_worktree_path,
+           ri.identity_hash AS release_identity_hash, ws.path AS workspace_path
+      FROM pipeline_runs pr JOIN workspaces ws ON ws.id = pr.workspace_id
+      LEFT JOIN pipeline_run_release_intents ri ON ri.run_id = pr.id
+     WHERE pr.id = $1 AND pr.workspace_id = $2
+  `, [runId, workspaceId]);
+  if (!run?.branch_name) return null;
+  try {
+    return assertCanonicalRunCheckout({
+      cwd: run.execution_worktree_path ?? run.worktree_path ?? run.workspace_path,
+      repositoryTopLevel: run.execution_workspace_path ?? run.workspace_path,
+      branchName: run.branch_name,
+    }).headSha;
+  } catch {
+    const terminal = run.terminal_checkout_sha?.toLowerCase();
+    return terminal
+      && terminal === run.release_authorized_sha?.toLowerCase()
+      && run.release_execution_workspace_path === run.execution_workspace_path
+      && run.release_execution_worktree_path === run.execution_worktree_path
+      && /^[0-9a-f]{64}$/.test(run.release_identity_hash ?? '')
+      ? terminal
+      : null;
+  }
+}
+
+function buildSummaryTable(stories: StoryProgress[]): string {
+  const emoji: Record<StoryProgress['status'], string> = {
+    pass: ':white_check_mark:', fail: ':x:', skip: ':fast_forward:',
+  };
+  return [
+    '| Story | Title | Status |',
+    '|-------|-------|--------|',
+    ...stories.map(story => `| ${story.storyId} | ${story.title.slice(0, 60)} | ${emoji[story.status]} ${story.status} |`),
+  ].join('\n');
+}
+
+function extractAnnotations(stories: StoryProgress[]): CheckAnnotation[] {
+  const annotations: CheckAnnotation[] = [];
+  const fileLine = /(?:^|\s|at\s+)([a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}):(\d+)/gm;
+  for (const story of stories) {
+    if (story.status !== 'fail' || !story.reason) continue;
+    for (const match of story.reason.matchAll(fileLine)) {
+      if (match[1].includes('node_modules/') || match[1].startsWith('http')) continue;
+      annotations.push({
+        path: match[1],
+        start_line: Number(match[2]),
+        end_line: Number(match[2]),
+        annotation_level: 'failure',
+        message: `${story.storyId} failed: ${story.reason.slice(0, 200)}`,
+        title: `${story.storyId}: ${story.title}`,
+      });
     }
   }
-
-  if (!cwd) {
-    const ws = await queryOne<WorkspaceRow>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
-    if (ws) cwd = ws.path;
-  }
-
-  if (!cwd) return null;
-
-  try {
-    return execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 5000 }).trim();
-  } catch {
-    return null;
-  }
+  return annotations.slice(0, 50);
 }
 
-function buildRunViewUrl(runId: number | null): string {
-  const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:5210';
-  if (runId) return `${baseUrl}/runs/${runId}`;
-  return baseUrl;
+function terminalPayload(complete: CompleteTerminalRun, conclusion: 'success' | 'failure' | 'neutral'): ProjectionPayload {
+  const stories: StoryProgress[] = complete.stories.map(result => ({
+    storyId: result.storyId,
+    title: result.storyId,
+    status: result.status === 'pass'
+      ? 'pass'
+      : result.status === 'fail' || result.status === 'timeout' ? 'fail' : 'skip',
+    ...(result.reason ? { reason: result.reason } : {}),
+  }));
+  const counts = {
+    passed: stories.filter(story => story.status === 'pass').length,
+    failed: stories.filter(story => story.status === 'fail').length,
+    skipped: stories.filter(story => story.status === 'skip').length,
+    total: stories.length,
+  };
+  const summary = buildSummaryTable(stories);
+  const failures = stories
+    .filter(story => story.status === 'fail')
+    .map(story => `- **${story.storyId}**${story.reason ? `: ${story.reason}` : ''}`);
+  return {
+    runId: complete.run.id,
+    stories,
+    title: `Pipeline Run #${complete.run.id} — ${conclusion}`,
+    summary,
+    text: [
+      `## Rorca Pipeline Run #${complete.run.id}`,
+      `**Results**: ${counts.passed}/${counts.total} passed, ${counts.failed} failed, ${counts.skipped} skipped`,
+      summary,
+      ...(failures.length ? ['### Failed Stories', ...failures] : []),
+    ].join('\n\n'),
+    annotations: extractAnnotations(stories),
+    counts,
+  };
 }
 
-async function logAudit(
-  workspaceId: string,
-  eventType: string,
-  statusCode: number | null,
-  errorMessage: string | null,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await execute(
-      `INSERT INTO integration_audit_log (workspace_id, provider, event_type, status_code, error_message, payload)
-       VALUES ($1, 'github', $2, $3, $4, $5)`,
-      [workspaceId, eventType, statusCode, errorMessage, JSON.stringify(payload)],
-    );
-  } catch (err) {
-    logger.debug({ err }, '[CheckRun] Failed to write audit log');
+function startedPayload(runId: number): ProjectionPayload {
+  return {
+    runId,
+    stories: [],
+    title: `Pipeline Run #${runId}`,
+    summary: 'Pipeline is starting...',
+    text: '',
+    annotations: [],
+    counts: { passed: 0, failed: 0, skipped: 0, total: 0 },
+  };
+}
+
+interface ProjectionAuthority {
+  owner: string;
+  name: string;
+  source: 'github-app-installation' | 'pat-oauth-fallback';
+  bindingId: string | null;
+  installationId: number | null;
+  repositoryId: number | null;
+}
+
+async function resolveProjectionAuthority(workspaceId: string, runId: number, headSha: string): Promise<ProjectionAuthority> {
+  const frozen = await queryOne<{
+    repository_owner: string | null; repository_name: string | null;
+    repository_authority_source: ProjectionAuthority['source'] | null;
+    repository_binding_id: string | null; repository_installation_id: number | string | null;
+    repository_id: number | string | null; authorized_sha: string;
+  }>(`SELECT repository_owner, repository_name, repository_authority_source,
+             repository_binding_id, repository_installation_id, repository_id, authorized_sha
+        FROM pipeline_run_release_intents WHERE run_id = $1 AND workspace_id = $2`, [runId, workspaceId]);
+  if (frozen) {
+    if (!frozen.repository_owner || !frozen.repository_name || !frozen.repository_authority_source
+      || frozen.authorized_sha.toLowerCase() !== headSha.toLowerCase()) {
+      throw new ConflictError('Release intent cannot freeze this Check Run projection authority');
+    }
+    return {
+      owner: frozen.repository_owner, name: frozen.repository_name, source: frozen.repository_authority_source,
+      bindingId: frozen.repository_binding_id,
+      installationId: frozen.repository_installation_id == null ? null : Number(frozen.repository_installation_id),
+      repositoryId: frozen.repository_id == null ? null : Number(frozen.repository_id),
+    };
   }
+  const current = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
+  if (!current) throw new ConflictError('Canonical GitHub repository authority is unavailable');
+  return {
+    owner: current.owner, name: current.name, source: current.source,
+    bindingId: current.bindingId, installationId: current.installationId, repositoryId: current.repositoryId,
+  };
 }
 
-function buildGitHubHeaders(token: string): Record<string, string> {
+function projectionAuthorityMatches(row: ProjectionRow, authority: ProjectionAuthority): boolean {
+  return row.repository_owner.toLowerCase() === authority.owner.toLowerCase()
+    && row.repository_name.toLowerCase() === authority.name.toLowerCase()
+    && row.repository_authority_source === authority.source
+    && row.repository_binding_id === authority.bindingId
+    && Number(row.repository_installation_id ?? 0) === Number(authority.installationId ?? 0)
+    && Number(row.repository_id ?? 0) === Number(authority.repositoryId ?? 0);
+}
+
+async function persistDesiredProjection(input: {
+  event: WalEvent;
+  runId: number;
+  workspaceId: string;
+  specId: string;
+  state: 'in_progress' | 'completed';
+  headSha: string;
+  conclusion: 'success' | 'failure' | 'neutral' | null;
+  payload: ProjectionPayload;
+  authority: ProjectionAuthority;
+}): Promise<void> {
+  const eventHash = input.event.event_identity_hash;
+  if (!eventHash || !/^[0-9a-f]{64}$/.test(eventHash)) {
+    throw new ConflictError('Trusted Check Run event has no immutable identity hash');
+  }
+  const payloadHash = hash({
+    version: 1,
+    state: input.state,
+    headSha: input.headSha,
+    conclusion: input.conclusion,
+    payload: input.payload,
+  });
+  await transaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`github-check-run:${input.runId}`]);
+    const existing = (await client.query<ProjectionRow>(
+      'SELECT * FROM github_check_run_projections WHERE run_id = $1 FOR UPDATE',
+      [input.runId],
+    )).rows[0];
+    if (existing && (existing.workspace_id !== input.workspaceId
+      || existing.spec_id !== input.specId
+      || existing.external_id !== externalId(input.runId)
+      || !projectionAuthorityMatches(existing, input.authority))) {
+      throw new ConflictError('GitHub Check Run projection does not own the canonical run identity');
+    }
+    if (existing?.desired_state === 'completed') {
+      if (existing.head_sha !== input.headSha
+        || existing.conclusion !== input.conclusion
+        || existing.desired_payload_hash !== payloadHash) {
+        throw new ConflictError('Terminal GitHub Check Run projection already has different immutable authority');
+      }
+      return;
+    }
+    if (!existing) {
+      await client.query(`
+        INSERT INTO github_check_run_projections (
+          run_id, workspace_id, spec_id, desired_event_id,
+          desired_event_identity_hash, desired_state, head_sha, conclusion,
+          desired_payload, desired_payload_hash, external_id, projection_status,
+          repository_owner, repository_name, repository_authority_source,
+          repository_binding_id, repository_installation_id, repository_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,'pending',$12,$13,$14,$15,$16,$17)
+      `, [
+        input.runId, input.workspaceId, input.specId, input.event.id, eventHash,
+        input.state, input.headSha, input.conclusion, JSON.stringify(input.payload),
+        payloadHash, externalId(input.runId), input.authority.owner, input.authority.name,
+        input.authority.source, input.authority.bindingId, input.authority.installationId, input.authority.repositoryId,
+      ]);
+      return;
+    }
+    await client.query(`
+      UPDATE github_check_run_projections
+         SET desired_event_id = $2, desired_event_identity_hash = $3,
+             desired_state = $4, head_sha = $5, conclusion = $6,
+             desired_payload = $7::jsonb, desired_payload_hash = $8,
+             projection_status = CASE WHEN projection_status = 'processing'
+               THEN 'processing' ELSE 'pending' END,
+             next_attempt_at = NULL, last_error_code = NULL,
+             last_error_message = NULL, updated_at = NOW()
+       WHERE run_id = $1
+    `, [
+      input.runId, input.event.id, eventHash, input.state, input.headSha,
+      input.conclusion, JSON.stringify(input.payload), payloadHash,
+    ]);
+  });
+}
+
+/** Durable subscriber: all local authority checks and ledger writes precede WAL ack. */
+export async function acceptCheckRunWalEvent(event: WalEvent): Promise<number | null> {
+  if (event.event_type === 'run_started') {
+    const authorized = await authorizeCanonicalWalEvent(event);
+    if (!authorized
+      || authorized.run.status !== 'running'
+      || !['starting', 'pty_attached', 'running'].includes(authorized.run.lifecycleStatus)) return null;
+    const headSha = await resolveBranchHead(authorized.run.id, authorized.run.workspaceId);
+    if (!isFullGitObjectId(headSha)) return null;
+    await withGithubRepositoryAuthorityLock(authorized.run.workspaceId, '', '', async () => {
+      const authority = await resolveProjectionAuthority(authorized.run.workspaceId, authorized.run.id, headSha);
+      await persistDesiredProjection({
+        event,
+        runId: authorized.run.id,
+        workspaceId: authorized.run.workspaceId,
+        specId: authorized.run.specId,
+        state: 'in_progress',
+        headSha: headSha.toLowerCase(),
+        conclusion: null,
+        payload: startedPayload(authorized.run.id),
+        authority,
+      });
+    });
+    return authorized.run.id;
+  }
+  if (event.event_type !== 'run_finished') return null;
+
+  // Every pass/result/commit/closeout/outbox/hash check completes here, before
+  // repository authority or installation token resolution in reconciliation.
+  const complete = await authorizeCompleteTerminalRun(event);
+  if (!complete) return null;
+  const conclusion: 'success' | 'failure' | 'neutral' = complete.successAuthorized
+    ? 'success'
+    : complete.run.status === 'cancelled' ? 'neutral' : 'failure';
+  const localHead = complete.finalCommitSha
+    ?? await resolveBranchHead(complete.run.id, complete.run.workspaceId);
+  if (!isFullGitObjectId(localHead)) return null;
+  await withGithubRepositoryAuthorityLock(complete.run.workspaceId, '', '', async () => {
+    const authority = await resolveProjectionAuthority(complete.run.workspaceId, complete.run.id, localHead);
+    await persistDesiredProjection({
+      event,
+      runId: complete.run.id,
+      workspaceId: complete.run.workspaceId,
+      specId: complete.run.specId,
+      state: 'completed',
+      headSha: localHead.toLowerCase(),
+      conclusion,
+      payload: terminalPayload(complete, conclusion),
+      authority,
+    });
+  });
+  return complete.run.id;
+}
+
+async function claimProjection(runId: number): Promise<ProjectionClaim | null> {
+  return transaction(async (client) => {
+    const row = (await client.query<ProjectionRow>(
+      'SELECT * FROM github_check_run_projections WHERE run_id = $1 FOR UPDATE SKIP LOCKED',
+      [runId],
+    )).rows[0];
+    if (!row) return null;
+    const terminalStatus = row.desired_state === 'completed' ? 'completed' : 'projected';
+    if (row.projection_status === terminalStatus || row.projection_status === 'blocked') return null;
+    if (row.projection_status === 'processing'
+      && row.claimed_at
+      && Date.parse(row.claimed_at) > Date.now() - 120_000) return null;
+    if (row.next_attempt_at && Date.parse(row.next_attempt_at) > Date.now()) return null;
+    const claimToken = randomUUID();
+    const claimed = (await client.query<ProjectionRow>(`
+      UPDATE github_check_run_projections
+         SET projection_status = 'processing', claim_token = $2,
+             claimed_at = NOW(), attempts = attempts + 1, updated_at = NOW()
+       WHERE run_id = $1
+       RETURNING *
+    `, [runId, claimToken])).rows[0];
+    return claimed ? {
+      ...claimed,
+      claim_token: claimToken,
+      desired_payload: parseProjectionPayload(claimed.desired_payload),
+    } : null;
+  });
+}
+
+async function getRepository(workspaceId: string): Promise<ProjectionAuthority | null> {
+  const authority = await getGithubRepositoryAuthority(workspaceId, { requireActive: true });
+  return authority ? {
+    owner: authority.owner, name: authority.name, source: authority.source,
+    bindingId: authority.bindingId, installationId: authority.installationId, repositoryId: authority.repositoryId,
+  } : null;
+}
+
+async function getToken(workspaceId: string, owner: string, repo: string): Promise<ResolvedGitHubToken | null> {
+  return resolveWorkspaceGitHubToken(workspaceId, {
+    repository: { owner, name: repo }, purpose: 'checks-write',
+  });
+}
+
+function credentialMatchesProjection(claim: ProjectionClaim, credential: ResolvedGitHubToken): boolean {
+  if (claim.repository_authority_source === 'github-app-installation') {
+    const metadata = credential.source === 'github-app-installation' ? credential.metadata : null;
+    return Boolean(metadata && 'bindingId' in metadata
+      && metadata.bindingId === claim.repository_binding_id
+      && metadata.installationId === Number(claim.repository_installation_id)
+      && metadata.repositoryId === Number(claim.repository_id)
+      && metadata.repository.owner.toLowerCase() === claim.repository_owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === claim.repository_name.toLowerCase());
+  }
+  const metadata = credential.metadata;
+  return ['workspace-oauth', 'workspace-pat'].includes(credential.source)
+    && Boolean(metadata && 'fallback' in metadata
+      && metadata.repository.owner.toLowerCase() === claim.repository_owner.toLowerCase()
+      && metadata.repository.name.toLowerCase() === claim.repository_name.toLowerCase());
+}
+
+function headers(token: string): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`,
     Accept: 'application/vnd.github+json',
@@ -170,446 +501,382 @@ function buildGitHubHeaders(token: string): Record<string, string> {
   };
 }
 
-// ─── Story Status Table ─────────────────────────────────────────────────────
-
-const STATUS_EMOJI: Record<string, string> = {
-  pass: ':white_check_mark:',
-  fail: ':x:',
-  skip: ':fast_forward:',
-  in_progress: ':hourglass_flowing_sand:',
-};
-
-function buildSummaryTable(stories: Map<string, StoryProgress>): string {
-  const rows: string[] = [];
-  rows.push('| Story | Title | Status |');
-  rows.push('|-------|-------|--------|');
-
-  for (const [, story] of stories) {
-    const emoji = STATUS_EMOJI[story.status] || ':question:';
-    const titleStr = story.title.length > 60 ? story.title.slice(0, 57) + '...' : story.title;
-    rows.push(`| ${story.storyId} | ${titleStr} | ${emoji} ${story.status} |`);
-  }
-
-  return rows.join('\n');
+class ProjectionProviderError extends Error {
+  constructor(
+    readonly code: string,
+    readonly retryable: boolean,
+    readonly uncertain: boolean,
+    readonly statusCode: number | null,
+    readonly requestId: string | null,
+    message: string,
+  ) { super(message); }
 }
 
-function buildOutputText(stories: Map<string, StoryProgress>, runId: number): string {
-  const passed = [...stories.values()].filter(s => s.status === 'pass').length;
-  const failed = [...stories.values()].filter(s => s.status === 'fail').length;
-  const skipped = [...stories.values()].filter(s => s.status === 'skip').length;
-  const total = stories.size;
-
-  const lines: string[] = [];
-  lines.push(`## Rorca Pipeline Run #${runId}\n`);
-  lines.push(`**Results**: ${passed}/${total} passed, ${failed} failed, ${skipped} skipped\n`);
-  lines.push(buildSummaryTable(stories));
-
-  if (failed > 0) {
-    lines.push('\n### Failed Stories\n');
-    for (const [, story] of stories) {
-      if (story.status === 'fail') {
-        lines.push(`- **${story.storyId}**: ${story.title}`);
-        if (story.reason) lines.push(`  - Reason: ${story.reason}`);
-      }
-    }
+async function providerFetch(
+  url: string,
+  init: RequestInit,
+  operationCode: string,
+): Promise<Response> {
+  let response: Response;
+  try {
+    response = await githubRateLimiter.execute(() =>
+      fetchGithubWithTimeout(fetch, url, init));
+  } catch (error) {
+    const sanitized = sanitizeGithubProviderException(error, operationCode);
+    throw new ProjectionProviderError(
+      sanitized.code, true, true, null, sanitized.requestId,
+      formatGithubProviderError(sanitized),
+    );
   }
-
-  return lines.join('\n');
+  if (!response.ok) {
+    const providerError = extractGithubProviderError(response, operationCode);
+    const retryable = response.status === 408 || response.status === 409
+      || response.status === 429 || response.status >= 500;
+    throw new ProjectionProviderError(
+      providerError.code, retryable, false, response.status,
+      providerError.requestId, formatGithubProviderError(providerError),
+    );
+  }
+  return response;
 }
 
-// ─── Annotation Extraction ──────────────────────────────────────────────────
-
-/**
- * Parse error text for file path and line number references.
- * Patterns matched:
- *   - path/to/file.ts:42
- *   - path/to/file.ts:42:10
- *   - at path/to/file.ts line 42
- */
-function extractAnnotations(
-  stories: Map<string, StoryProgress>,
-): CheckAnnotation[] {
-  const annotations: CheckAnnotation[] = [];
-  const fileLineRegex = /(?:^|\s|at\s+)([a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}):(\d+)/gm;
-
-  for (const [, story] of stories) {
-    if (story.status !== 'fail' || !story.reason) continue;
-
-    const matches = story.reason.matchAll(fileLineRegex);
-    let hasFileAnnotation = false;
-
-    for (const match of matches) {
-      const filePath = match[1];
-      const line = parseInt(match[2], 10);
-      // Skip common false positives (URLs, node_modules)
-      if (filePath.includes('node_modules/') || filePath.startsWith('http')) continue;
-
-      annotations.push({
-        path: filePath,
-        start_line: line,
-        end_line: line,
-        annotation_level: 'failure',
-        message: `${story.storyId} failed: ${story.reason.slice(0, 200)}`,
-        title: `${story.storyId}: ${story.title}`,
-      });
-      hasFileAnnotation = true;
-    }
-
-    // If no file/line extracted, skip annotation for this story (annotations are optional)
-    if (!hasFileAnnotation) {
-      logger.debug(`[CheckRun] No file/line in error for ${story.storyId} — skipping annotation`);
-    }
-  }
-
-  // GitHub limits to 50 annotations per API call
-  return annotations.slice(0, 50);
+function safeRequestId(response: Pick<Response, 'status' | 'headers'>): string | null {
+  return extractGithubProviderError(response, 'GITHUB_CHECK_RUN_RESPONSE_INVALID').requestId;
 }
 
-// ─── GitHub Checks API Calls ────────────────────────────────────────────────
-
-async function createCheckRun(
+async function discoverCheckRun(
   owner: string,
   repo: string,
-  headSha: string,
-  runId: number,
-  workspaceId: string,
+  token: string,
+  claim: ProjectionClaim,
 ): Promise<number | null> {
-  const token = await getGithubToken();
-  if (!token) {
-    logger.debug('[CheckRun] No GitHub token — skipping check run creation');
-    return null;
+  const matches: Array<{ id?: number; external_id?: string; head_sha?: string }> = [];
+  const maxPages = 10;
+  let observedRows = 0;
+  let expectedTotal: number | null = null;
+  for (let page = 1; page <= maxPages; page++) {
+    const suffix = `/commits/${claim.head_sha}/check-runs?check_name=${encodeURIComponent(CHECK_RUN_NAME)}&filter=all&per_page=100&page=${page}`;
+    const response = await providerFetch(
+      githubRepoApiUrl(owner, repo, suffix),
+      { method: 'GET', headers: headers(token) },
+      'GITHUB_CHECK_RUN_RECONCILE_FAILED',
+    );
+    let body: unknown;
+    try { body = await response.json(); }
+    catch {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup response was unreadable');
+    }
+    const candidate = body as { total_count?: unknown; check_runs?: unknown };
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+      || !Array.isArray(candidate.check_runs)
+      || !Number.isSafeInteger(candidate.total_count)
+      || Number(candidate.total_count) < 0
+      || candidate.check_runs.length > 100) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup response shape was indeterminate');
+    }
+    const total = Number(candidate.total_count);
+    if (expectedTotal === null) expectedTotal = total;
+    if (total !== expectedTotal) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup total changed during pagination');
+    }
+    const pageRows = candidate.check_runs as Array<{ id?: number; external_id?: string; head_sha?: string }>;
+    observedRows += pageRows.length;
+    if (observedRows > total || (pageRows.length < 100 && observedRows !== total)) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_RECONCILE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run lookup under-reported or omitted rows');
+    }
+    matches.push(...pageRows.filter(check =>
+      check && typeof check === 'object'
+        && check.external_id === claim.external_id
+        && check.head_sha?.toLowerCase() === claim.head_sha
+        && Number.isSafeInteger(check.id)));
+    if (matches.length > 1) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_IDENTITY_AMBIGUOUS', false, false, response.status, safeRequestId(response), 'Multiple provider Check Runs share one Rorca external identity');
+    }
+    if (observedRows === total) return matches[0]?.id ?? null;
+    if (pageRows.length !== 100 || page === maxPages) {
+      throw new ProjectionProviderError('GITHUB_CHECK_RUN_DISCOVERY_TRUNCATED', true, true, response.status, safeRequestId(response), 'GitHub Check Run discovery exceeded or contradicted its deterministic page bound');
+    }
   }
+  return matches[0]?.id ?? null;
+}
 
-  const url = `https://api.github.com/repos/${owner}/${repo}/check-runs`;
-  const body = {
+function providerBody(claim: ProjectionClaim): Record<string, unknown> {
+  const output = {
+    title: claim.desired_payload.title,
+    summary: claim.desired_payload.summary,
+    ...(claim.desired_payload.text ? { text: claim.desired_payload.text } : {}),
+    ...(claim.desired_payload.annotations.length
+      ? { annotations: claim.desired_payload.annotations }
+      : {}),
+  };
+  if (claim.desired_state === 'completed') {
+    return {
+      name: CHECK_RUN_NAME,
+      head_sha: claim.head_sha,
+      external_id: claim.external_id,
+      details_url: buildRunViewUrl(Number(claim.run_id)),
+      status: 'completed',
+      conclusion: claim.conclusion,
+      completed_at: new Date().toISOString(),
+      output,
+    };
+  }
+  return {
     name: CHECK_RUN_NAME,
-    head_sha: headSha,
+    head_sha: claim.head_sha,
+    external_id: claim.external_id,
+    details_url: buildRunViewUrl(Number(claim.run_id)),
     status: 'in_progress',
     started_at: new Date().toISOString(),
-    details_url: buildRunViewUrl(runId),
-    output: {
-      title: `Pipeline Run #${runId}`,
-      summary: 'Pipeline is starting...',
-    },
+    output,
   };
-
-  try {
-    const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
-        method: 'POST',
-        headers: buildGitHubHeaders(token),
-        body: JSON.stringify(body),
-      }),
-    );
-
-    if (!res.ok) {
-      const text = await res.text();
-      logger.warn({ status: res.status }, `[CheckRun] Failed to create check run for run #${runId}`);
-      await logAudit(workspaceId, 'check_run_create_failed', res.status, text, { runId, headSha });
-      return null;
-    }
-
-    const data = await res.json() as { id: number };
-    logger.info(`[CheckRun] Created check run ${data.id} for run #${runId} on ${owner}/${repo}@${headSha.slice(0, 7)}`);
-    await logAudit(workspaceId, 'check_run_created', res.status, null, { runId, headSha, checkRunId: data.id });
-    return data.id;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn({ err }, `[CheckRun] Error creating check run for run #${runId}`);
-    await logAudit(workspaceId, 'check_run_create_failed', null, message, { runId, headSha });
-    return null;
-  }
 }
 
-async function updateCheckRun(
+async function applyProviderProjection(
   owner: string,
   repo: string,
-  checkRunId: number,
-  workspaceId: string,
-  update: {
-    status?: 'in_progress' | 'completed';
-    conclusion?: 'success' | 'failure' | 'neutral';
-    output: {
-      title: string;
-      summary: string;
-      text?: string;
-      annotations?: CheckAnnotation[];
-    };
-    completed_at?: string;
-  },
-): Promise<void> {
-  const token = await getGithubToken();
-  if (!token) return;
-
-  const url = `https://api.github.com/repos/${owner}/${repo}/check-runs/${checkRunId}`;
-
-  try {
-    const res = await githubRateLimiter.execute(() =>
-      fetch(url, {
-        method: 'PATCH',
-        headers: buildGitHubHeaders(token),
-        body: JSON.stringify(update),
-      }),
-    );
-
-    if (!res.ok) {
-      const text = await res.text();
-      logger.warn({ status: res.status }, `[CheckRun] Failed to update check run ${checkRunId}`);
-      await logAudit(workspaceId, 'check_run_update_failed', res.status, text, { checkRunId });
-    } else {
-      logger.debug(`[CheckRun] Updated check run ${checkRunId}`);
-      await logAudit(workspaceId, 'check_run_updated', res.status, null, { checkRunId });
+  token: string,
+  claim: ProjectionClaim,
+): Promise<number> {
+  if (claim.provider_head_sha && claim.provider_head_sha !== claim.head_sha) {
+    const priorClaim = { ...claim, head_sha: claim.provider_head_sha };
+    const priorId = claim.check_run_id == null
+      ? await discoverCheckRun(owner, repo, token, priorClaim)
+      : Number(claim.check_run_id);
+    if (priorId) {
+      await providerFetch(
+        githubRepoApiUrl(owner, repo, `/check-runs/${priorId}`),
+        {
+          method: 'PATCH',
+          headers: headers(token),
+          body: JSON.stringify({
+            status: 'completed', conclusion: 'neutral', completed_at: new Date().toISOString(),
+            output: { title: `Pipeline Run #${Number(claim.run_id)} — superseded head`, summary: `Final evidence moved to ${claim.head_sha}.` },
+          }),
+        },
+        'GITHUB_CHECK_RUN_SUPERSEDE_FAILED',
+      );
     }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn({ err }, `[CheckRun] Error updating check run ${checkRunId}`);
-    await logAudit(workspaceId, 'check_run_update_failed', null, message, { checkRunId });
   }
+  let checkRunId = await discoverCheckRun(owner, repo, token, claim);
+  const body = providerBody(claim);
+  if (checkRunId) {
+    const { name: _name, head_sha: _headSha, external_id: _externalId, ...patch } = body;
+    await providerFetch(
+      githubRepoApiUrl(owner, repo, `/check-runs/${checkRunId}`),
+      { method: 'PATCH', headers: headers(token), body: JSON.stringify(patch) },
+      'GITHUB_CHECK_RUN_UPDATE_FAILED',
+    );
+    return checkRunId;
+  }
+  const response = await providerFetch(
+    githubRepoApiUrl(owner, repo, '/check-runs'),
+    { method: 'POST', headers: headers(token), body: JSON.stringify(body) },
+    'GITHUB_CHECK_RUN_CREATE_FAILED',
+  );
+  try {
+    const created = await response.json() as { id?: number };
+    checkRunId = Number(created.id);
+  } catch {
+    throw new ProjectionProviderError('GITHUB_CHECK_RUN_CREATE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run create response was unreadable');
+  }
+  if (!Number.isSafeInteger(checkRunId) || checkRunId <= 0) {
+    throw new ProjectionProviderError('GITHUB_CHECK_RUN_CREATE_UNCERTAIN', true, true, response.status, safeRequestId(response), 'GitHub Check Run create response omitted its identity');
+  }
+  return checkRunId;
 }
 
-// ─── Debounced Flush ────────────────────────────────────────────────────────
+async function finishClaim(
+  claim: ProjectionClaim,
+  state: 'projected' | 'completed' | 'retry' | 'uncertain' | 'blocked',
+  values: {
+    checkRunId?: number;
+    providerHeadSha?: string;
+    requestId?: string | null;
+    errorCode?: string | null;
+    errorMessage?: string | null;
+    retryDelayMs?: number;
+  } = {},
+): Promise<boolean> {
+  const result = await execute(`
+    UPDATE github_check_run_projections
+       SET projection_status = CASE WHEN desired_payload_hash = $3 THEN $4 ELSE 'pending' END,
+           check_run_id = COALESCE($5, check_run_id),
+           provider_head_sha = COALESCE($6, provider_head_sha),
+           provider_request_id = $7,
+           last_error_code = $8,
+           last_error_message = $9,
+           next_attempt_at = CASE
+             WHEN desired_payload_hash = $3 AND $10::int > 0
+               THEN NOW() + ($10::text || ' milliseconds')::interval
+             ELSE NULL END,
+           claim_token = NULL, claimed_at = NULL, updated_at = NOW()
+     WHERE run_id = $1 AND claim_token = $2::uuid
+  `, [
+    Number(claim.run_id), claim.claim_token, claim.desired_payload_hash, state,
+    values.checkRunId ?? null, values.providerHeadSha ?? null,
+    values.requestId ?? null, values.errorCode ?? null,
+    values.errorMessage?.slice(0, 512) ?? null, values.retryDelayMs ?? 0,
+  ]);
+  return result.rowCount === 1;
+}
 
-function scheduleFlush(runId: number): void {
-  const state = activeCheckRuns.get(runId);
-  if (!state) return;
+async function emitProjectionWal(claim: ProjectionClaim, checkRunId: number): Promise<void> {
+  const eventType = claim.desired_state === 'completed' ? 'check_run_completed' : 'check_run_created';
+  const payload = {
+    run_id: Number(claim.run_id),
+    check_run_id: checkRunId,
+    sha: claim.head_sha,
+    conclusion: claim.conclusion,
+    ...claim.desired_payload.counts,
+  };
+  const ingestKey = `github-check-projection:v1:${Number(claim.run_id)}:${claim.desired_payload_hash}`;
+  const event = await queryOne<WalEvent>(`
+    INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload, ingest_key)
+    VALUES ($1,$2,$3,'github',$4::jsonb,$5)
+    ON CONFLICT (ingest_key) WHERE ingest_key IS NOT NULL DO NOTHING
+    RETURNING *
+  `, [eventType, claim.workspace_id, claim.spec_id, JSON.stringify(payload), ingestKey]);
+  if (event) broadcastAll(event);
+}
 
-  // Clear existing timer
-  if (state.pendingFlush) {
-    clearTimeout(state.pendingFlush);
-  }
-
-  state.pendingFlush = setTimeout(() => {
-    flushStoryUpdate(runId).catch((err) => {
-      logger.debug({ err }, `[CheckRun] Error flushing story update for run #${runId}`);
+export async function reconcileCheckRunProjection(runId: number): Promise<boolean> {
+  const claim = await claimProjection(runId);
+  if (!claim) return false;
+  try {
+    // Repeat exact canonical branch and terminal HEAD verification immediately
+    // before repository authority/token resolution. Drift blocks all provider use.
+    const exactHead = await resolveBranchHead(Number(claim.run_id), claim.workspace_id);
+    if (!exactHead || exactHead !== claim.head_sha) {
+      await finishClaim(claim, 'blocked', {
+        errorCode: 'GITHUB_CHECK_RUN_TERMINAL_HEAD_DRIFT',
+        errorMessage: 'Canonical run branch/HEAD changed after durable projection acceptance',
+      });
+      return false;
+    }
+    // Repository authority and token resolution happen only after the immutable
+    // local projection has been durably accepted, claimed, and reverified.
+    const checkRunId = await withGithubRepositoryAuthorityLock(
+      claim.workspace_id,
+      claim.repository_owner,
+      claim.repository_name,
+      async () => {
+        const repository = await getRepository(claim.workspace_id);
+        if (!repository || !projectionAuthorityMatches(claim, repository)) {
+          throw new ProjectionProviderError(
+            'GITHUB_REPOSITORY_AUTHORITY_CHANGED', false, false, null, null,
+            'Canonical GitHub repository authority differs from the frozen Check projection',
+          );
+        }
+        const credential = await getToken(claim.workspace_id, repository.owner, repository.name);
+        if (!credential || !credentialMatchesProjection(claim, credential)) {
+          throw new ProjectionProviderError(
+            'GITHUB_CHECKS_TOKEN_AUTHORITY_MISMATCH', false, false, null, null,
+            'Purpose-scoped GitHub Checks credential differs from frozen projection authority',
+          );
+        }
+        const postTokenRepository = await getRepository(claim.workspace_id);
+        if (!postTokenRepository || !projectionAuthorityMatches(claim, postTokenRepository)) {
+          throw new ProjectionProviderError(
+            'GITHUB_REPOSITORY_AUTHORITY_CHANGED', false, false, null, null,
+            'Canonical GitHub repository authority changed during Checks token resolution',
+          );
+        }
+        return applyProviderProjection(repository.owner, repository.name, credential.token, claim);
+      },
+    );
+    const status = claim.desired_state === 'completed' ? 'completed' : 'projected';
+    if (await finishClaim(claim, status, {
+      checkRunId,
+      providerHeadSha: claim.head_sha,
+    })) {
+      await emitProjectionWal(claim, checkRunId);
+    }
+    return true;
+  } catch (error) {
+    const providerError = error instanceof ProjectionProviderError
+      ? error
+      : new ProjectionProviderError(
+        'GITHUB_CHECK_RUN_PROJECTION_FAILED', true, true, null, null,
+        formatGithubProviderError(sanitizeGithubProviderException(error, 'GITHUB_CHECK_RUN_PROJECTION_FAILED')),
+      );
+    const state = providerError.uncertain
+      ? 'uncertain'
+      : providerError.retryable ? 'retry' : 'blocked';
+    const retryDelayMs = providerError.retryable
+      ? Math.min(300_000, 2 ** Math.min(claim.attempts, 8) * 1_000)
+      : 0;
+    await finishClaim(claim, state, {
+      providerHeadSha: claim.head_sha,
+      requestId: providerError.requestId,
+      errorCode: providerError.code,
+      errorMessage: providerError.message,
+      retryDelayMs,
     });
-  }, DEBOUNCE_MS);
+    logger.warn({
+      runId,
+      code: providerError.code,
+      state,
+      statusCode: providerError.statusCode,
+    }, '[CheckRun] Durable projection deferred');
+    return false;
+  }
 }
 
-async function flushStoryUpdate(runId: number): Promise<void> {
-  const state = activeCheckRuns.get(runId);
-  if (!state) return;
-
-  state.pendingFlush = null;
-
-  const passed = [...state.stories.values()].filter(s => s.status === 'pass').length;
-  const failed = [...state.stories.values()].filter(s => s.status === 'fail').length;
-  const total = state.stories.size;
-  const inProgress = [...state.stories.values()].filter(s => s.status === 'in_progress').length;
-
-  await updateCheckRun(state.owner, state.repo, state.checkRunId, state.workspaceId, {
-    status: 'in_progress',
-    output: {
-      title: `Pipeline Run #${runId} — ${passed} passed, ${failed} failed, ${inProgress} running (${total} total)`,
-      summary: buildSummaryTable(state.stories),
-    },
+function scheduleReconcile(runId: number): void {
+  if (scheduledRuns.has(runId)) return;
+  scheduledRuns.add(runId);
+  setImmediate(() => {
+    void reconcileCheckRunProjection(runId)
+      .catch(error => logger.warn({ error, runId }, '[CheckRun] Scheduled projection failed'))
+      .finally(() => scheduledRuns.delete(runId));
   });
 }
 
-// ─── WAL Event Handlers ─────────────────────────────────────────────────────
-
-async function handleRunStarted(event: WalEvent): Promise<void> {
-  const { workspace_id } = event;
-  if (!workspace_id) return;
-
-  const payload = event.payload ? JSON.parse(event.payload) : {};
-  const runId: number | null = typeof payload.run_id === 'number' ? payload.run_id : null;
-  if (!runId) return;
-
-  // Check if GitHub is connected
-  const repoInfo = await getRepoInfo(workspace_id);
-  if (!repoInfo) {
-    logger.debug(`[CheckRun] No GitHub connection for workspace ${workspace_id} — skipping`);
-    return;
+export async function reconcilePendingCheckRunProjections(limit = 100): Promise<number> {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new RangeError('Invalid Check Run reconciliation limit');
+  const rows = await query<{ run_id: number | string }>(`
+    SELECT run_id FROM github_check_run_projections
+     WHERE projection_status IN ('pending', 'retry', 'uncertain')
+        OR (projection_status = 'processing' AND claimed_at < NOW() - INTERVAL '2 minutes')
+     ORDER BY updated_at ASC
+     LIMIT $1
+  `, [limit]);
+  let completed = 0;
+  for (const row of rows) {
+    if (await reconcileCheckRunProjection(Number(row.run_id))) completed++;
   }
-
-  // Resolve HEAD SHA
-  const sha = await resolveBranchHead(runId, workspace_id);
-  if (!sha) {
-    logger.debug(`[CheckRun] No commit SHA for run #${runId} — skipping check run`);
-    return;
-  }
-
-  // Create the check run
-  const checkRunId = await createCheckRun(repoInfo.owner, repoInfo.repo, sha, runId, workspace_id);
-  if (!checkRunId) return;
-
-  // Store state for story updates
-  activeCheckRuns.set(runId, {
-    checkRunId,
-    workspaceId: workspace_id,
-    owner: repoInfo.owner,
-    repo: repoInfo.repo,
-    stories: new Map(),
-    pendingFlush: null,
-  });
-
-  // Emit WAL event for check run creation
-  const walPayload = JSON.stringify({ run_id: runId, check_run_id: checkRunId, sha });
-  const walEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('check_run_created', $1, 'github', $2) RETURNING *`,
-    [workspace_id, walPayload],
-  );
-  if (walEvent) broadcastAll(walEvent);
+  return completed;
 }
 
-async function handleStoryEvent(event: WalEvent): Promise<void> {
-  const { event_type, workspace_id, story_id } = event;
-  if (!workspace_id || !story_id) return;
-
-  const payload = event.payload ? JSON.parse(event.payload) : {};
-  const runId: number | null = typeof payload.run_id === 'number' ? payload.run_id : null;
-  if (!runId) return;
-
-  const state = activeCheckRuns.get(runId);
-  if (!state) return; // No active check run for this pipeline run
-
-  const storyTitle: string = (payload.story_title as string) || story_id;
-
-  let status: StoryProgress['status'];
-  if (event_type === 'story_started') {
-    status = 'in_progress';
-  } else if (event_type === 'story_passed') {
-    status = 'pass';
-  } else if (event_type === 'story_failed') {
-    status = 'fail';
-  } else if (event_type === 'story_skipped') {
-    status = 'skip';
-  } else {
-    return;
-  }
-
-  state.stories.set(story_id, {
-    storyId: story_id,
-    title: storyTitle,
-    status,
-    reason: (payload.reason as string) || undefined,
-  });
-
-  // Debounce: batch updates to reduce API calls
-  scheduleFlush(runId);
+/** Test/direct seam: durably accept and then synchronously attempt projection. */
+export async function handleCheckRunWalEvent(event: WalEvent): Promise<void> {
+  const runId = await acceptCheckRunWalEvent(event);
+  if (runId) await reconcileCheckRunProjection(runId);
 }
 
-async function handleRunFinished(event: WalEvent): Promise<void> {
-  const { workspace_id } = event;
-  if (!workspace_id) return;
-
-  const payload = event.payload ? JSON.parse(event.payload) : {};
-  const runId: number | null = typeof payload.run_id === 'number' ? payload.run_id : null;
-  if (!runId) return;
-
-  const state = activeCheckRuns.get(runId);
-  if (!state) return;
-
-  // Cancel any pending debounce
-  if (state.pendingFlush) {
-    clearTimeout(state.pendingFlush);
-    state.pendingFlush = null;
-  }
-
-  // Fetch final story results from DB (most authoritative source)
-  const results = await query<StoryResultRow>(
-    'SELECT story_id, status, reason, finished_at FROM story_results WHERE run_id = $1 ORDER BY id',
-    [runId],
-  );
-
-  // Update state with final results
-  for (const r of results) {
-    const existing = state.stories.get(r.story_id);
-    const status = r.status === 'pass' ? 'pass' : r.status === 'fail' ? 'fail' : 'skip';
-    state.stories.set(r.story_id, {
-      storyId: r.story_id,
-      title: existing?.title || r.story_id,
-      status,
-      reason: r.reason || existing?.reason,
-    });
-  }
-
-  // Determine conclusion
-  const passed = [...state.stories.values()].filter(s => s.status === 'pass').length;
-  const failed = [...state.stories.values()].filter(s => s.status === 'fail').length;
-  const skipped = [...state.stories.values()].filter(s => s.status === 'skip').length;
-  const total = state.stories.size;
-
-  let conclusion: 'success' | 'failure' | 'neutral';
-  if (failed > 0) {
-    conclusion = 'failure';
-  } else if (total === 0 || (passed === 0 && skipped > 0)) {
-    conclusion = 'neutral';
-  } else {
-    conclusion = 'success';
-  }
-
-  // Build annotations for failed stories
-  const annotations = extractAnnotations(state.stories);
-
-  // Final PATCH with conclusion
-  await updateCheckRun(state.owner, state.repo, state.checkRunId, state.workspaceId, {
-    status: 'completed',
-    conclusion,
-    completed_at: new Date().toISOString(),
-    output: {
-      title: `Pipeline Run #${runId} — ${conclusion}`,
-      summary: buildSummaryTable(state.stories),
-      text: buildOutputText(state.stories, runId),
-      annotations: annotations.length > 0 ? annotations : undefined,
-    },
-  });
-
-  // Emit completion WAL event
-  const walPayload = JSON.stringify({
-    run_id: runId,
-    check_run_id: state.checkRunId,
-    conclusion,
-    passed,
-    failed,
-    skipped,
-    total,
-  });
-  const walEvent = await queryOne<WalEvent>(
-    `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('check_run_completed', $1, 'github', $2) RETURNING *`,
-    [workspace_id, walPayload],
-  );
-  if (walEvent) broadcastAll(walEvent);
-
-  // Cleanup
-  activeCheckRuns.delete(runId);
-}
-
-// ─── WAL Event Router ───────────────────────────────────────────────────────
-
-const HANDLED_EVENTS = new Set([
-  'run_started',
-  'story_started',
-  'story_passed',
-  'story_failed',
-  'story_skipped',
-  'run_finished',
-]);
-
-async function handleWalEvent(event: WalEvent): Promise<void> {
-  if (!HANDLED_EVENTS.has(event.event_type)) return;
-
-  if (event.event_type === 'run_started') {
-    await handleRunStarted(event);
-  } else if (event.event_type === 'run_finished') {
-    await handleRunFinished(event);
-  } else {
-    await handleStoryEvent(event);
+export function resetCheckRunPosterForTests(): void {
+  scheduledRuns.clear();
+  if (reconcileTimer) {
+    clearInterval(reconcileTimer);
+    reconcileTimer = null;
   }
 }
 
-// ─── Startup ────────────────────────────────────────────────────────────────
-
-/**
- * Subscribe to WAL events and manage GitHub Check Runs for pipeline runs.
- * Call once at server startup.
- */
 export function startCheckRunPoster(): void {
-  subscribe((event: WalEvent) => {
-    handleWalEvent(event).catch((err) => {
-      // Never let check run errors break the event pipeline
-      logger.debug({ err }, '[CheckRun] Error handling WAL event');
-    });
+  subscribeDurable(async (event) => {
+    if (event.event_type !== 'run_started' && event.event_type !== 'run_finished') return;
+    const runId = await acceptCheckRunWalEvent(event);
+    if (runId) scheduleReconcile(runId);
   });
-  logger.info('[CheckRun] Check run poster subscribed to WAL events');
+  void reconcilePendingCheckRunProjections().catch(error =>
+    logger.warn({ error }, '[CheckRun] Startup projection reconciliation deferred'));
+  if (!reconcileTimer) {
+    reconcileTimer = setInterval(() => {
+      void reconcilePendingCheckRunProjections().catch(error =>
+        logger.warn({ error }, '[CheckRun] Periodic projection reconciliation deferred'));
+    }, RECONCILE_INTERVAL_MS);
+    reconcileTimer.unref?.();
+  }
+  logger.info('[CheckRun] Durable Check Run projector subscribed');
 }

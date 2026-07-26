@@ -76,9 +76,14 @@ export interface PiSessionDirectory {
   cleanup(): void;
 }
 
-export function createPiSessionDirectory(runId: number, storyId: string): PiSessionDirectory {
+export function createPiSessionDirectory(
+  runId: number,
+  storyId: string,
+  parentDirectory: string = os.tmpdir(),
+): PiSessionDirectory {
   const safeStory = storyId.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 80) || 'story';
-  const sessionPath = fs.mkdtempSync(path.join(os.tmpdir(), `rorca-pi-session-${runId}-${safeStory}-`));
+  fs.mkdirSync(parentDirectory, { recursive: true, mode: 0o700 });
+  const sessionPath = fs.mkdtempSync(path.join(parentDirectory, `rorca-pi-session-${runId}-${safeStory}-`));
   fs.chmodSync(sessionPath, 0o700);
   return {
     path: sessionPath,

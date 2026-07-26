@@ -105,15 +105,15 @@ describe('(1) SIGTERM guard in db/index.ts', () => {
     jest.resetModules();
   });
 
-  test('RORCA_PROCESS_ROLE=engine → process.on("SIGTERM") NOT called', () => {
+  test('RORCA_PROCESS_ROLE=engine → registered SIGTERM handler retains its runtime engine guard', () => {
     process.env.RORCA_PROCESS_ROLE = 'engine';
 
-    const registeredEvents: string[] = [];
+    const registeredListeners: Array<{ event: string; listener: (...args: any[]) => void }> = [];
     const onSpy = jest
       .spyOn(process, 'on')
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .mockImplementation(function (this: NodeJS.EventEmitter, event: string | symbol, listener: (...args: any[]) => void) {
-        if (typeof event === 'string') registeredEvents.push(event);
+        if (typeof event === 'string') registeredListeners.push({ event, listener });
         // Delegate to EventEmitter.prototype.on for correct return type
         return EventEmitter.prototype.on.call(this, event, listener) as NodeJS.Process;
       } as typeof process.on);
@@ -135,8 +135,10 @@ describe('(1) SIGTERM guard in db/index.ts', () => {
       require('../db/index');
     });
 
-    const sigtermCalls = registeredEvents.filter(e => e === 'SIGTERM');
-    expect(sigtermCalls).toHaveLength(0);
+    const sigtermCalls = registeredListeners.filter(({ event }) => event === 'SIGTERM');
+    expect(sigtermCalls).toHaveLength(1);
+    expect(String(sigtermCalls[0].listener)).toContain("RORCA_PROCESS_ROLE !== 'engine'");
+    expect(String(sigtermCalls[0].listener)).toContain("RORCA_PROCESS_ROLE !== 'worker'");
 
     onSpy.mockRestore();
   });

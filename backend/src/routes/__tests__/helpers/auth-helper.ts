@@ -18,9 +18,14 @@ export function buildTestAuthHeaders(user: { id: string; email: string }) {
   };
 }
 
-export async function getAuthToken(_app?: Express, overrides?: { email?: string; authId?: string }) {
+export async function getAuthToken(
+  _app?: Express,
+  overrides?: { email?: string; authId?: string; role?: string; displayName?: string },
+) {
   const email = overrides?.email ?? 'testauth@example.com';
   const authId = overrides?.authId ?? crypto.randomUUID();
+  const role = overrides?.role ?? 'admin';
+  const displayName = overrides?.displayName ?? (email === 'testauth@example.com' ? 'Auth Test User' : email.split('@')[0]);
 
   let row = await queryOne<{ id: string; auth_id: string | null }>(
     'SELECT id, auth_id FROM users WHERE email = $1',
@@ -30,16 +35,21 @@ export async function getAuthToken(_app?: Express, overrides?: { email?: string;
   if (!row) {
     await execute(
       `INSERT INTO users (id, email, display_name, auth_id, role, plan)
-       VALUES ($1, $2, $3, $4::uuid, 'user', 'free')`,
-      [crypto.randomUUID(), email, email.split('@')[0], authId],
+       VALUES ($1, $2, $3, $4::uuid, $5, 'free')`,
+      [crypto.randomUUID(), email, displayName, authId, role],
     );
     row = await queryOne<{ id: string; auth_id: string | null }>(
       'SELECT id, auth_id FROM users WHERE email = $1',
       [email],
     );
-  } else if (!row.auth_id) {
-    await execute('UPDATE users SET auth_id = $1::uuid WHERE id = $2', [authId, row.id]);
-    row = { ...row, auth_id: authId };
+  } else {
+    await execute(
+      `UPDATE users
+       SET auth_id = COALESCE(auth_id, $1::uuid), role = $2, display_name = $3, updated_at = NOW()
+       WHERE id = $4`,
+      [authId, role, displayName, row.id],
+    );
+    row = { ...row, auth_id: row.auth_id ?? authId };
   }
 
   const effectiveAuthId = row?.auth_id ?? authId;

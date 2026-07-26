@@ -7,9 +7,9 @@
 
 import { spawn } from 'child_process';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { detectPi } from './pi-detector';
+import { prepareAutonomousModelSandboxLaunch } from './autonomous-sandbox';
 
 export interface PiDraftUsage {
   inputTokens: number;
@@ -77,8 +77,8 @@ function buildPiForgeSkillMarkdown(): string {
   ].join('\n');
 }
 
-function writeForgeSkillFile(): string {
-  const filePath = path.join(os.tmpdir(), `rorca-pi-forge-skill-${Date.now()}-${process.pid}.md`);
+function writeForgeSkillFile(scratchDir: string): string {
+  const filePath = path.join(scratchDir, 'forge-skill.md');
   fs.writeFileSync(filePath, buildPiForgeSkillMarkdown(), { encoding: 'utf8', mode: 0o600 });
   return filePath;
 }
@@ -176,11 +176,18 @@ export async function draftSpecWithPi(opts: {
     throw new Error('Pi CLI not installed or not discoverable');
   }
 
-  const skillFile = writeForgeSkillFile();
+  const scratchDir = fs.mkdtempSync(path.join(opts.cwd, '.rorca-pi-draft-'));
+  const skillFile = writeForgeSkillFile(scratchDir);
   const args = ['--mode', 'rpc', '--no-session', ...(opts.model ? ['--model', opts.model] : []), '--skill', skillFile];
-  const child = spawn(status.piBinPath, args, {
+  const launch = await prepareAutonomousModelSandboxLaunch({
+    command: status.piBinPath,
+    args,
     cwd: opts.cwd,
-    env: { ...process.env },
+    env: Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+  });
+  const child = spawn(launch.command, launch.args, {
+    cwd: launch.cwd,
+    env: launch.env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -279,6 +286,6 @@ export async function draftSpecWithPi(opts: {
     setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already exited */ }
     }, 2000).unref();
-    try { fs.unlinkSync(skillFile); } catch { /* best effort */ }
+    fs.rmSync(scratchDir, { recursive: true, force: true });
   }
 }

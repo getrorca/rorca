@@ -17,7 +17,7 @@ Help decide the correct run scope and trigger the canonical run cleanly.
 2. determine whether full-spec, story-specific, or retry scope is appropriate
 3. validate workspace/spec/story identifiers
 4. inspect relevant status, model availability, and prior failure context when useful
-5. trigger the run through structured operations
+5. trigger the run through structured operations using the safe local defaults below
 6. return the canonical run id and summary
 
 ## When to reason more deeply
@@ -34,6 +34,9 @@ Do more operator reasoning when:
 - use retrieval tools (`rorca_recall`, `rorca_search`) when prior failures, conventions, or workspace gotchas may change run scope
 - use structured mutation for run triggering (`rorca_trigger_run` / `rorca_pipeline_trigger`)
 - if the trigger tool expects `specPath`, use `forge/specs/approved/<slug>.json`
+- ordinary execution defaults are `autoWorktree: true`, `autoMerge: false`, `mergeStrategy: branch-only`, `terminal_mode: ansi-html`, and `forceSequential: true`
+- never use `readinessOverride`; report a real readiness blocker instead
+- external PR/draft-PR delivery is a separate TaskManifest-authorized workflow, not an ordinary run option
 - prefer MCP or internal adapters where available
 - do not invent run ids or statuses
 

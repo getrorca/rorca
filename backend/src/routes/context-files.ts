@@ -72,6 +72,8 @@ function countWords(text: string): number {
  * @swagger
  * /api/workspaces/{id}/context-files:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List all registered context/intent files for a workspace
  *     operationId: listContextFiles
  *     description: Returns all well-known, config-registered, skill, and global routing context/intent files for the specified workspace.
@@ -199,6 +201,8 @@ router.get('/:id/context-files', requireWorkspaceMember(), async (req: Request, 
  * @swagger
  * /api/workspaces/{id}/context-files/read:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Read the content of a context/intent file
  *     operationId: readContextFile
  *     description: Reads and returns the content, word count, estimated token count, and metadata for a context/intent file within the workspace.
@@ -262,6 +266,8 @@ router.get('/:id/context-files/read', requireWorkspaceMember(), async (req: Requ
  * @swagger
  * /api/workspaces/{id}/context-files/write:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Write content to a context/intent file
  *     operationId: writeContextFile
  *     description: Writes the provided content to a context/intent file, creating parent directories if needed, and suppresses chokidar echo events.
@@ -332,6 +338,8 @@ router.put('/:id/context-files/write', requireWorkspaceAdmin(), async (req: Requ
  * @swagger
  * /api/workspaces/{id}/context-files/diff:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get git diff of a context file vs last committed version
  *     operationId: diffContextFile
  *     description: Returns the unified git diff and committed content for a context file compared against the HEAD revision.
@@ -411,37 +419,6 @@ router.get('/:id/context-files/diff', requireWorkspaceMember(), async (req: Requ
   }
 });
 
-// ─── Create New Skill File ───────────────────────────────────────────────────
-
-/**
- * @swagger
- * /api/workspaces/{id}/context-files/create-skill:
- *   post:
- *     summary: Create a new skill file in .rorca/skills/ with a default template
- *     operationId: createSkillFile
- *     description: Creates a new skill markdown file in the workspace .rorca/skills/ directory using the specified or blank template.
- *     tags: [Context Files]
- *     parameters:
- *       - name: id
- *         in: path
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               filename:
- *                 type: string
- *                 description: Filename without extension (e.g. "my-skill")
- *     responses:
- *       201:
- *         description: Skill file created
- *       409:
- *         description: File already exists
- */
 // ─── Skill Templates ──────────────────────────────────────────────────────────
 
 const SKILL_TEMPLATES: Record<string, string> = {
@@ -786,6 +763,8 @@ function requireRole(...roles: string[]) {
  *     tags: [Context Files]
  *     summary: Create a new skill file in .rorca/skills/
  *     operationId: createSkillFile
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Creating executable workspace skill instructions is an operator-owned mutation requiring workspace administration."
  *     description: >
  *       Creates a new skill markdown file at .rorca/skills/{filename}.md in the
  *       workspace directory. Optionally uses a predefined template. Returns the
@@ -909,6 +888,8 @@ router.post('/:id/context-files/create-skill', requireWorkspaceAdmin(), async (r
  * @swagger
  * /api/workspaces/{id}/context-files/skill-templates:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List available skill templates
  *     operationId: listSkillTemplates
  *     description: Returns the list of available skill template identifiers and their display labels.
@@ -931,6 +912,8 @@ router.get('/:id/context-files/skill-templates', requireWorkspaceMember(), (_req
  * @swagger
  * /api/workspaces/{id}/context-files/delete-skill:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Delete a skill file from .rorca/skills/
  *     operationId: deleteSkillFile
  *     description: Deletes a skill file from the workspace .rorca/skills/ directory and returns warnings if the skill is referenced in active routing scopes or tags.
@@ -1021,6 +1004,8 @@ router.delete('/:id/context-files/delete-skill', requireWorkspaceAdmin(), async 
  * @swagger
  * /api/workspaces/{id}/context-files/skill-usage:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get skill injection counts from recent WAL events
  *     operationId: getSkillUsageStats
  *     description: Queries WAL events to compute how many times each skill file was injected during recent pipeline runs.
@@ -1091,6 +1076,8 @@ router.get('/:id/context-files/skill-usage', requireWorkspaceMember(), async (re
  * @swagger
  * /api/workspaces/{id}/context-files/import-skill:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Import a skill file from a URL
  *     operationId: importSkillFromUrl
  *     description: Fetches markdown content from a remote URL and saves it as a new skill file in .rorca/skills/.
@@ -1204,6 +1191,8 @@ router.post('/:id/context-files/import-skill', requireWorkspaceAdmin(), async (r
  * @swagger
  * /api/workspaces/{id}/context-files/export-skill:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Export a skill file as downloadable .md
  *     operationId: exportSkillFile
  *     description: Returns a skill file as a downloadable markdown attachment with appropriate Content-Disposition headers.
@@ -1262,6 +1251,8 @@ router.get('/:id/context-files/export-skill', requireWorkspaceMember(), async (r
  * @swagger
  * /api/workspaces/{id}/context-files/skill-assignments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get scope and tag assignments for all skill files
  *     operationId: getSkillAssignments
  *     description: Returns a map of each skill file path to its assigned routing scopes and tags from the workspace .rorca/config.json.

@@ -7,7 +7,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { synthesize } from '../lib/direction-stack';
@@ -81,27 +81,6 @@ async function getTeamLayers(workspaceId: string): Promise<{ teamL1?: string; te
  *                 contentYaml: { type: string }
  *                 preferredModel: { type: string, nullable: true, description: "Only returned for L3" }
  *       400: { description: "Invalid layer" }
- *   put:
- *     tags: [Direction Stack]
- *     summary: Upsert a direction layer
- *     operationId: upsertDirectionLayer
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [layer, contentYaml]
- *             properties:
- *               layer: { type: integer, enum: [1, 2, 3] }
- *               workspaceId: { type: string }
- *               domain: { type: string }
- *               contentYaml: { type: string }
- *               preferredModel: { type: string, description: "Only valid for layer 3" }
- *     responses:
- *       200: { description: "Saved", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
- *       400: { description: "Missing fields or invalid layer" }
- *       422: { description: "Invalid YAML or schema validation error" }
  */
 router.get('/', authRequired, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -273,26 +252,35 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
       }
     }
 
-    // Upsert via INSERT ... ON CONFLICT (unique index on layer + workspace_id + domain + team_id)
-    await execute(`
-      INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, preferred_model, updated_at)
-      VALUES ($1, $2, $3, $4, $5, NOW())
-      ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
-      DO UPDATE SET content_yaml = EXCLUDED.content_yaml, preferred_model = EXCLUDED.preferred_model, updated_at = NOW()
-    `, [layer, workspaceId || null, domain || null, contentYaml, (layer === 3 ? preferredModel ?? null : null)]);
+    // Bind both the mutation and its WAL receipt to the request-scoped RLS
+    // identity. Ordinary users cannot race a membership check and then write
+    // through the owner pool; local/platform admins retain global L1/L2 authority.
+    await withUserClient(req, async (client) => {
+      await client.query('BEGIN');
+      try {
+        await client.query(`
+          INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, preferred_model, updated_at)
+          VALUES ($1, $2, $3, $4, $5, NOW())
+          ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
+          DO UPDATE SET content_yaml = EXCLUDED.content_yaml, preferred_model = EXCLUDED.preferred_model, updated_at = NOW()
+        `, [layer, workspaceId || null, domain || null, contentYaml, (layer === 3 ? preferredModel ?? null : null)]);
+        await client.query(
+          `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('direction_update', $1, $2)`,
+          [workspaceId || null, JSON.stringify({ layer, domain: domain || null, ...(preferredModel ? { preferredModel } : {}) })],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      }
+    });
 
-    // PG-013: Invalidate direction cache — global layers affect all workspaces
+    // PG-013: Invalidate direction cache only after the durable transaction.
     if (layer === 1 && !workspaceId) {
       invalidateDirection(); // Global L1 changed — invalidate all
     } else {
       invalidateDirection(workspaceId ? String(workspaceId) : undefined);
     }
-
-    // WAL event
-    await execute(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('direction_update', $1, $2)`,
-      [workspaceId || null, JSON.stringify({ layer, domain: domain || null, ...(preferredModel ? { preferredModel } : {}) })]
-    );
 
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -302,6 +290,8 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
  * @swagger
  * /api/direction/all:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: Fetch all direction layers for a workspace
  *     operationId: getAllDirectionLayers
@@ -364,6 +354,8 @@ router.get('/all', async (req: Request, res: Response, next: NextFunction) => {
  * @swagger
  * /api/direction/models:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: List supported LLM models
  *     operationId: listDirectionModels
@@ -499,6 +491,8 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
  * @swagger
  * /api/direction/models/test:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: Test a specific model by sending a minimal prompt
  *     operationId: testDirectionModel
@@ -596,6 +590,8 @@ router.post('/models/test', async (req: Request, res: Response, _next: NextFunct
  * @swagger
  * /api/direction/preview:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: Preview synthesized direction stack
  *     operationId: previewDirectionStack
@@ -802,6 +798,8 @@ router.post('/synthesize', async (req: Request, res: Response, next: NextFunctio
  * @swagger
  * /api/direction/wizard:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Direction Stack]
  *     summary: AI Setup Wizard for direction stack
  *     operationId: runDirectionWizard

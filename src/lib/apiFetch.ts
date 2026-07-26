@@ -5,6 +5,8 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { isBrowserProviderMutation } from '../../shared/contracts/provider-mutation-routes';
+
 // When served by Express (rorca start), use same-origin (empty base URL).
 // In dev mode (Vite on :5210), use the backend URL on :3030.
 export const BASE_URL = import.meta.env.VITE_API_URL
@@ -37,7 +39,34 @@ function notifyError(message: string) {
   errorListeners.forEach((fn) => fn(message));
 }
 
+const OPERATOR_CAPABILITY_HEADER = 'X-Rorca-Operator-Capability';
+const OPERATOR_CAPABILITY_LOCKED_EVENT = 'rorca:operator-capability-locked';
+let operatorCapability: string | null = null;
+
+export function setOperatorCapability(capability: string): void {
+  if (!capability || capability.length > 1024) {
+    throw new ApiError(400, 'OPERATOR_CAPABILITY_INVALID', 'Enter a valid operator capability');
+  }
+  operatorCapability = capability;
+}
+
+export function hasOperatorCapability(): boolean {
+  return operatorCapability !== null;
+}
+
+export function clearOperatorCapability(): void {
+  const wasUnlocked = operatorCapability !== null;
+  operatorCapability = null;
+  if (wasUnlocked) window.dispatchEvent(new CustomEvent(OPERATOR_CAPABILITY_LOCKED_EVENT));
+}
+
+export function onOperatorCapabilityLocked(listener: () => void): () => void {
+  window.addEventListener(OPERATOR_CAPABILITY_LOCKED_EVENT, listener);
+  return () => window.removeEventListener(OPERATOR_CAPABILITY_LOCKED_EVENT, listener);
+}
+
 export function dispatch401() {
+  clearOperatorCapability();
   window.dispatchEvent(new CustomEvent('rorca:auth-expired'));
 }
 
@@ -47,6 +76,7 @@ export async function getAccessToken(): Promise<string | null> {
 
 export function clearTokens(): void {
   csrfToken = null;
+  clearOperatorCapability();
 }
 
 const AUTH_BYPASS_PATHS = ['/api/auth/login', '/api/auth/refresh'];
@@ -129,14 +159,51 @@ async function getCsrfToken(forceRefresh = false): Promise<string> {
   return csrfTokenPromise;
 }
 
-export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: boolean }): Promise<T> {
-  return apiFetchInternal<T>(path, opts, false);
+type ApiFetchOptions = RequestInit & { silent?: boolean };
+
+export async function apiFetch<T>(path: string, opts?: ApiFetchOptions): Promise<T> {
+  return apiFetchInternal<T>(path, opts, false, null);
+}
+
+export async function apiFetchProviderMutation<T>(path: string, opts: ApiFetchOptions): Promise<T> {
+  const method = (opts.method || 'GET').toUpperCase();
+  if (!isBrowserProviderMutation(method, path)) {
+    throw new ApiError(400, 'NOT_PROVIDER_MUTATION', 'Operator capability may only be used for an approved provider mutation');
+  }
+  if (!operatorCapability) {
+    throw new ApiError(
+      428,
+      'OPERATOR_CAPABILITY_REQUIRED',
+      'Unlock provider changes with the local operator capability, then try again',
+    );
+  }
+  try {
+    return await apiFetchInternal<T>(path, opts, false, operatorCapability);
+  } catch (error) {
+    if (error instanceof ApiError && [401, 403, 503].includes(error.status)) {
+      clearOperatorCapability();
+      if (error.status === 503) {
+        throw new ApiError(
+          503,
+          'OPERATOR_CAPABILITY_NOT_CONFIGURED',
+          'Provider changes are disabled until the server operator configures RORCA_OPERATOR_CAPABILITY_SHA256',
+        );
+      }
+      throw new ApiError(
+        error.status,
+        'OPERATOR_CAPABILITY_REJECTED',
+        'Operator capability was rejected and cleared; unlock provider changes and try again',
+      );
+    }
+    throw error;
+  }
 }
 
 async function apiFetchInternal<T>(
   path: string,
-  opts: RequestInit & { silent?: boolean } | undefined,
+  opts: ApiFetchOptions | undefined,
   hasRetriedCsrf: boolean,
+  providerCapability: string | null,
 ): Promise<T> {
   const headers: Record<string, string> = {
     ...(opts?.headers as Record<string, string> | undefined),
@@ -145,6 +212,9 @@ async function apiFetchInternal<T>(
   const method = (opts?.method || 'GET').toUpperCase();
   if (STATE_CHANGING_METHODS.has(method)) {
     headers['X-CSRF-Token'] = await getCsrfToken();
+  }
+  if (providerCapability) {
+    headers[OPERATOR_CAPABILITY_HEADER] = providerCapability;
   }
 
   const res = await fetchWithRetry(`${BASE_URL}${path}`, { ...opts, headers, credentials: 'include' });
@@ -167,7 +237,7 @@ async function apiFetchInternal<T>(
     ) {
       csrfToken = null;
       await getCsrfToken(true);
-      return apiFetchInternal<T>(path, opts, true);
+      return apiFetchInternal<T>(path, opts, true, providerCapability);
     }
 
     if (res.status !== 429 && !opts?.silent) {

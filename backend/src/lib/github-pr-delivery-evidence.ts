@@ -25,12 +25,15 @@ import {
 } from './autonomous-delivery-policy';
 import { githubRateLimiter } from './github-rate-limiter';
 import { resolveWorkspaceGitHubToken } from './github-token-resolver';
+import { MANUAL_CHECK_NAME } from './github-checks';
+import { isFullGitObjectId, requireGithubRepositoryAuthority } from './github-repository-authority';
+import { fetchGithubWithTimeout } from './github-app-credential-provider';
 import { paginateQuery, type PaginatedResponse, type PaginationParams } from './paginate';
+import { withGithubRepositoryAuthorityLock } from './release-identity';
 
 export const GITHUB_PR_DELIVERY_EVIDENCE_SCHEMA_VERSION = 'rorca.github-pr-delivery-evidence.v1' as const;
 const MAX_PROVIDER_ITEMS = 500;
 const PER_PAGE = 100;
-const FULL_SHA = /^[0-9a-f]{40,64}$/;
 
 export interface DeliveryEvidencePrincipal {
   principalId: string;
@@ -94,6 +97,12 @@ export interface GithubPrDeliveryEvidence {
   specSlug: string;
   policy: { id: string; digest: string } | null;
   repository: { owner: string; name: string };
+  repositoryAuthority?: {
+    source: string;
+    bindingId: string | null;
+    installationId: number | null;
+    repositoryId: number | null;
+  };
   pullRequest: {
     number: number;
     url: string;
@@ -134,7 +143,15 @@ interface RunBindingRow {
   pr_number: number | string | null;
   repo_owner: string;
   repo_name: string;
-  auto_pr_target_branch: string;
+  release_base_branch: string;
+  release_base_sha: string;
+  release_head_ref: string | null;
+  release_authorized_sha: string;
+  repository_authority_source: string;
+  repository_binding_id: string | null;
+  repository_installation_id: number | string | null;
+  repository_id: number | string | null;
+  release_merge_strategy: string;
 }
 
 interface EvidenceRow {
@@ -171,6 +188,10 @@ interface EvidenceRow {
   observed_by_principal_id: string;
   observed_by_display_label: string;
   payload_hash: `sha256:${string}`;
+  repository_authority_source: string;
+  repository_binding_id: string | null;
+  repository_installation_id: number | string | null;
+  repository_id: number | string | null;
   created_at: string | Date;
   spec_slug?: string;
 }
@@ -193,6 +214,7 @@ interface GithubEvidenceDependencies {
   fetchJson: <T>(url: string, token: string) => Promise<T>;
   resolveToken: typeof resolveWorkspaceGitHubToken;
   getActivePolicy: typeof getActiveAutonomousDeliveryPolicy;
+  resolveAuthority: typeof requireGithubRepositoryAuthority;
   queryOne: typeof queryOne;
   query: typeof query;
   transaction: typeof transaction;
@@ -200,7 +222,7 @@ interface GithubEvidenceDependencies {
 }
 
 async function defaultFetchJson<T>(url: string, token: string): Promise<T> {
-  const response = await githubRateLimiter.execute(() => fetch(url, {
+  const response = await githubRateLimiter.execute(() => fetchGithubWithTimeout(fetch, url, {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: 'application/vnd.github+json',
@@ -220,6 +242,7 @@ const DEFAULT_DEPS: GithubEvidenceDependencies = {
   fetchJson: defaultFetchJson,
   resolveToken: resolveWorkspaceGitHubToken,
   getActivePolicy: getActiveAutonomousDeliveryPolicy,
+  resolveAuthority: requireGithubRepositoryAuthority,
   queryOne,
   query,
   transaction,
@@ -258,9 +281,9 @@ function safeProviderUrl(value: unknown): string | null {
   }
 }
 
-function normalizedSha(value: unknown, field: string): string {
-  const sha = boundedText(value, 64).toLowerCase();
-  if (!FULL_SHA.test(sha)) throw new ValidationError(`${field} must be a full Git commit SHA`, { field });
+export function normalizedSha(value: unknown, field: string): string {
+  const sha = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!isFullGitObjectId(sha)) throw new ValidationError(`${field} must be a full Git commit SHA`, { field });
   return sha;
 }
 
@@ -450,6 +473,12 @@ function mapEvidence(row: EvidenceRow, slug: string): GithubPrDeliveryEvidence {
     specSlug: row.spec_slug ?? slug,
     policy: row.policy_id && row.policy_digest ? { id: row.policy_id, digest: row.policy_digest } : null,
     repository: { owner: row.repo_owner, name: row.repo_name },
+    repositoryAuthority: {
+      source: row.repository_authority_source,
+      bindingId: row.repository_binding_id,
+      installationId: row.repository_installation_id == null ? null : Number(row.repository_installation_id),
+      repositoryId: row.repository_id == null ? null : Number(row.repository_id),
+    },
     pullRequest: {
       number: Number(row.pr_number), url: row.pr_url, state: row.pr_state, draft: row.draft,
       merged: row.merged, headRef: row.head_ref, baseRef: row.base_ref, headSha: row.head_sha,
@@ -481,7 +510,7 @@ function mapEvidence(row: EvidenceRow, slug: string): GithubPrDeliveryEvidence {
   };
 }
 
-export async function observeGithubPrDeliveryEvidence(
+async function observeGithubPrDeliveryEvidenceLocked(
   input: {
     workspaceId: string;
     runId: number;
@@ -493,20 +522,59 @@ export async function observeGithubPrDeliveryEvidence(
   if (!Number.isSafeInteger(input.runId) || input.runId <= 0) throw new ValidationError('runId must be a positive safe integer');
   const expectedHeadSha = normalizedSha(input.expectedHeadSha, 'expectedHeadSha');
   const deps = { ...DEFAULT_DEPS, ...overrides };
+  const authority = await deps.resolveAuthority(input.workspaceId);
   const run = await deps.queryOne<RunBindingRow>(
     `SELECT r.id, r.workspace_id, r.spec_path, r.branch_name, r.pr_number,
-            g.repo_owner, g.repo_name, g.auto_pr_target_branch
+            i.repository_owner AS repo_owner, i.repository_name AS repo_name,
+            i.base_branch AS release_base_branch,
+            i.base_sha AS release_base_sha,
+            i.provider_release_ref AS release_head_ref,
+            i.authorized_sha AS release_authorized_sha,
+            i.repository_authority_source,
+            i.repository_binding_id,
+            i.repository_installation_id,
+            i.repository_id,
+            i.merge_strategy AS release_merge_strategy
        FROM pipeline_runs r
-       JOIN workspace_github_webhooks g ON g.workspace_id = r.workspace_id
+       JOIN pipeline_run_release_intents i
+         ON i.run_id = r.id AND i.workspace_id = r.workspace_id
       WHERE r.id = $1 AND r.workspace_id = $2`,
     [input.runId, input.workspaceId],
   );
   if (!run) throw new NotFoundError('GitHub-bound pipeline run', String(input.runId));
   if (!run.pr_number) throw new UnprocessableError('Run has no canonical pull request binding', 'PR_BINDING_REQUIRED');
   if (!run.branch_name) throw new UnprocessableError('Run has no canonical branch binding', 'BRANCH_BINDING_REQUIRED');
+  if (!run.release_head_ref) throw new UnprocessableError('Run has no immutable provider release ref', 'PR_HEAD_BINDING_REQUIRED');
+  if (run.release_authorized_sha.toLowerCase() !== expectedHeadSha) {
+    throw new ConflictError('Requested evidence SHA differs from immutable release authority');
+  }
+  const authorityMatches = authority.owner.toLowerCase() === run.repo_owner.toLowerCase()
+    && authority.name.toLowerCase() === run.repo_name.toLowerCase()
+    && authority.source === run.repository_authority_source
+    && (authority.bindingId ?? null) === (run.repository_binding_id ?? null)
+    && Number(authority.installationId ?? 0) === Number(run.repository_installation_id ?? 0)
+    && Number(authority.repositoryId ?? 0) === Number(run.repository_id ?? 0);
+  if (!authorityMatches) throw new ConflictError('Current GitHub authority differs from immutable run release authority');
 
-  const token = await deps.resolveToken(input.workspaceId);
+  const token = await deps.resolveToken(input.workspaceId, {
+    repository: { owner: run.repo_owner, name: run.repo_name },
+    purpose: 'reviewed-delivery',
+  });
   if (!token) throw new UnprocessableError('Workspace GitHub credential is unavailable', 'GITHUB_CREDENTIAL_UNAVAILABLE');
+  if (run.repository_authority_source === 'github-app-installation') {
+    const metadata = token.source === 'github-app-installation' && token.metadata && 'bindingId' in token.metadata
+      ? token.metadata : null;
+    if (!metadata
+      || metadata.bindingId !== run.repository_binding_id
+      || Number(metadata.installationId) !== Number(run.repository_installation_id)
+      || Number(metadata.repositoryId) !== Number(run.repository_id)
+      || metadata.repository.owner.toLowerCase() !== run.repo_owner.toLowerCase()
+      || metadata.repository.name.toLowerCase() !== run.repo_name.toLowerCase()) {
+      throw new ConflictError('Resolved GitHub App credential differs from immutable run release authority');
+    }
+  } else if (token.source === 'github-app-installation') {
+    throw new ConflictError('Resolved GitHub credential source differs from immutable run release authority');
+  }
   const owner = run.repo_owner;
   const repo = run.repo_name;
   const prNumber = Number(run.pr_number);
@@ -514,14 +582,19 @@ export async function observeGithubPrDeliveryEvidence(
   const headSha = normalizedSha(pr.head?.sha, 'pullRequest.head.sha');
   const baseSha = normalizedSha(pr.base?.sha, 'pullRequest.base.sha');
   const providerRepo = boundedText(pr.head?.repo?.full_name, 512).toLowerCase();
-  if (providerRepo && providerRepo !== `${owner}/${repo}`.toLowerCase()) {
-    throw new ConflictError('Pull request repository does not match the workspace GitHub binding');
+  const providerBaseRepo = boundedText(pr.base?.repo?.full_name, 512).toLowerCase();
+  if (providerRepo !== `${owner}/${repo}`.toLowerCase()
+    || providerBaseRepo !== `${owner}/${repo}`.toLowerCase()) {
+    throw new ConflictError('Pull request repository does not match immutable release authority');
   }
   const expectedPrUrl = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
   if (pr.html_url !== expectedPrUrl) throw new ConflictError('GitHub returned an unexpected pull request URL');
   if (pr.number !== prNumber) throw new ConflictError('GitHub returned a different pull request identity');
-  if (pr.head.ref !== run.branch_name) throw new ConflictError('Pull request head branch does not match the canonical run branch');
-  if (pr.base.ref !== run.auto_pr_target_branch) throw new ConflictError('Pull request base branch does not match the canonical workspace target branch');
+  if (pr.head.ref !== run.release_head_ref) throw new ConflictError('Pull request head branch does not match the immutable provider release ref');
+  if (pr.base.ref !== run.release_base_branch) throw new ConflictError('Pull request base branch does not match the immutable run release intent');
+  if (baseSha !== normalizedSha(run.release_base_sha, 'releaseIntent.baseSha')) throw new ConflictError('Pull request base SHA does not match the immutable run release intent');
+  const expectedDraft = run.release_merge_strategy === 'draft-pr';
+  if (typeof pr.draft !== 'boolean' || pr.draft !== expectedDraft) throw new ConflictError('Pull request draft posture is missing or differs from immutable release intent');
   if (headSha !== expectedHeadSha) {
     throw new ConflictError('Pull request head SHA changed; observe again using the current immutable SHA', {
       expectedHeadSha,
@@ -580,7 +653,11 @@ export async function observeGithubPrDeliveryEvidence(
     observedAt: iso(check.completed_at ?? check.started_at),
     app: check.app?.slug ? boundedText(check.app.slug, 100) : null,
   }));
-  const statuses = statusPage.items.map<NormalizedGithubCheck>((status) => ({
+  // Operator-written manual statuses are deliberately non-governing even if a
+  // standing policy is misconfigured to name their fixed context.
+  const statuses = statusPage.items
+    .filter((status) => boundedText(status.context, 200) !== MANUAL_CHECK_NAME)
+    .map<NormalizedGithubCheck>((status) => ({
     source: 'commit_status',
     id: String(status.id),
     name: boundedText(status.context, 200),
@@ -601,7 +678,7 @@ export async function observeGithubPrDeliveryEvidence(
   const reviews = reviewPage.items
     .filter((review) => Boolean(review.user?.login))
     .map<NormalizedGithubReview>((review) => {
-      const commitSha = review.commit_id && FULL_SHA.test(review.commit_id.toLowerCase()) ? review.commit_id.toLowerCase() : null;
+      const commitSha = isFullGitObjectId(review.commit_id) ? review.commit_id.toLowerCase() : null;
       return {
         id: String(review.id),
         reviewer: boundedText(review.user?.login, 100),
@@ -635,10 +712,16 @@ export async function observeGithubPrDeliveryEvidence(
     specSlug: specSlug(run.spec_path),
     policy: policy ? { id: policy.id, digest: policy.policyDigest } : null,
     repository: { owner, name: repo },
+    repositoryAuthority: {
+      source: run.repository_authority_source,
+      bindingId: run.repository_binding_id,
+      installationId: run.repository_installation_id == null ? null : Number(run.repository_installation_id),
+      repositoryId: run.repository_id == null ? null : Number(run.repository_id),
+    },
     pullRequest: {
       number: prNumber, url: pr.html_url, state: pr.state, draft: Boolean(pr.draft), merged: Boolean(pr.merged),
       headRef: pr.head.ref, baseRef: pr.base.ref, headSha, baseSha,
-      mergeCommitSha: finalPr.merge_commit_sha && FULL_SHA.test(finalPr.merge_commit_sha.toLowerCase()) ? finalPr.merge_commit_sha.toLowerCase() : null,
+      mergeCommitSha: isFullGitObjectId(finalPr.merge_commit_sha) ? finalPr.merge_commit_sha.toLowerCase() : null,
       mergeable: typeof finalPr.mergeable === 'boolean' ? finalPr.mergeable : null,
       mergeableState: boundedText(finalPr.mergeable_state || 'unknown', 64),
     },
@@ -668,10 +751,11 @@ export async function observeGithubPrDeliveryEvidence(
          merge_commit_sha, mergeable, mergeable_state, comparison_status, ahead_by, behind_by,
          branch_fresh, checks, checks_truncated, reviews, reviews_truncated, check_summary,
          review_summary, provider_observed_at, observed_by_principal_id,
-         observed_by_display_label, payload_hash)
+         observed_by_display_label, payload_hash, repository_authority_source,
+         repository_binding_id, repository_installation_id, repository_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
                $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26::jsonb, $27,
-               $28::jsonb, $29::jsonb, $30, $31, $32, $33)
+               $28::jsonb, $29::jsonb, $30, $31, $32, $33, $34, $35, $36, $37)
        ON CONFLICT (workspace_id, repo_owner, repo_name, pr_number, head_sha, payload_hash)
        DO NOTHING
        RETURNING *`,
@@ -681,7 +765,9 @@ export async function observeGithubPrDeliveryEvidence(
         stablePayload.pullRequest.mergeableState, comparisonStatus, aheadBy, behindBy, branchFresh,
         JSON.stringify(checks), checksTruncated, JSON.stringify(reviews), reviewPage.truncated,
         JSON.stringify(checkSummary), JSON.stringify(reviewSummary), providerObservedAt,
-        input.principal.principalId, input.principal.displayLabel, payloadHash],
+        input.principal.principalId, input.principal.displayLabel, payloadHash,
+        run.repository_authority_source, run.repository_binding_id,
+        run.repository_installation_id, run.repository_id],
     );
     if (!inserted.rows[0]) {
       const raced = await client.query<EvidenceRow>(
@@ -706,6 +792,13 @@ export async function observeGithubPrDeliveryEvidence(
     );
     return { evidence: mapEvidence({ ...inserted.rows[0], spec_slug: specSlug(run.spec_path) }, specSlug(run.spec_path)), replayed: false };
   });
+}
+
+export async function observeGithubPrDeliveryEvidence(
+  input: Parameters<typeof observeGithubPrDeliveryEvidenceLocked>[0],
+  overrides: Parameters<typeof observeGithubPrDeliveryEvidenceLocked>[1] = {},
+): ReturnType<typeof observeGithubPrDeliveryEvidenceLocked> {
+  return withGithubRepositoryAuthorityLock(input.workspaceId, '', '', () => observeGithubPrDeliveryEvidenceLocked(input, overrides));
 }
 
 export async function getGithubPrDeliveryEvidenceById(

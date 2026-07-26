@@ -54,8 +54,6 @@
     "POST /api/memory/relations",
     "POST /api/memory/review/{id}/action",
     "POST /api/pipeline/runs/{runId}/cancel",
-    "POST /api/pipeline/runs/{runId}/input",
-    "POST /api/pipeline/runs/{runId}/pty/resize",
     "POST /api/pipeline/runs/{runId}/retry",
     "POST /api/pipeline/trigger",
     "POST /api/spec-jobs/{jobId}/cancel",
@@ -137,6 +135,8 @@
     "GET /api/context-capture/{workspaceId}/stream",
     "GET /api/context/candidates/{id}/preview",
     "GET /api/graph/retrieval-telemetry",
+    "GET /api/pipeline/runs/{runId}/pty/checkpoints/{checkpointId}",
+    "GET /api/pipeline/runs/{runId}/pty/control",
     "PATCH /api/context-capture/distillation/{workspaceId}/config",
     "PATCH /api/context-capture/{workspaceId}/policy",
     "POST /api/admin/age-recheck",
@@ -153,6 +153,8 @@
     "POST /api/context-capture/{workspaceId}/pause",
     "POST /api/context-capture/{workspaceId}/resume",
     "POST /api/context-capture/{workspaceId}/uninstall",
-    "POST /api/graph/populate"
+    "POST /api/graph/populate",
+    "POST /api/pipeline/runs/{runId}/input",
+    "POST /api/pipeline/runs/{runId}/pty/resize"
   ]
 }

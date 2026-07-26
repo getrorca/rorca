@@ -12,6 +12,7 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
+import { clearTokens } from '../lib/apiFetch';
 
 export interface LocalAuthUser {
   id: string;
@@ -44,7 +45,9 @@ const AuthCtx = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
-    // Local-first OSS mode intentionally keeps the operator attached.
+    // Local-first OSS mode keeps the operator attached, but every explicit
+    // sign-out still locks any in-memory provider-mutation capability.
+    clearTokens();
   }, []);
 
   const value = useMemo<AuthContextValue>(() => ({

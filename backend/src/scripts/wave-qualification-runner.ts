@@ -7,6 +7,7 @@ import * as path from 'path';
 import { pathToFileURL } from 'url';
 import PgBoss from 'pg-boss';
 import { Pool } from 'pg';
+import { getPgBossSchemaName } from '../lib/pg-boss-schema';
 import {
   activateQualificationBoundary,
   buildQualificationEvidence,
@@ -57,7 +58,7 @@ async function main(): Promise<void> {
       boundary: Object.freeze({ ...boundary }),
       async createQueue(purpose: string): Promise<string> {
         if (!boss) {
-          boss = new PgBoss({ connectionString: databaseUrl, schema: 'pgboss' });
+          boss = new PgBoss({ connectionString: databaseUrl, schema: getPgBossSchemaName() });
           await boss.start();
         }
         const queue = await createQualificationQueue(boss, boundary!, purpose);

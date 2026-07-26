@@ -105,6 +105,7 @@ export async function getCheckpointAttestationReference(input: CheckpointAttesta
   attestationId: string;
   attestationDigest: string;
   validationGate: string;
+  passedAt: string;
   expiresAt: string;
 } | undefined> {
   const parsed = checkpointAttestationLookupSchema.parse(input);
@@ -112,9 +113,10 @@ export async function getCheckpointAttestationReference(input: CheckpointAttesta
     id: string;
     evidence_digest: string;
     validation_gate: string;
+    passed_at: string;
     expires_at: string;
   }>(
-    `SELECT id, evidence_digest, validation_gate, expires_at
+    `SELECT id, evidence_digest, validation_gate, passed_at, expires_at
        FROM checkpoint_validation_attestations
       WHERE workspace_id = $1 AND run_id = $2 AND story_id = $3
         AND branch_name = $4 AND checkpoint_sha = $5
@@ -127,6 +129,7 @@ export async function getCheckpointAttestationReference(input: CheckpointAttesta
     attestationId: row.id,
     attestationDigest: row.evidence_digest,
     validationGate: row.validation_gate,
+    passedAt: new Date(row.passed_at).toISOString(),
     expiresAt: new Date(row.expires_at).toISOString(),
   } : undefined;
 }

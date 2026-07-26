@@ -64,7 +64,7 @@ describe('retryRun', () => {
 });
 
 describe('triggerPipeline', () => {
-  it('omits terminal_mode when callers do not explicitly request a terminal mode', async () => {
+  it('applies the safe local execution profile when callers omit run controls', async () => {
     mockApiFetch.mockResolvedValue({ ok: true, runId: 1 });
 
     await triggerPipeline({
@@ -76,6 +76,10 @@ describe('triggerPipeline', () => {
     expect(JSON.parse((opts as RequestInit).body as string)).toEqual({
       specPath: 'forge/specs/approved/example.json',
       workspaceId: 'ws-1',
+      autoWorktree: true,
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      terminal_mode: 'ansi-html',
     });
   });
 

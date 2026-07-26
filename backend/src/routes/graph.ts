@@ -23,6 +23,7 @@ import {
 } from '../lib/retrieval-telemetry';
 import { listRetrievalFeedback, summarizeRetrievalFeedback } from '../lib/retrieval-feedback';
 import { getAgeUnavailableBody } from '../lib/age-guard';
+import { RORCA_GRAPH_NAME } from '../lib/graph-contract';
 import { describeRuntimeGraph, getRuntimeGraphCapability } from '../lib/graph-runtime';
 import { ForbiddenError, ValidationError } from '../lib/errors';
 import { invalidateGraphContextCacheForWorkspace } from '../lib/graph-context';
@@ -152,7 +153,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
         runtime,
         vertexCount: 0,
         edgeCount: 0,
-        graphName: 'rorca',
+        graphName: RORCA_GRAPH_NAME,
         lastPopulatedAt: null,
       };
       return res.json(result);
@@ -171,7 +172,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
       runtime,
       vertexCount: stats.vertexCount,
       edgeCount: stats.edgeCount,
-      graphName: 'rorca',
+      graphName: RORCA_GRAPH_NAME,
       lastPopulatedAt: lastEvent?.ts ?? null,
     };
 
@@ -348,8 +349,9 @@ router.post('/populate', async (req: Request, res: Response, next: NextFunction)
     for (const slug of specSlugs) {
       const sv = await queryOne<{ spec_slug: string; content_json: unknown }>(
         `SELECT spec_slug, content_json FROM spec_versions
-         WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`,
-        [slug],
+         WHERE workspace_id = $1 AND spec_slug = $2
+         ORDER BY version DESC LIMIT 1`,
+        [workspaceId, slug],
       );
       if (sv) approvedSpecs.push(sv);
     }

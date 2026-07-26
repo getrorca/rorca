@@ -40,14 +40,16 @@ interface PreferenceRow {
   id: string;
   user_id: string;
   event_type: string;
-  in_app: number;
-  email: number;
+  in_app: boolean;
+  email: boolean;
 }
 
 /**
  * @swagger
  * /api/notifications:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Notifications]
  *     summary: List notifications
  *     operationId: listNotifications
@@ -135,6 +137,8 @@ router.get('/', async (req, res) => {
  * @swagger
  * /api/notifications/unread-count:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Notifications]
  *     summary: Get unread notification count
  *     operationId: getUnreadNotificationCount
@@ -164,6 +168,8 @@ router.get('/unread-count', async (req, res) => {
  * @swagger
  * /api/notifications/{id}/read:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Notifications]
  *     summary: Mark notification as read
  *     operationId: markNotificationRead
@@ -201,6 +207,8 @@ router.post('/:id/read', async (req, res) => {
  * @swagger
  * /api/notifications/read-all:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Notifications]
  *     summary: Mark all notifications as read
  *     operationId: markAllNotificationsRead
@@ -229,6 +237,8 @@ router.post('/read-all', async (req, res) => {
  * @swagger
  * /api/notifications/{id}:
  *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Notifications]
  *     summary: Delete a notification
  *     operationId: deleteNotification
@@ -268,6 +278,8 @@ router.delete('/:id', async (req, res) => {
  * @swagger
  * /api/notifications/preferences:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Notifications]
  *     summary: Get notification preferences
  *     operationId: getNotificationPreferences
@@ -311,6 +323,8 @@ router.get('/preferences', async (req, res) => {
  * @swagger
  * /api/notifications/preferences:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     tags: [Notifications]
  *     summary: Update notification preferences
  *     operationId: updateNotificationPreferences
@@ -363,8 +377,8 @@ router.put('/preferences', async (req, res) => {
           crypto.randomUUID(),
           user.id,
           eventType,
-          pref.inApp ? 1 : 0,
-          pref.email ? 1 : 0,
+          pref.inApp,
+          pref.email,
         ],
       );
     }
@@ -383,7 +397,7 @@ export async function createNotification(
   link?: string,
 ): Promise<string> {
   // Check user preferences — skip if in_app disabled
-  const pref = await queryOne<{ in_app: number }>(
+  const pref = await queryOne<{ in_app: boolean }>(
     'SELECT in_app FROM notification_preferences WHERE user_id = $1 AND event_type = $2',
     [userId, type],
   );

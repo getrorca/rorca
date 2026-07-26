@@ -2215,9 +2215,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [apiDone, setApiDone] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Quick run
-  const [isQuickRunning, setIsQuickRunning] = useState(false);
-
   // Template picker
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
@@ -2409,7 +2406,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   }, []);
 
   const canGenerate = !specNameError && specBrief.length > 0;
-  const canQuickRun = specBrief.trim().length > 0 && !!workspaceId;
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
@@ -2514,29 +2510,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     setApiDone(false);
     // Defer so state clears, then call generate
     setTimeout(() => handleGenerate(), 0);
-  };
-
-  const handleQuickRun = async () => {
-    if (!canQuickRun || isQuickRunning) return;
-    setIsQuickRunning(true);
-    try {
-      const res = await apiFetch<{ runId?: number; specId?: string; conflict?: boolean; activeRunId?: number }>(
-        '/api/pipeline/quick-run',
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, brief: specBrief.trim(), model: selectedModel || undefined }) },
-      );
-      if (res.conflict) {
-        showToast('Another run is active in this workspace', 'error');
-        if (res.activeRunId && onNavigateToRun) onNavigateToRun(res.activeRunId);
-      } else if (res.runId) {
-        showToast('Quick run started', 'success');
-        onClose();
-        if (onNavigateToRun) onNavigateToRun(res.runId);
-      }
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Quick run failed', 'error');
-    } finally {
-      setIsQuickRunning(false);
-    }
   };
 
   const handleAutoDetect = async (dot: typeof CONTEXT_DOTS[number]) => {
@@ -2949,24 +2922,16 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
         </div>
       )}
 
-      {/* Generate + Quick Run buttons */}
+      {/* Canonical spec generation; execution starts only after review/approval. */}
       {(!generatedSpec || isGenerating) && (
         <div className="space-y-2">
           {isGenerating || (generateError && !generatedSpec) ? (
             <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} model={selectedModel || defaultModelId || 'claude-sonnet-4-6'} provider={activeProvider} hasAttachments={pendingAttachments.length > 0 || savedAttachments.length > 0} />
           ) : !generatedSpec ? (
-            <>
-              <button onClick={handleGenerate} disabled={!canGenerate || isGenerating}
-                className={`w-full py-2.5 rounded-lg text-sm font-medium transition-colors ${canGenerate && !isGenerating ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer' : 'bg-accent/30 text-white/40 cursor-not-allowed'}`}>
-                Generate Spec
-              </button>
-              {canQuickRun && (
-                <button onClick={handleQuickRun} disabled={isQuickRunning || isGenerating}
-                  className={`w-full py-2 rounded-lg text-sm font-medium transition-colors border ${isQuickRunning || isGenerating ? 'bg-panel/50 border-border/50 text-muted/40 cursor-not-allowed' : 'bg-panel border-border text-text hover:bg-accent/10 hover:border-accent/30 cursor-pointer'}`}>
-                  {isQuickRunning ? 'Generating & running...' : 'Quick Run'}
-                </button>
-              )}
-            </>
+            <button onClick={handleGenerate} disabled={!canGenerate || isGenerating}
+              className={`w-full py-2.5 rounded-lg text-sm font-medium transition-colors ${canGenerate && !isGenerating ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer' : 'bg-accent/30 text-white/40 cursor-not-allowed'}`}>
+              Generate Spec
+            </button>
           ) : null}
         </div>
       )}

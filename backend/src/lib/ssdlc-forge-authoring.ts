@@ -12,6 +12,7 @@
 
 import crypto from 'node:crypto';
 import { z } from 'zod';
+import { ProviderHumanEventSchema } from './provider-human-authority';
 import { execute, queryOne } from '../db/index';
 import { UnprocessableError, ValidationError } from './errors';
 import {
@@ -78,10 +79,7 @@ export const AuthoringConfirmationRequestSchema = z.object({
   acceptedPlanHash: Sha256Schema,
   acceptedPreflightHash: Sha256Schema,
   confirmed: z.literal(true),
-  actor: z.object({
-    type: z.literal('human'),
-    identity: CallerSurfaceSchema,
-  }).strict(),
+  attestation: ProviderHumanEventSchema.optional(),
 }).strict();
 
 export const PersistAuthoringBindingSchema = z.object({
@@ -126,6 +124,23 @@ export interface LifecycleAuthoringSection {
   requiredPhaseObligations: AuthoringPlan['lifecycleProfile']['phaseContributions'];
   requiredStoryCapabilities: StoryCapability[];
   evidenceExpectations: Array<{ phaseId: string; gateIds: string[]; expectation: string }>;
+  draftScaffold: {
+    schemaVersion: 'authoring-draft-scaffold.v1';
+    planHash: string;
+    recommendedTotalStoryCount: number;
+    boundaries: Array<{
+      specReference: string;
+      slugSeed: string;
+      storySlots: Array<{
+        slotId: string;
+        requirementReferences: string[];
+        capabilities: StoryCapability[];
+        phaseIds: string[];
+        gateIds: string[];
+        evidenceExpectations: string[];
+      }>;
+    }>;
+  };
   wordingRules: {
     modelOwnsReadableProse: true;
     requireObservableAcceptanceCriteria: true;
@@ -279,6 +294,7 @@ export function buildLifecycleAuthoringSection(input: {
       diagnostics: planned.diagnostics,
     });
   }
+  const acceptedPlan = planned.acceptedPlan;
 
   return {
     schemaVersion: SSDLC_AUTHORING_SCHEMA_VERSION,
@@ -303,6 +319,23 @@ export function buildLifecycleAuthoringSection(input: {
       gateIds: phase.gateIds,
       expectation: phase.evidenceExpectation,
     })),
+    draftScaffold: {
+      schemaVersion: 'authoring-draft-scaffold.v1',
+      planHash: acceptedPlan.acceptedPlanHash,
+      recommendedTotalStoryCount: Math.max(1, Math.min(20, acceptedPlan.lifecycleProfile.phaseContributions.length)),
+      boundaries: acceptedPlan.specBoundaries.map((boundary) => ({
+        specReference: boundary.specReference,
+        slugSeed: boundary.slugSeed,
+        storySlots: [{
+          slotId: `${boundary.specReference}:slot:1`,
+          requirementReferences: [...new Set([...boundary.ownedRequirementReferences, ...boundary.referencedRequirementReferences])],
+          capabilities: acceptedPlan.requiredStoryCapabilities,
+          phaseIds: acceptedPlan.lifecycleProfile.phaseContributions.map((phase) => phase.phaseId),
+          gateIds: [...new Set(acceptedPlan.lifecycleProfile.phaseContributions.flatMap((phase) => phase.gateIds))],
+          evidenceExpectations: acceptedPlan.lifecycleProfile.phaseContributions.map((phase) => phase.evidenceExpectation),
+        }],
+      })),
+    },
     wordingRules: {
       modelOwnsReadableProse: true,
       requireObservableAcceptanceCriteria: true,

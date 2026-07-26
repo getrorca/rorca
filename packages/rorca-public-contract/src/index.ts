@@ -97,9 +97,12 @@ export interface RouteChangeSet {
 
 export interface BreakMarker {
   line: string;
+  version: 1 | 2;
   date: string;
   method: HttpMethod;
   path: string;
+  beforeHash: string | null;
+  afterIdentity: string | null;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -485,17 +488,20 @@ export function snapshotRoutesEqual(
 
 export function parseBreakMarkers(markdown: string): BreakMarker[] {
   const markers: BreakMarker[] = [];
-  const regex = /^<!-- contract-break: (\d{4}-\d{2}-\d{2}) ([A-Z]+) (.+) -->$/gm;
-
-  for (const match of markdown.matchAll(regex)) {
+  const legacy = /^<!-- contract-break: (\d{4}-\d{2}-\d{2}) ([A-Z]+) (\S+) -->$/gm;
+  for (const match of markdown.matchAll(legacy)) {
     markers.push({
-      line: match[0],
-      date: match[1],
-      method: match[2] as HttpMethod,
-      path: match[3],
+      line: match[0], version: 1, date: match[1], method: match[2] as HttpMethod,
+      path: match[3], beforeHash: null, afterIdentity: null,
     });
   }
-
+  const exact = /^<!-- contract-break-v2: (\d{4}-\d{2}-\d{2}) ([A-Z]+) (\S+) (sha256:[a-f0-9]{64}) (sha256:[a-f0-9]{64}|removed|public-flag-removed) -->$/gm;
+  for (const match of markdown.matchAll(exact)) {
+    markers.push({
+      line: match[0], version: 2, date: match[1], method: match[2] as HttpMethod,
+      path: match[3], beforeHash: match[4], afterIdentity: match[5],
+    });
+  }
   return markers;
 }
 
@@ -524,18 +530,20 @@ export function isMarkerActive(marker: BreakMarker, referenceDate: Date): boolea
   if (Number.isNaN(markerDate.getTime())) {
     return false;
   }
-  return daysBetween(referenceDate, markerDate) <= 30;
+  const age = daysBetween(referenceDate, markerDate);
+  return age >= 0 && age <= 30;
 }
 
 export function resolveMarkersForChanges(
   changes: RouteChangeSet,
   markers: BreakMarker[],
   referenceDate: Date,
+  baseMarkerLines: ReadonlySet<string> = new Set(),
 ): { covered: string[]; uncovered: string[]; expired: string[] } {
   const relevantBreaks = [
-    ...changes.removed.map(route => ({ method: route.method, path: route.path })),
-    ...changes.downgraded.map(route => ({ method: route.method, path: route.path })),
-    ...changes.changed.map(route => ({ method: route.before.method, path: route.before.path })),
+    ...changes.removed.map(route => ({ method: route.method, path: route.path, beforeHash: route.hash, afterIdentity: 'removed' })),
+    ...changes.downgraded.map(route => ({ method: route.method, path: route.path, beforeHash: route.before.hash, afterIdentity: 'public-flag-removed' })),
+    ...changes.changed.map(route => ({ method: route.before.method, path: route.before.path, beforeHash: route.before.hash, afterIdentity: route.after.hash })),
   ];
 
   const covered: string[] = [];
@@ -544,7 +552,11 @@ export function resolveMarkersForChanges(
 
   for (const breaking of relevantBreaks) {
     const key = methodPathKey(breaking.method, breaking.path);
-    const matchingMarkers = markers.filter(marker => marker.method === breaking.method && marker.path === breaking.path);
+    const routeMarkers = markers.filter(marker => marker.method === breaking.method && marker.path === breaking.path);
+    const matchingMarkers = routeMarkers.filter(marker => marker.version === 2
+      && !baseMarkerLines.has(marker.line)
+      && marker.beforeHash === breaking.beforeHash
+      && marker.afterIdentity === breaking.afterIdentity);
     const activeMarker = matchingMarkers.find(marker => isMarkerActive(marker, referenceDate));
 
     if (activeMarker) {
@@ -552,7 +564,11 @@ export function resolveMarkersForChanges(
       continue;
     }
 
-    if (matchingMarkers.length > 0) {
+    const historicalMarker = matchingMarkers.some(marker => {
+      const markerDate = new Date(`${marker.date}T00:00:00Z`);
+      return !Number.isNaN(markerDate.getTime()) && markerDate.getTime() <= referenceDate.getTime();
+    });
+    if (historicalMarker) {
       expired.push(key);
       continue;
     }

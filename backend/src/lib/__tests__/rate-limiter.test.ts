@@ -5,9 +5,6 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from '../../routes/__tests__/helpers/auth-helper';
@@ -18,22 +15,14 @@ jest.setTimeout(90_000);
 let app: Express;
 let query: typeof import('../../db/index').query;
 let execute: typeof import('../../db/index').execute;
-let tmpDir: string;
 let authToken: string;
+const secondaryEmail = `rate-limit-user-${process.pid}@example.com`;
 
-beforeEach(async () => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-ratelimit-test-'));
-process.env.NODE_ENV = 'test';
-  process.env.RATE_LIMIT_ENABLED = 'true';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-  const dbMod = require('../../db/index');
-  query = dbMod.query;
-  execute = dbMod.execute;
-
-  // Re-seed rate_limits defaults (truncated by global teardown; migrations skip re-seed)
+async function restoreOwnedRateLimitFixtures(): Promise<void> {
+  await execute(
+    `DELETE FROM rate_limits
+     WHERE endpoint_pattern = 'GET /api/workspaces' OR tier = 'premium'`,
+  );
   await execute(
     `INSERT INTO rate_limits (endpoint_pattern, tier, max_requests, window_seconds) VALUES
       ('*', 'authenticated', 100, 60),
@@ -42,23 +31,42 @@ process.env.NODE_ENV = 'test';
       ('POST /api/specs/generate', 'unauthenticated', 3, 60),
       ('POST /api/pipeline/trigger', 'authenticated', 10, 60),
       ('POST /api/pipeline/trigger', 'unauthenticated', 3, 60)
-    ON CONFLICT (endpoint_pattern, tier) DO NOTHING`,
+     ON CONFLICT (endpoint_pattern, tier) DO UPDATE
+     SET max_requests = EXCLUDED.max_requests,
+         window_seconds = EXCLUDED.window_seconds`,
   );
+}
 
-  // Reset in-memory windows between tests
-  const { resetRateLimitWindows, invalidateRateLimitCache } = require('../rate-limiter');
-  resetRateLimitWindows();
-  await invalidateRateLimitCache();
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  process.env.RATE_LIMIT_ENABLED = 'true';
 
+  const serverMod = require('../../server');
+  app = serverMod.default;
+  const dbMod = require('../../db/index');
+  query = dbMod.query;
+  execute = dbMod.execute;
   authToken = await getAuthToken(app);
 });
 
-afterEach(() => {
-  const { stopCleanupTimer } = require('../rate-limiter');
+beforeEach(async () => {
+  await restoreOwnedRateLimitFixtures();
+  const { resetRateLimitWindows, invalidateRateLimitCache } = require('../rate-limiter');
+  resetRateLimitWindows();
+  await invalidateRateLimitCache();
+});
+
+afterEach(async () => {
+  await restoreOwnedRateLimitFixtures();
+  const { resetRateLimitWindows, invalidateRateLimitCache, stopCleanupTimer } = require('../rate-limiter');
+  resetRateLimitWindows();
+  await invalidateRateLimitCache();
   stopCleanupTimer();
+});
+
+afterAll(async () => {
+  await execute('DELETE FROM users WHERE email = $1', [secondaryEmail]);
   delete process.env.RATE_LIMIT_ENABLED;
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
 });
 
 describe('rate_limits table', () => {
@@ -133,13 +141,13 @@ describe('rate limiter middleware', () => {
     const { invalidateRateLimitCache } = require('../rate-limiter');
     await invalidateRateLimitCache();
 
-    // Register a second user
-    const res2 = await request(app).post('/api/auth/register').send({
-      email: 'user2@example.com',
-      password: 'securepass123',
-      displayName: 'User Two',
+    // Mint a second authenticated fixture through the canonical test helper;
+    // the retired public registration route must not be revived for this test.
+    const token2 = await getAuthToken(app, {
+      email: secondaryEmail,
+      role: 'user',
+      displayName: 'Rate Limit User Two',
     });
-    const token2 = res2.body.accessToken;
 
     // Exhaust user 1's limit
     for (let i = 0; i < 2; i++) {
@@ -258,25 +266,15 @@ describe('rate limiter middleware', () => {
       '/api/pipeline/runs/test-run-123/stories/US-001/log',
     ];
 
+    const { rateLimiter } = require('../rate-limiter') as typeof import('../rate-limiter');
     for (const endpoint of sseEndpoints) {
-      // Use abort to prevent hanging on SSE stream
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 100);
-      try {
-        const res = await request(app)
-          .get(endpoint)
-          .set('Authorization', `Bearer ${authToken}`)
-          .timeout(100);
-        // Should NOT be 429 (rate limited)
-        expect(res.status).not.toBe(429);
-      } catch (e: any) {
-        // Timeout or abort is OK — we just want to ensure no 429 status
-        if (e.status !== undefined) {
-          expect(e.status).not.toBe(429);
-        }
-      } finally {
-        clearTimeout(timeoutId);
-      }
+      const next = jest.fn();
+      rateLimiter(
+        { method: 'GET', path: endpoint } as any,
+        {} as any,
+        next,
+      );
+      expect(next).toHaveBeenCalledTimes(1);
     }
   });
 });

@@ -26,15 +26,24 @@ async function main(): Promise<void> {
   const openApi = await loadOpenApiDocument();
 
   const provisionalVersion = existingSnapshot?.contractVersion ?? '1.0.0';
-  const provisionalSnapshot = buildSnapshotFromOpenApi(openApi, provisionalVersion);
+  const provisionalSnapshot = buildSnapshotFromOpenApi(
+    openApi,
+    provisionalVersion,
+    existingSnapshot?.generatedAt,
+  );
 
   let nextVersion = provisionalVersion;
+  let generatedAt = existingSnapshot?.generatedAt;
   if (existingSnapshot) {
     const changes = compareSnapshots(existingSnapshot, provisionalSnapshot, openApi);
-    nextVersion = bumpVersion(existingSnapshot.contractVersion, determineBumpType(changes));
+    const bumpType = determineBumpType(changes);
+    nextVersion = bumpVersion(existingSnapshot.contractVersion, bumpType);
+    // A no-op rebuild must be byte-identical. Timestamp drift would make the
+    // release certification gate mutate an otherwise frozen source candidate.
+    if (bumpType !== 'none') generatedAt = new Date().toISOString();
   }
 
-  const finalSnapshot = buildSnapshotFromOpenApi(openApi, nextVersion);
+  const finalSnapshot = buildSnapshotFromOpenApi(openApi, nextVersion, generatedAt);
   await writeSnapshot(snapshotPath, finalSnapshot);
   await writeContractMarkdown(markdownPath, finalSnapshot);
 

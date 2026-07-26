@@ -6,145 +6,170 @@
  * See LICENSE file in the project root for full license text.
  */
 
-/**
- * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: Apache-2.0
- * Licensed under the Apache License, Version 2.0.
- * See LICENSE file in the project root for full license text.
- */
-
-/**
- * check-swagger-coverage.ts
- *
- * Scans all backend route files for Express router method calls and verifies
- * that each has a preceding @swagger JSDoc block. Exits with code 1 if any
- * public route is missing a @swagger annotation, printing a warning to stderr.
- *
- * Usage:
- *   npx tsx scripts/check-swagger-coverage.ts
- *
- * Wire into CI:
- *   "lint:swagger": "npx tsx scripts/check-swagger-coverage.ts"
- */
-
+/** Exact Express router registration ↔ OpenAPI JSDoc parity gate. */
 import * as fs from 'fs';
 import * as path from 'path';
+import ts from 'typescript';
 import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.join(__dirname, '../backend/src/routes');
+const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 
-// Regex to match Express router method calls at the start of a logical line.
-// Matches: router.get, router.post, router.put, router.patch, router.delete
-const ROUTER_CALL_RE = /^\s*router\.(get|post|put|patch|delete)\s*\(/;
+type Route = { method: string; path: string; line: number; position: number; source: 'express' | 'openapi' };
+type Finding = { file: string; route: Route; message: string };
 
-// Regex to detect a @swagger tag anywhere in JSDoc blocks
-const SWAGGER_TAG_RE = /@swagger/;
-
-interface MissingAnnotation {
-  file: string;
-  line: number;
-  method: string;
-  routeSnippet: string;
+function normalizedRuntimePath(value: string): string {
+  return value.replace(/:([A-Za-z0-9_]+)/g, '{$1}').replace(/\/$/, '') || '/';
 }
 
-function checkFile(filePath: string): MissingAnnotation[] {
-  const content = fs.readFileSync(filePath, 'utf-8');
-  const lines = content.split('\n');
-  const missing: MissingAnnotation[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const match = ROUTER_CALL_RE.exec(line);
-    if (!match) continue;
-
-    const method = match[1].toUpperCase();
-
-    // Extract a short route snippet from the line (everything up to first comma or closing paren)
-    const routeSnippet = line.trim().slice(0, 80).replace(/\s+/g, ' ');
-
-    // Look backward up to 120 lines for a @swagger annotation in a comment block.
-    // Stop if we hit a blank line that's not inside a comment, or another router call.
-    let hasSwagger = false;
-    let inComment = false;
-
-    for (let j = i - 1; j >= Math.max(0, i - 120); j--) {
-      const prevLine = lines[j].trim();
-
-      // Hit another router call — stop searching upward
-      if (ROUTER_CALL_RE.test(lines[j])) break;
-
-      // Detect JSDoc block boundaries
-      if (prevLine.endsWith('*/')) inComment = true;
-      if (prevLine.startsWith('/**') || prevLine.startsWith('/*')) {
-        if (inComment) {
-          inComment = false;
-          // We've exited the comment block — if we found @swagger inside, we're done
-        }
+function runtimeRoutes(filePath: string, content: string): Route[] {
+  const source = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const routes: Route[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && ts.isIdentifier(node.expression.expression) && /router$/i.test(node.expression.expression.text)
+      && METHODS.has(node.expression.name.text)) {
+      const first = node.arguments[0];
+      const literalPaths = first && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first))
+        ? [first.text]
+        : first && ts.isArrayLiteralExpression(first)
+          ? first.elements.map((element) => {
+            if (!ts.isStringLiteral(element) && !ts.isNoSubstitutionTemplateLiteral(element)) {
+              throw new Error(`${filePath}:${source.getLineAndCharacterOfPosition(element.getStart(source)).line + 1} route arrays must contain only static string literals`);
+            }
+            return element.text;
+          })
+          : [];
+      if (literalPaths.length === 0) {
+        throw new Error(`${filePath}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} route registration must use a static string literal or a static string-literal array`);
       }
-
-      if (SWAGGER_TAG_RE.test(prevLine)) {
-        hasSwagger = true;
-        break;
+      for (const literalPath of literalPaths) {
+        routes.push({
+          method: node.expression.name.text.toUpperCase(),
+          path: normalizedRuntimePath(literalPath),
+          line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+          position: node.getStart(source),
+          source: 'express',
+        });
       }
     }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return routes;
+}
 
-    if (!hasSwagger) {
-      missing.push({
-        file: path.relative(process.cwd(), filePath),
-        line: i + 1,
-        method,
-        routeSnippet,
+function documentedRoutes(content: string): Route[] {
+  const routes: Route[] = [];
+  const blockRegex = /\/\*\*[\s\S]*?@swagger[\s\S]*?\*\//g;
+  for (const match of content.matchAll(blockRegex)) {
+    const block = match[0];
+    const rawLines = block.split('\n');
+    const lines = rawLines.map((line) => line.replace(/^\s*\* ?/, ''));
+    const prefixLine = content.slice(0, match.index ?? 0).split('\n').length;
+    let documentedPath: string | undefined;
+    let operationIndent: number | undefined;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      const pathMatch = line.match(/^\s*(\/[^\s]+):\s*$/);
+      if (pathMatch) {
+        documentedPath = pathMatch[1];
+        operationIndent = undefined;
+        continue;
+      }
+
+      const methodMatch = line.match(/^(\s*)(get|post|put|patch|delete):\s*$/i);
+      if (!documentedPath || !methodMatch) continue;
+      const indent = methodMatch[1]!.length;
+      if (operationIndent === undefined) operationIndent = indent;
+      // Nested schema/example keys named after HTTP verbs are not operations.
+      if (indent !== operationIndent) continue;
+
+      routes.push({
+        method: methodMatch[2]!.toUpperCase(),
+        path: documentedPath.replace(/\/$/, '') || '/',
+        line: prefixLine + index,
+        position: (match.index ?? 0) + rawLines.slice(0, index + 1).join('\n').length,
+        source: 'openapi',
       });
     }
   }
+  return routes;
+}
 
-  return missing;
+function routeKey(route: Pick<Route, 'method' | 'path'>): string {
+  return `${route.method} ${route.path}`;
+}
+
+function duplicateFindings(filePath: string, routes: Route[], label: string): Finding[] {
+  const byKey = new Map<string, Route[]>();
+  for (const route of routes) {
+    const group = byKey.get(routeKey(route)) ?? [];
+    group.push(route);
+    byKey.set(routeKey(route), group);
+  }
+  return [...byKey.entries()].flatMap(([key, group]) => group.length > 1
+    ? group.slice(1).map((route) => ({
+      file: filePath,
+      route,
+      message: `duplicate ${label} operation ${key}; first declaration is at line ${group[0]!.line}`,
+    }))
+    : []);
+}
+
+function checkFile(filePath: string): Finding[] {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const runtime = runtimeRoutes(filePath, content);
+  const docs = documentedRoutes(content);
+  const findings: Finding[] = duplicateFindings(filePath, runtime, 'Express');
+  const usedDocs = new Set<number>();
+
+  for (const route of runtime.sort((left, right) => left.position - right.position)) {
+    const matches = docs.map((doc, index) => ({ doc, index })).filter(({ doc, index }) =>
+      !usedDocs.has(index) && doc.position < route.position && doc.method === route.method
+      && (route.path === '/' || doc.path === route.path || doc.path.endsWith(route.path)));
+    const selected = matches.sort((left, right) => right.doc.position - left.doc.position)[0];
+    if (!selected) findings.push({ file: filePath, route, message: 'missing preceding exact OpenAPI operation' });
+    else usedDocs.add(selected.index);
+  }
+  docs.forEach((route, index) => {
+    if (!usedDocs.has(index)) findings.push({ file: filePath, route, message: 'OpenAPI operation has no Express registration' });
+  });
+  return findings;
 }
 
 function main(): void {
-  if (!fs.existsSync(ROUTES_DIR)) {
-    console.error(`[swagger-coverage] Routes directory not found: ${ROUTES_DIR}`);
-    process.exit(1);
+  const files = fs.readdirSync(ROUTES_DIR)
+    .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts') && name !== 'auth-e2e.ts')
+    .map((name) => path.join(ROUTES_DIR, name));
+  const allDocumentedRoutes = files.flatMap((file) => documentedRoutes(fs.readFileSync(file, 'utf8'))
+    .map((route) => ({ file, route })));
+  const documentedByKey = new Map<string, Array<{ file: string; route: Route }>>();
+  for (const entry of allDocumentedRoutes) {
+    const group = documentedByKey.get(routeKey(entry.route)) ?? [];
+    group.push(entry);
+    documentedByKey.set(routeKey(entry.route), group);
   }
-
-  const routeFiles = fs
-    .readdirSync(ROUTES_DIR)
-    .filter((f) => f.endsWith('.ts') || f.endsWith('.js'))
-    .filter((f) => !f.endsWith('.test.ts') && !f.endsWith('.spec.ts'))
-    .map((f) => path.join(ROUTES_DIR, f));
-
-  const allMissing: MissingAnnotation[] = [];
-
-  for (const filePath of routeFiles) {
-    const missing = checkFile(filePath);
-    allMissing.push(...missing);
+  const duplicateDocumentedFindings = [...documentedByKey.entries()].flatMap(([key, group]) => group.length > 1
+    ? group.slice(1).map(({ file, route }) => ({
+      file,
+      route,
+      message: `duplicate OpenAPI operation ${key}; first declaration is at ${path.relative(process.cwd(), group[0]!.file)}:${group[0]!.route.line}`,
+    }))
+    : []);
+  const findings = [...files.flatMap(checkFile), ...duplicateDocumentedFindings];
+  if (findings.length === 0) {
+    console.log(`[swagger-coverage] Exact Express/OpenAPI parity passed for ${files.length} route files. ✓`);
+    return;
   }
-
-  if (allMissing.length === 0) {
-    console.log(`[swagger-coverage] All ${routeFiles.length} route files have @swagger annotations. ✓`);
-    process.exit(0);
+  console.error(`\n[swagger-coverage] ${findings.length} exact parity failure(s):\n`);
+  for (const finding of findings) {
+    console.error(`  ${path.relative(process.cwd(), finding.file)}:${finding.route.line} [${finding.route.source}] ${finding.route.method} ${finding.route.path} — ${finding.message}`);
   }
-
-  console.warn(`\n[swagger-coverage] WARNING: ${allMissing.length} route(s) missing @swagger annotation:\n`);
-  for (const item of allMissing) {
-    console.warn(`  ${item.file}:${item.line}  [${item.method}]  ${item.routeSnippet}`);
-  }
-  console.warn('');
-  console.warn(
-    '[swagger-coverage] Add a /** @swagger */ JSDoc block before each flagged router call.',
-  );
-  console.warn('[swagger-coverage] See backend/src/routes/auth.ts for reference examples.\n');
-
-  // Exit 1 to fail CI if strict mode is requested, otherwise just warn
-  const strict = process.argv.includes('--strict') || process.env.SWAGGER_COVERAGE_STRICT === '1';
-  if (strict) {
-    process.exit(1);
-  } else {
-    process.exit(0);
-  }
+  console.error('');
+  process.exit(1);
 }
 
 main();

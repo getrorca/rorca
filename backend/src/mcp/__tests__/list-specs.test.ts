@@ -5,12 +5,15 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { installMcpFetchFixture } from './fetch-fixture';
+
 const mockFetch = jest.fn();
-(global as any).fetch = mockFetch;
+installMcpFetchFixture(mockFetch);
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCA_API } from '../server';
+import { server } from '../server';
+const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -30,7 +33,7 @@ test('rorca_list_specs is registered on the McpServer', () => {
   expect(tools['rorca_list_specs']).toBeDefined();
 });
 
-test('returns "No specs found" message when API returns empty array', async () => {
+test('returns the exact empty list as structured JSON text', async () => {
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => [],
@@ -40,14 +43,10 @@ test('returns "No specs found" message when API returns empty array', async () =
   const result = await handler({ workspaceId: 'ws-123', status: 'all' });
 
   expect(result.content[0].type).toBe('text');
-  const parsed = JSON.parse(result.content[0].text);
-  expect(parsed.ok).toBe(true);
-  expect(parsed.specs).toEqual([]);
-  expect(parsed.message).toContain('No specs found');
-  expect(parsed.message).toContain('ws-123');
+  expect(JSON.parse(result.content[0].text)).toEqual([]);
 });
 
-test('formats spec list with status, title, story count, and id', async () => {
+test('preserves every spec response field without presentation rewriting', async () => {
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => [
@@ -61,10 +60,9 @@ test('formats spec list with status, title, story count, and id', async () => {
 
   expect(result.content[0].type).toBe('text');
   const parsed = JSON.parse(result.content[0].text);
-  expect(parsed.ok).toBe(true);
-  expect(parsed.specs).toHaveLength(2);
-  expect(parsed.summary).toContain('[PENDING] Auth System (5 stories) — spec-1');
-  expect(parsed.summary).toContain('[APPROVED] Dashboard (8 stories) — spec-2');
+  expect(parsed).toHaveLength(2);
+  expect(parsed[0]).toMatchObject({ id: 'spec-1', specName: 'Auth System', status: 'pending', storyCount: 5 });
+  expect(parsed[1]).toMatchObject({ id: 'spec-2', specName: 'Dashboard', status: 'approved', storyCount: 8 });
 });
 
 test('passes status filter to API as query param', async () => {
@@ -95,9 +93,8 @@ test('returns error result when API returns non-200', async () => {
   const handler = getToolHandler('rorca_list_specs');
   const result = await handler({ workspaceId: 'ws-123', status: 'all' });
 
-  // Handler returns isError content (not throw) for HTTP errors
+  expect(result.isError).toBe(true);
   expect(result.content[0].type).toBe('text');
-  const parsed = JSON.parse(result.content[0].text);
-  expect(parsed.ok).toBe(false);
-  expect(parsed.tool).toBe('rorca_list_specs');
+  expect(result.content[0].text).toContain('Error (502)');
+  expect(result.content[0].text).toContain('Bad Gateway');
 });

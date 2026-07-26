@@ -24,7 +24,9 @@ const config: Config = {
   moduleNameMapper: {
     '^chokidar$': '<rootDir>/src/__mocks__/chokidar.js',
     '^pdf-parse$': '<rootDir>/src/__mocks__/pdf-parse.js',
-    '^pg-boss$': '<rootDir>/src/__mocks__/pg-boss.ts',
+    ...(process.env.RORCA_RUN_LIVE_CROSS_CERT === '1'
+      ? {}
+      : { '^pg-boss$': '<rootDir>/src/__mocks__/pg-boss.ts' }),
   },
   // Exclude pg-boss integration/load tests that require real pg-boss (not the mock).
   // These need the actual worker process running and use real pg-boss concurrency features.
@@ -32,9 +34,10 @@ const config: Config = {
   testPathIgnorePatterns: [
     '/node_modules/',
     '/dist/',
-    // WPE qualification uses node:test under tsx and is invoked explicitly by
-    // test:wave-qualification; Jest must never discover or double-run it.
+    // Qualification/release harnesses use node:test under tsx and are invoked
+    // by dedicated package scripts; Jest must never discover or double-run them.
     '\\.node\\.test\\.ts$',
+    'scripts/__tests__/pty-noisy-release-harness\\.test\\.ts$',
     'src/__tests__/pg-boss-cancel\\.test\\.ts',
     'src/__tests__/pg-boss-concurrency\\.test\\.ts',
     'src/__tests__/pg-boss-dlq\\.test\\.ts',
@@ -48,13 +51,16 @@ const config: Config = {
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   // Extend timeout for DB-backed integration tests
   testTimeout: 30_000,
-  // Force Jest to exit after all tests complete (prevents hanging async ops from keeping process alive)
-  forceExit: true,
-  // Run test files serially to prevent DB conflicts between test files sharing the same test DB
+  // Never force-exit: leaked workers/timers/listeners are release failures and
+  // must remain visible to the broad-suite certification gate. Allow bounded
+  // pool/socket cleanup to settle before Jest emits an open-handle warning.
+  forceExit: false,
+  openHandlesTimeout: 5_000,
+  // Run test files serially to prevent DB conflicts between test files sharing the same test DB.
+  // Bound ts-jest's retained module graphs below the 8 GiB process ceiling.
+  // Recycled workers must still exit cleanly; forceExit remains disabled.
   maxWorkers: 1,
-  // Recycle the lone worker when DB-backed integration tests retain large module graphs/buffers.
-  // This keeps plain `npm test` stable in CI without changing test semantics.
-  workerIdleMemoryLimit: '1024MB',
+  workerIdleMemoryLimit: '2048MB',
 };
 
 export default config;

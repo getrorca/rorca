@@ -60,11 +60,6 @@ jest.mock('../../lib/claude-auth', () => ({
   getClaudeAuthState: jest.fn().mockReturnValue({ connected: true, cliInstalled: true }),
 }));
 
-interface PipelineRunModeRow {
-  terminal_mode: string | null;
-  parallelism?: number | null;
-}
-
 interface CountRow {
   count: string;
 }
@@ -192,8 +187,8 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(response.headers['content-type']).toContain('application/json');
   });
 
-  test('trigger accepts camelCase terminalMode=pty, persists the run mode, and forwards the pg-boss payload', async () => {
-    seedSpec('trigger-pty-payload');
+  test('dry-run accepts camelCase terminalMode=pty without creating or dispatching a run', async () => {
+    seedSpec('trigger-pty-preview');
     const pgBossMock = jest.requireMock('../../lib/pg-boss');
     const mockSend = pgBossMock.getBoss().send as jest.Mock;
     mockSend.mockClear();
@@ -202,30 +197,26 @@ describe('PTY attachment trigger and fallback discrimination', () => {
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        specPath: 'forge/specs/approved/trigger-pty-payload.json',
+        specPath: 'forge/specs/approved/trigger-pty-preview.json',
         workspaceId: 'ws-pty-attach',
         terminalMode: 'pty',
-        readinessOverride: true,
+        dryRun: true,
       });
 
-    expect(res.status).toBe(201);
-    expect(res.body.terminalMode).toBe('pty');
-    expect(res.body.terminal_mode).toBe('pty');
-    expect(res.body.lifecycleStatus).toBe('queued');
-    expect(res.body.lifecycle_status).toBe('queued');
-    expect(typeof res.body.runId).toBe('number');
-
-    const run = await db.queryOne<PipelineRunModeRow>('SELECT terminal_mode FROM pipeline_runs WHERE id = $1', [res.body.runId]);
-    expect(run?.terminal_mode).toBe('pty');
-    expect(mockSend).toHaveBeenCalledWith(
-      'pipeline:run',
-      expect.objectContaining({ runId: res.body.runId, terminalMode: 'pty' }),
-      expect.any(Object),
-    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({
+      dryRun: true,
+      terminalMode: 'pty',
+      terminal_mode: 'pty',
+    }));
+    expect(await db.queryOne(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pty-attach'`,
+    )).toBeUndefined();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('PTY trigger remains sequential even for wave-parallel story graphs', async () => {
-    seedSpec('trigger-pty-sequential', [
+  test('manifestless PTY execution cannot dispatch a multi-story graph', async () => {
+    seedSpec('trigger-pty-manifestless', [
       { id: 'US-001', title: 'Story 1', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
       { id: 'US-002', title: 'Story 2', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
       { id: 'US-003', title: 'Story 3', description: 'Desc', acceptanceCriteria: ['AC'], dependsOn: [] },
@@ -240,21 +231,28 @@ describe('PTY attachment trigger and fallback discrimination', () => {
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        specPath: 'forge/specs/approved/trigger-pty-sequential.json',
+        specPath: 'forge/specs/approved/trigger-pty-manifestless.json',
         workspaceId: 'ws-pty-attach',
         terminalMode: 'pty',
+        autoWorktree: true,
+        autoMerge: false,
+        mergeStrategy: 'draft-pr',
         readinessOverride: true,
       });
 
-    expect(res.status).toBe(201);
-    const run = await db.queryOne<PipelineRunModeRow>('SELECT terminal_mode, parallelism FROM pipeline_runs WHERE id = $1', [res.body.runId]);
-    expect(run?.terminal_mode).toBe('pty');
-    expect(Number(run?.parallelism)).toBe(1);
-    expect(mockSend).toHaveBeenCalledWith(
-      'pipeline:run',
-      expect.objectContaining({ runId: res.body.runId, terminalMode: 'pty' }),
-      expect.any(Object),
-    );
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      code: 'RELEASE_ONE_TASK_MANIFEST_REQUIRED',
+      details: {
+        profileId: 'release-1-supervised-core',
+        capabilityId: 'bounded_task_manifest',
+        endpoint: '/api/pipeline/task-manifests/trigger',
+      },
+    });
+    expect(await db.queryOne(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pty-attach'`,
+    )).toBeUndefined();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   test('PTY-backed replay emits isPty=true and reads only the dedicated PTY chunk table', async () => {
@@ -677,10 +675,10 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(body).toContain(`event: chunk\ndata: ${ptyChunk.toString('base64')}`);
   });
 
-  test('requested PTY without a PTY session demotes explicitly to ANSI fallback metadata', async () => {
+  test('legacy PTY transcript without a session is exposed as explicit ANSI fallback evidence', async () => {
     const runId = await seedRun('done', 'pty');
-    const ansiChunk = Buffer.from('fallback transcript bytes\n', 'utf8');
-    await db.execute('INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, ansiChunk]);
+    const legacyChunk = Buffer.from('legacy PTY transcript bytes\n', 'utf8');
+    await db.execute('INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, 1, $2)', [runId, legacyChunk]);
 
     const body = await streamOutput(runId);
 
@@ -689,7 +687,9 @@ describe('PTY attachment trigger and fallback discrimination', () => {
     expect(body).toContain('"requestedTerminalMode":"pty"');
     expect(body).toContain('"isPty":false');
     expect(body).toContain('"ptyFallbackActive":true');
-    expect(body).toContain(`event: chunk\ndata: ${ansiChunk.toString('base64')}`);
+    expect(body).toContain('"ptyFallbackReason":"pty-session-unavailable"');
+    expect(body).toContain('"evidenceStoryId":"__legacy__"');
+    expect(body).toContain(`event: chunk\ndata: ${legacyChunk.toString('base64')}`);
   });
 });
 

@@ -6,16 +6,16 @@
  */
 
 import { z } from 'zod';
-import { ValidationError } from './errors';
+import { UnprocessableError, ValidationError } from './errors';
 
 /**
  * Where a pipeline run's implementation engine should execute.
  *
  * - remote-rorca: default. The server-side Rorca worker/container executes the
  *   selected engine CLI against the workspace/worktree mounted on that host.
- * - local-user: reserved for a user-local runner/bridge that executes with the
- *   user's local CLI installs/auth. It intentionally fails closed unless a local
- *   execution bridge URL is configured and reachable.
+ * - local-user: retained as a deprecated compatibility input only. The stable
+ *   contract rejects it before any run/artifact/queue mutation because no signed
+ *   host closeout/release protocol exists.
  */
 export const ExecutionEnvironmentSchema = z.enum(['remote-rorca', 'local-user']);
 export type ExecutionEnvironment = z.infer<typeof ExecutionEnvironmentSchema>;
@@ -33,6 +33,13 @@ export function resolveExecutionEnvironment(input: unknown, env: NodeJS.ProcessE
   if (!parsed.success) {
     throw new ValidationError('Invalid executionEnvironment. Expected one of: remote-rorca, local-user');
   }
+  if (parsed.data === 'local-user') {
+    throw new UnprocessableError(
+      'local-user execution is deprecated and unavailable; use remote-rorca',
+      'LOCAL_USER_EXECUTION_UNAVAILABLE',
+      { requestedExecutionEnvironment: 'local-user', availableExecutionEnvironments: ['remote-rorca'] },
+    );
+  }
 
   return {
     requested: parsed.data,
@@ -42,7 +49,6 @@ export function resolveExecutionEnvironment(input: unknown, env: NodeJS.ProcessE
 }
 
 export async function assertExecutionEnvironmentReady(_resolution: ExecutionEnvironmentResolution): Promise<void> {
-  // Legacy compatibility hook. Full readiness is evaluated after agent/model
-  // resolution by execution-environment-registry.ts so local-user can be backed
-  // by either the old bridge URL or the new outbound runner registry.
+  // Legacy compatibility hook. Parsing already rejects unavailable local-user
+  // before callers can perform workspace/run/artifact/queue mutations.
 }

@@ -41,8 +41,10 @@ jest.mock('../logger', () => ({
   logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-// Mock knowledge-graph (not needed for these tests)
+// Preserve canonical graph identity helpers used by retrieval while replacing
+// only external graph reads that are outside this unit's scope.
 jest.mock('../knowledge-graph', () => ({
+  ...jest.requireActual('../knowledge-graph'),
   queryRelated: jest.fn().mockResolvedValue([]),
   queryImpact: jest.fn().mockResolvedValue({ stories: [], conventions: [] }),
   graphStats: jest.fn().mockResolvedValue({ available: false, vertexCount: 0 }),
@@ -205,7 +207,25 @@ describe('synthesizeDirectionStack', () => {
       l3: opts.l3,
       schemaSnapshot: opts.schemaSnapshot,
     });
-    mockGetRecentMemory.mockResolvedValue(opts.memories ?? []);
+    const memories = opts.memories ?? [];
+    mockGetRecentMemory.mockResolvedValue(memories);
+    mockDbQuery.mockImplementation(async (sql: string) => sql.includes('FROM memories')
+      ? memories.map((memory, index) => ({
+          id: String(index + 1),
+          category: 'Pattern',
+          content: memory.text,
+          confidence: 'medium',
+          related_files: [],
+          source_type: 'test-fixture',
+          source: null,
+          pinned: false,
+          created_at: memory.ts,
+          updated_at: memory.ts,
+          source_story_id: null,
+          source_spec_id: null,
+          source_run_id: null,
+        }))
+      : []);
   }
 
   it('returns SynthesizedContext with metadata when no memory entries', async () => {

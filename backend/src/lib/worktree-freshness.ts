@@ -22,6 +22,8 @@ export interface ReusableWorktreeValidationInput {
   worktreePath: string;
   expectedBranchName?: string | null;
   expectedDirtyPaths?: string[];
+  /** Permit only deterministic, host-owned per-run projections—not arbitrary runtime files. */
+  allowRorcaRuntimeMetadata?: boolean;
 }
 
 export interface ReusableWorktreeValidationResult {
@@ -85,6 +87,13 @@ function dirtyPaths(cwd: string): string[] {
   const output = git(cwd, ['status', '--porcelain=v1', '--untracked-files=all']);
   if (!output) return [];
   return output.split('\n').map((line) => line.slice(3).trim()).filter(Boolean);
+}
+
+/** Match only filenames Rorca deterministically owns before worker preflight. */
+export function isRorcaRuntimeMetadataPath(candidate: string): boolean {
+  const normalized = candidate.replaceAll('\\', '/');
+  return /^\.rorca\/run-specs\/run-[1-9]\d*\.json$/.test(normalized)
+    || /^\.rorca\/runtime\/run-[1-9]\d*-story-execution-manifests\.json$/.test(normalized);
 }
 
 function conflictsWithWorkspaceHead(worktreePath: string, workspaceHead: string, worktreeHead: string): boolean {
@@ -152,7 +161,10 @@ export function validateReusableWorktree(input: ReusableWorktreeValidationInput)
   }
 
   const expected = input.expectedDirtyPaths ?? [];
-  const unrelated = paths.filter((dirtyPath) => !expected.some((prefix) => dirtyPath === prefix || dirtyPath.startsWith(`${prefix}/`)));
+  const unrelated = paths.filter((dirtyPath) => {
+    if (expected.some((prefix) => dirtyPath === prefix || dirtyPath.startsWith(`${prefix}/`))) return false;
+    return !(input.allowRorcaRuntimeMetadata && isRorcaRuntimeMetadataPath(dirtyPath));
+  });
   if (unrelated.length > 0) {
     return {
       ok: false,

@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -152,7 +153,7 @@ describe('PTY evidence routes', () => {
         rawEnd: 4,
         rawSize: 4,
         compressedSize: bytes.length,
-        sha256: 'a'.repeat(64),
+        sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
         completionState: 'complete',
         firstByteAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),

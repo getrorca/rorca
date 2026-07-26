@@ -52,16 +52,19 @@ import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import type PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 // This integration suite must bypass the repository's default no-op manual mock.
 const RealPgBoss = jest.requireActual<typeof import('pg-boss')>('pg-boss');
 
 // ── DB URL ─────────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
+
+// PgBoss alone owns this suite's schema; this isolates cancellation evidence
+// from legacy unit fixtures that created a partial `pgboss` schema.
+const BOSS_SCHEMA = pgBossTestSchema('cancel');
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
 
@@ -137,6 +140,7 @@ const tempSentinelPaths: string[] = [];
 beforeAll(async () => {
   // 1. Connect pool
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // 2. Run migrations
   const { runPgMigrations } = await import('../db/pg-index');
@@ -154,7 +158,7 @@ beforeAll(async () => {
   // 4. Start pg-boss with fast polling
   boss = new RealPgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 0.5,
   });
   boss.on('error', () => { /* suppress noise in test output */ });
@@ -390,7 +394,7 @@ function buildMiniServer(): Express {
         // a valid UUID — passing an integer string causes a PostgreSQL cast error.
         // Instead we look up the actual UUID by data->>'runId'.
         const { rows: jobRows } = await pool.query<{ id: string }>(
-          `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1 LIMIT 1`,
+          `SELECT id FROM ${BOSS_SCHEMA}.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1 LIMIT 1`,
           [runId],
         );
         if (jobRows.length > 0) {
@@ -732,7 +736,7 @@ describe('Test A — cancel queued run (worker stopped)', () => {
     // Start a new boss instance for enqueueing (no workers registered)
     boss = new RealPgBoss({
       connectionString: DB_URL,
-      schema: 'pgboss',
+      schema: BOSS_SCHEMA,
       pollingIntervalSeconds: 0.5,
     });
     boss.on('error', () => { /* suppress */ });
@@ -762,7 +766,7 @@ describe('Test A — cancel queued run (worker stopped)', () => {
 
     // Also verify pg-boss job exists before cancellation
     const { rows: jobRowsBefore } = await pool.query<{ id: string; state: string }>(
-      `SELECT id, state FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1`,
+      `SELECT id, state FROM ${BOSS_SCHEMA}.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1`,
       [testRunId],
     );
     expect(jobRowsBefore.length).toBeGreaterThanOrEqual(1);
@@ -788,7 +792,7 @@ describe('Test A — cancel queued run (worker stopped)', () => {
     // Give pg-boss a moment to propagate the cancellation state
     const jobRemoved = await waitFor(async () => {
       const { rows: jobRows } = await pool.query<{ id: string; state: string }>(
-        `SELECT id, state FROM pgboss.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1`,
+        `SELECT id, state FROM ${BOSS_SCHEMA}.job WHERE name = 'pipeline:run' AND (data->>'runId')::bigint = $1`,
         [testRunId],
       );
       if (jobRows.length === 0) return true; // Job was removed
@@ -801,7 +805,7 @@ describe('Test A — cancel queued run (worker stopped)', () => {
     // (status remains 'cancelled', not 'running' or 'done')
     bossResume = new RealPgBoss({
       connectionString: DB_URL,
-      schema: 'pgboss',
+      schema: BOSS_SCHEMA,
       pollingIntervalSeconds: 0.5,
     });
     bossResume.on('error', () => { /* suppress */ });
@@ -855,7 +859,7 @@ describe('Test B — cancel running run (SIGTERM + SIGKILL)', () => {
     // Start a fresh boss for Test B
     boss = new RealPgBoss({
       connectionString: DB_URL,
-      schema: 'pgboss',
+      schema: BOSS_SCHEMA,
       pollingIntervalSeconds: 0.5,
     });
     boss.on('error', () => { /* suppress */ });

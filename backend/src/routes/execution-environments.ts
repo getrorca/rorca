@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { validateBody } from '../lib/validate';
 import { handleRouteError } from '../lib/async-handler';
 import { ConflictError, ValidationError } from '../lib/errors';
+import { assertReleaseOneCapabilityEnabled } from '../lib/release-one-capability-profile';
 import {
   authenticateRunner,
   getExecutionEnvironmentById,
@@ -93,15 +94,21 @@ async function authenticateRunnerRequest(req: Request) {
  * @swagger
  * /api/execution-environments:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: List execution environments
  *     responses:
  *       200: { description: OK }
  */
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const environments = await listExecutionEnvironments();
+    const environments = (await listExecutionEnvironments())
+      .filter((environment) => environment.id === 'remote-rorca');
     const readiness = await Promise.all(environments.map((env) => getExecutionEnvironmentReadiness(env.id)));
-    res.json({ environments: readiness });
+    res.json({
+      environments: readiness,
+      unavailable: [{ id: 'local-user', deprecated: true, reason: 'LOCAL_USER_EXECUTION_UNAVAILABLE' }],
+    });
   } catch (err) {
     handleRouteError(res, err);
   }
@@ -111,12 +118,17 @@ router.get('/', async (_req: Request, res: Response) => {
  * @swagger
  * /api/execution-environments/{id}/readiness:
  *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Get execution environment readiness
  *     responses:
  *       200: { description: OK }
  */
 router.get('/:id/readiness', async (req: Request, res: Response) => {
   try {
+    if (paramValue(req.params.id) === 'local-user') {
+      assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
+    }
     res.json({ environment: await getExecutionEnvironmentReadiness(paramValue(req.params.id)) });
   } catch (err) {
     handleRouteError(res, err);
@@ -127,12 +139,15 @@ router.get('/:id/readiness', async (req: Request, res: Response) => {
  * @swagger
  * /api/execution-environments/{id}:
  *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Upsert an execution environment
  *     responses:
  *       200: { description: OK }
  */
 router.put('/:id', validateBody(UpsertEnvironmentSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('unattended_control_plane_mutation');
     const env = await upsertExecutionEnvironment({ id: paramValue(req.params.id), ...req.body });
     res.json({ environment: env, readiness: await getExecutionEnvironmentReadiness(env.id) });
   } catch (err) {
@@ -144,12 +159,15 @@ router.put('/:id', validateBody(UpsertEnvironmentSchema), async (req: Request, r
  * @swagger
  * /api/execution-environments/{id}/runner-token:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Set runner token for an execution environment
  *     responses:
  *       200: { description: OK }
  */
 router.post('/:id/runner-token', validateBody(RunnerTokenSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     const requiredRegistrationToken = process.env.RORCA_RUNNER_REGISTRATION_TOKEN?.trim();
     if (requiredRegistrationToken && req.body.registrationToken !== requiredRegistrationToken) {
       throw new ConflictError('invalid_runner_registration_token');
@@ -167,12 +185,15 @@ router.post('/:id/runner-token', validateBody(RunnerTokenSchema), async (req: Re
  * @swagger
  * /api/execution-environments/{id}/runner/heartbeat:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Runner heartbeat and capability report
  *     responses:
  *       200: { description: OK }
  */
 router.post('/:id/runner/heartbeat', validateBody(RunnerHeartbeatSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const environmentId = paramValue(req.params.id);
     await recordRunnerHeartbeat(environmentId, req.body);
@@ -186,12 +207,15 @@ router.post('/:id/runner/heartbeat', validateBody(RunnerHeartbeatSchema), async 
  * @swagger
  * /api/execution-environments/{id}/runner/poll:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Claim next job for an outbound runner
  *     responses:
  *       200: { description: OK }
  */
 router.post('/:id/runner/poll', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const job = await claimNextRunnerJob(paramValue(req.params.id), req.body.runnerId);
     res.json({ job: job ? serializeRunnerJob(job) : null });
@@ -204,12 +228,15 @@ router.post('/:id/runner/poll', validateBody(RunnerPollSchema), async (req: Requ
  * @swagger
  * /api/execution-environments/{id}/runner/jobs/{jobId}/running:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Mark a claimed runner job as running
  *     responses:
  *       200: { description: OK }
  */
 router.post('/:id/runner/jobs/:jobId/running', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const job = await markRunnerJobRunning(paramValue(req.params.jobId), req.body.runnerId);
     res.json({ job: serializeRunnerJob(job) });
@@ -225,11 +252,21 @@ router.post('/:id/runner/jobs/:jobId/running', validateBody(RunnerPollSchema), a
  *     summary: Revalidate governed execution policy immediately before local spawn
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Runner pre-spawn fencing is an operator execution boundary and must not be MCP exposed."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       200: { description: Current effective policy fence }
  */
 router.post('/:id/runner/jobs/:jobId/revalidate', validateBody(RunnerPollSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const policy = await revalidateRunnerJobPolicy(paramValue(req.params.jobId), req.body.runnerId);
     res.json({
@@ -250,12 +287,15 @@ router.post('/:id/runner/jobs/:jobId/revalidate', validateBody(RunnerPollSchema)
  * @swagger
  * /api/execution-environments/{id}/runner/jobs/{jobId}/complete:
  *   post:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
  *     summary: Complete a runner job
  *     responses:
  *       200: { description: OK }
  */
 router.post('/:id/runner/jobs/:jobId/complete', validateBody(CompleteJobSchema), async (req: Request, res: Response) => {
   try {
+    assertReleaseOneCapabilityEnabled('local_user_execution_bridge');
     await authenticateRunnerRequest(req);
     const job = await completeRunnerJob({
       jobId: paramValue(req.params.jobId),

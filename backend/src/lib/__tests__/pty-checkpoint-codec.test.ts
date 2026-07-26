@@ -5,6 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import { Terminal } from '@xterm/headless';
 import {
   checksumPtyCheckpoint,
   decodePtyCheckpoint,
@@ -45,7 +46,17 @@ describe('PTY checkpoint codec', () => {
     expect(checkpoint.checksum).toBe(checksumPtyCheckpoint(checkpoint.compressedBlob));
     expect(checkpoint.compressedBlob.length).toBeLessThan(16 * 1024 * 1024);
     expect(serialized).toContain('two🙂');
-    expect(serialized).toContain('main screen');
+    // SerializeAddon may encode the visible row with cursor/edit controls rather
+    // than one contiguous literal. Replay the checkpoint and assert terminal
+    // semantics instead of coupling the test to one serializer encoding.
+    const restored = new Terminal({ cols: checkpoint.terminalCols, rows: checkpoint.terminalRows, scrollback: 8, allowProposedApi: true });
+    await new Promise<void>((resolve) => restored.write(serialized, resolve));
+    const restoredText = Array.from(
+      { length: restored.buffer.active.length },
+      (_, index) => restored.buffer.active.getLine(index)?.translateToString(true) ?? '',
+    ).join('\n');
+    expect(restoredText.replace(/\s/g, '')).toContain('mainscreen');
+    restored.dispose();
     emulator.dispose();
   });
 

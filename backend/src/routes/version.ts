@@ -133,6 +133,8 @@ function hasDockerSidecar(dbMode: 'native' | 'docker' | 'byop'): boolean {
  *                         available: { type: boolean }
  *                         endpoint: { type: string }
  *                         idempotency: { type: string, enum: [stable-uuid] }
+ *                         humanAuthorityVersion: { type: string, enum: [provider-human-event.v1] }
+ *                         serviceRelayRequiresProviderHuman: { type: boolean, enum: [true] }
  *                 databaseCapability:
  *                   type: object
  *                   description: Canonical database runtime capability model used by frontend and operators.
@@ -171,8 +173,57 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         },
         taskManifestExecution: {
           available: true,
+          contractVersion: 'v2',
           endpoint: '/api/pipeline/task-manifests/trigger',
           idempotency: 'stable-uuid',
+          resultContract: 'rorca-dispatch-outcome.v1',
+          replay: 'exact-request-by-stable-uuid',
+          sourceTenantBinding: 'slack-team-v1',
+          contextSafetyVersion: 'rorca-context-safety.v1',
+          humanAuthorityVersion: 'provider-human-event.v1',
+          serviceRelayRequiresProviderHuman: true,
+        },
+        governedRetry: {
+          available: true,
+          contractVersion: 'v2',
+          endpoint: '/api/pipeline/runs/{runId}/retry',
+          approvalEndpoint: '/api/pipeline/runs/{runId}/retry-approval',
+          protocol: 'exact-expiring-preview-then-dispatch',
+          authority: 'rorca-application-tables',
+          resultContract: 'rorca-dispatch-outcome.v1',
+          replay: 'lookup-before-expiry',
+          approvalAuthority: 'rorca-receipt',
+        },
+        skillFirstAuthoring: {
+          available: true,
+          contractVersion: 'v2',
+          contextEndpoint: '/api/specs/generation-context',
+          preflightEndpoint: '/api/specs/authoring/preflight',
+          confirmationEndpoint: '/api/specs/authoring/preflight/confirm',
+          persistEndpoint: '/api/specs/persist',
+          persistBatchEndpoint: '/api/specs/persist/batch',
+          mutationStateEndpoint: '/api/specs/authoring/mutation-state',
+          approvalTargetEndpoint: '/api/specs/{specId}/approval-target',
+          approveEndpoint: '/api/specs/{specId}/approve',
+          draftScaffoldVersion: 'authoring-draft-scaffold.v1',
+          mutationReceiptVersion: 'authoring-mutation-receipt.v1',
+          humanAuthorityVersion: 'provider-human-event.v1',
+          idempotency: 'durable-request-hash-replay',
+          crashRecovery: 'material-bound-roll-forward-v1',
+          maximumRevisionAttempts: 3,
+        },
+        lifecycleGovernance: {
+          available: true,
+          contractVersion: 'v1',
+          compileEndpoint: '/api/specs/{specId}/lifecycle/compile',
+          evidenceEndpoint: '/api/lifecycle/evidence',
+          decisionEndpoint: '/api/lifecycle/decisions',
+        },
+        ptyEvidence: {
+          available: true,
+          contractVersion: 'v2',
+          terminalMode: 'native-pty',
+          operatorAttachmentOnly: true,
         },
       },
       databaseCapability,

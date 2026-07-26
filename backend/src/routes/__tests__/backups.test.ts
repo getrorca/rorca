@@ -5,11 +5,15 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
 import * as fs from 'fs';
+import type { Server } from 'http';
 import * as os from 'os';
 import * as path from 'path';
+import { once } from 'events';
 import type { Express } from 'express';
 import request from 'supertest';
+import { execute } from '../../db/index';
 import { getAuthToken } from './helpers/auth-helper';
 
 jest.mock('../../lib/llm-client', () => ({
@@ -22,156 +26,159 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
-let app: Express;
+const adminEmail = `backup-admin-${crypto.randomUUID()}@test.rorca.local`;
+const userEmail = `backup-user-${crypto.randomUUID()}@test.rorca.local`;
+let server: Server;
 let tmpDir: string;
 let backupDir: string;
-let authToken: string;
+let fakePgDumpArgsFile: string;
+let adminToken: string;
+let userToken: string;
+let previousAuthRequired: string | undefined;
+let previousBackupDir: string | undefined;
+let previousPgDumpBin: string | undefined;
+let previousArgsFile: string | undefined;
 
-beforeEach(async () => {
-  jest.resetModules();
+function api() {
+  return request(server);
+}
 
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockReturnValue(true),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-  }));
+beforeAll(async () => {
+  previousAuthRequired = process.env.AUTH_REQUIRED;
+  previousBackupDir = process.env.BACKUP_DIR;
+  previousPgDumpBin = process.env.PG_DUMP_BIN;
+  previousArgsFile = process.env.FAKE_PG_DUMP_ARGS_FILE;
 
+  process.env.NODE_ENV = 'test';
+  process.env.AUTH_REQUIRED = 'true';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-backup-test-'));
   backupDir = path.join(tmpDir, 'backups');
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.BACKUP_DIR = backupDir;
-  process.env.NODE_ENV = 'test';
+  fakePgDumpArgsFile = path.join(tmpDir, 'pg-dump-args.json');
+  const fakePgDump = path.join(tmpDir, 'fake-pg-dump.cjs');
+  fs.writeFileSync(fakePgDump, `#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const outputIndex = args.indexOf('--file');
+if (outputIndex < 0 || !args[outputIndex + 1]) process.exit(2);
+fs.writeFileSync(process.env.FAKE_PG_DUMP_ARGS_FILE, JSON.stringify(args));
+fs.writeFileSync(args[outputIndex + 1], 'fake-custom-format-backup');
+`);
+  fs.chmodSync(fakePgDump, 0o700);
+  process.env.BACKUP_DIR = backupDir;
+  process.env.PG_DUMP_BIN = fakePgDump;
+  process.env.FAKE_PG_DUMP_ARGS_FILE = fakePgDumpArgsFile;
 
-  const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
+  const serverModule = require('../../server');
+  const app = serverModule.default as Express;
+  adminToken = await getAuthToken(app, {
+    email: adminEmail,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  userToken = await getAuthToken(app, {
+    email: userEmail,
+    authId: crypto.randomUUID(),
+    role: 'user',
+  });
+  server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.BACKUP_DIR;
-  delete process.env.NODE_ENV;
+beforeEach(() => {
+  fs.rmSync(backupDir, { recursive: true, force: true });
+  fs.rmSync(fakePgDumpArgsFile, { force: true });
+});
+
+afterAll(async () => {
+  server.closeAllConnections();
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  await execute('DELETE FROM users WHERE email = ANY($1::text[])', [[adminEmail, userEmail]]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+
+  if (previousAuthRequired === undefined) delete process.env.AUTH_REQUIRED;
+  else process.env.AUTH_REQUIRED = previousAuthRequired;
+  if (previousBackupDir === undefined) delete process.env.BACKUP_DIR;
+  else process.env.BACKUP_DIR = previousBackupDir;
+  if (previousPgDumpBin === undefined) delete process.env.PG_DUMP_BIN;
+  else process.env.PG_DUMP_BIN = previousPgDumpBin;
+  if (previousArgsFile === undefined) delete process.env.FAKE_PG_DUMP_ARGS_FILE;
+  else process.env.FAKE_PG_DUMP_ARGS_FILE = previousArgsFile;
 });
 
 describe('POST /api/admin/backup', () => {
-  it('creates a backup and returns filename and size', async () => {
-    const res = await request(app)
+  it('creates a PostgreSQL custom-format backup without placing the database URL in argv', async () => {
+    const res = await api()
       .post('/api/admin/backup')
-      .set('Authorization', `Bearer ${authToken}`);
+      .set('Authorization', `Bearer ${adminToken}`);
 
     expect(res.status).toBe(201);
-    expect(res.body.backup).toBeDefined();
-    expect(res.body.backup.filename).toMatch(/^rorca-backup-.*\.db$/);
+    expect(res.body.backup.filename).toMatch(/^rorca-backup-.*\.sql$/);
     expect(res.body.backup.size).toBeGreaterThan(0);
-    expect(typeof res.body.pruned).toBe('number');
+    expect(res.body.pruned).toBe(0);
+    expect(fs.readdirSync(backupDir)).toEqual([res.body.backup.filename]);
 
-    // Verify file exists on disk
-    const files = fs.readdirSync(backupDir);
-    expect(files).toHaveLength(1);
-    expect(files[0]).toBe(res.body.backup.filename);
+    const args = JSON.parse(fs.readFileSync(fakePgDumpArgsFile, 'utf8')) as string[];
+    expect(args).toEqual(['--format=custom', '--file', path.join(backupDir, res.body.backup.filename)]);
+    expect(args.some(arg => /^postgres(?:ql)?:\/\//.test(arg))).toBe(false);
   });
 
   it('creates multiple backups with unique names', async () => {
-    await request(app)
-      .post('/api/admin/backup')
-      .set('Authorization', `Bearer ${authToken}`);
-
-    // Small delay to ensure different timestamp
+    expect((await api().post('/api/admin/backup').set('Authorization', `Bearer ${adminToken}`)).status).toBe(201);
     await new Promise(resolve => setTimeout(resolve, 10));
+    expect((await api().post('/api/admin/backup').set('Authorization', `Bearer ${adminToken}`)).status).toBe(201);
 
-    await request(app)
-      .post('/api/admin/backup')
-      .set('Authorization', `Bearer ${authToken}`);
-
-    const files = fs.readdirSync(backupDir);
-    expect(files.length).toBeGreaterThanOrEqual(2);
+    expect(fs.readdirSync(backupDir)).toHaveLength(2);
   });
 });
 
 describe('GET /api/admin/backups', () => {
-  it('returns empty array when no backups exist', async () => {
-    const res = await request(app)
-      .get('/api/admin/backups')
-      .set('Authorization', `Bearer ${authToken}`);
-
+  it('returns an empty inventory when no backups exist', async () => {
+    const res = await api().get('/api/admin/backups').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(res.body.backups).toEqual([]);
   });
 
-  it('lists backups with filename, size, and createdAt', async () => {
-    // Create a backup first
-    await request(app)
-      .post('/api/admin/backup')
-      .set('Authorization', `Bearer ${authToken}`);
-
-    const res = await request(app)
-      .get('/api/admin/backups')
-      .set('Authorization', `Bearer ${authToken}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.backups).toHaveLength(1);
-    const backup = res.body.backups[0];
-    expect(backup.filename).toMatch(/^rorca-backup-.*\.db$/);
-    expect(backup.size).toBeGreaterThan(0);
-    expect(backup.createdAt).toBeTruthy();
-  });
-
-  it('returns backups sorted newest first', async () => {
-    // Create two backups
-    await request(app)
-      .post('/api/admin/backup')
-      .set('Authorization', `Bearer ${authToken}`);
+  it('lists backups newest first with portable modification timestamps', async () => {
+    await api().post('/api/admin/backup').set('Authorization', `Bearer ${adminToken}`);
     await new Promise(resolve => setTimeout(resolve, 10));
-    await request(app)
-      .post('/api/admin/backup')
-      .set('Authorization', `Bearer ${authToken}`);
+    await api().post('/api/admin/backup').set('Authorization', `Bearer ${adminToken}`);
 
-    const res = await request(app)
-      .get('/api/admin/backups')
-      .set('Authorization', `Bearer ${authToken}`);
-
-    expect(res.body.backups.length).toBeGreaterThanOrEqual(2);
-    const dates = res.body.backups.map((b: any) => b.createdAt);
-    expect(dates[0] >= dates[1]).toBe(true);
+    const res = await api().get('/api/admin/backups').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.backups).toHaveLength(2);
+    expect(res.body.backups[0].filename).toMatch(/^rorca-backup-.*\.sql$/);
+    expect(res.body.backups[0].size).toBeGreaterThan(0);
+    expect(Date.parse(res.body.backups[0].createdAt)).not.toBeNaN();
+    expect(res.body.backups[0].createdAt >= res.body.backups[1].createdAt).toBe(true);
   });
 });
 
 describe('backup retention', () => {
-  it('prunes old backups beyond 30 days', async () => {
-    // Create a fake old backup
+  it('prunes backups whose portable modification time is older than 30 days', async () => {
     fs.mkdirSync(backupDir, { recursive: true });
-    const oldFile = path.join(backupDir, 'rorca-backup-old.db');
-    fs.writeFileSync(oldFile, 'fake');
-    // Set mtime to 31 days ago
+    const oldFile = path.join(backupDir, 'rorca-backup-old.sql');
+    fs.writeFileSync(oldFile, 'old-backup');
     const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
     fs.utimesSync(oldFile, oldDate, oldDate);
 
-    // Trigger a new backup (which also prunes)
-    const res = await request(app)
-      .post('/api/admin/backup')
-      .set('Authorization', `Bearer ${authToken}`);
+    const res = await api().post('/api/admin/backup').set('Authorization', `Bearer ${adminToken}`);
 
     expect(res.status).toBe(201);
-    // The old file should have been pruned (birthtime-based)
-    const files = fs.readdirSync(backupDir);
-    // Should have the new backup; old one may or may not be pruned
-    // depending on OS birthtime support — at minimum the new one exists
-    expect(files.some(f => f !== 'rorca-backup-old.db')).toBe(true);
+    expect(res.body.pruned).toBe(1);
+    expect(fs.existsSync(oldFile)).toBe(false);
+    expect(fs.readdirSync(backupDir)).toEqual([res.body.backup.filename]);
   });
 });
 
-describe('auth required', () => {
-  it('rejects unauthenticated POST', async () => {
-    const res = await request(app).post('/api/admin/backup');
-    expect(res.status).toBe(401);
+describe('admin authority', () => {
+  it('rejects unauthenticated backup reads and writes', async () => {
+    expect((await api().post('/api/admin/backup')).status).toBe(401);
+    expect((await api().get('/api/admin/backups')).status).toBe(401);
   });
 
-  it('rejects unauthenticated GET', async () => {
-    const res = await request(app).get('/api/admin/backups');
-    expect(res.status).toBe(401);
+  it('rejects authenticated non-admin backup reads and writes before any file effect', async () => {
+    expect((await api().post('/api/admin/backup').set('Authorization', `Bearer ${userToken}`)).status).toBe(403);
+    expect((await api().get('/api/admin/backups').set('Authorization', `Bearer ${userToken}`)).status).toBe(403);
+    expect(fs.existsSync(backupDir)).toBe(false);
   });
 });

@@ -220,11 +220,14 @@ describe('workflow_configs seed data', () => {
     expect(ids).toEqual(['memory_consolidation', 'pipeline_execution', 'spec_generation']);
   });
 
-  it('updated_at is set to a recent timestamp on all rows', async () => {
+  it('updated_at is a valid persisted timestamp on all rows', async () => {
     const { rows } = await pool.query('SELECT updated_at FROM workflow_configs');
-    const cutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
+    const migrationEpoch = new Date('2026-04-04T00:00:00.000Z').getTime();
     for (const row of rows) {
-      expect(new Date(row.updated_at).getTime()).toBeGreaterThan(cutoff.getTime());
+      const timestamp = new Date(row.updated_at).getTime();
+      expect(Number.isFinite(timestamp)).toBe(true);
+      expect(timestamp).toBeGreaterThanOrEqual(migrationEpoch);
+      expect(timestamp).toBeLessThanOrEqual(Date.now());
     }
   });
 

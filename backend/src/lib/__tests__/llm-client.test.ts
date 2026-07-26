@@ -27,6 +27,16 @@ const mockSpawn = jest.fn();
 jest.mock('child_process', () => ({
   spawn: mockSpawn,
 }));
+const mockModelLaunch = jest.fn(async (options: any) => ({
+  command: options.command,
+  args: [...options.args],
+  cwd: options.cwd,
+  env: options.env,
+  isolated: true,
+}));
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousModelSandboxLaunch: (options: any) => mockModelLaunch(options),
+}));
 
 // Mock Anthropic SDK
 const mockAnthropicCreate = jest.fn();
@@ -60,6 +70,9 @@ describe('llm-client', () => {
     jest.resetModules();
     jest.clearAllMocks();
     jest.doMock('child_process', () => ({ spawn: mockSpawn }));
+    jest.doMock('../autonomous-sandbox', () => ({
+      prepareAutonomousModelSandboxLaunch: (options: any) => mockModelLaunch(options),
+    }));
     jest.doMock('@anthropic-ai/sdk', () => {
       return jest.fn().mockImplementation(() => ({
         messages: { create: mockAnthropicCreate },
@@ -105,6 +118,7 @@ describe('llm-client', () => {
 
     expect(result.text).toBe('LLM response');
     expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 200, reasoningTokens: 0 });
+    expect(mockModelLaunch).toHaveBeenCalledWith(expect.objectContaining({ command: expect.any(String) }));
     expect(mockSpawn).toHaveBeenCalledWith(
       expect.any(String),
       expect.arrayContaining(['--print', '--output-format', 'json', 'hello']),

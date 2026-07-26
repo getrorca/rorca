@@ -102,9 +102,15 @@ export class RorcaApiClient {
                 storyId: input.storyId,
                 queue: Boolean(input.queue),
                 agentOverride: "pi",
+                // Ordinary Pi runs are isolated and local-only. External delivery uses
+                // the separate TaskManifest authority path.
+                autoWorktree: true,
+                autoMerge: false,
+                mergeStrategy: "branch-only",
+                terminal_mode: "ansi-html",
+                forceSequential: true,
                 includeGraph: input.includeGraph ?? true,
                 ...(input.model ? { modelOverride: input.model } : {}),
-                ...(input.forceSequential ? { forceSequential: true } : {}),
             }),
         }, 60_000);
     }

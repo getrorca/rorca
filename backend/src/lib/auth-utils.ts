@@ -57,7 +57,49 @@ export function decryptToken(encryptedStr: string): string {
   return decipher.update(ciphertext) + decipher.final('utf8');
 }
 
-export const INTERNAL_SERVICE_TOKEN = `rorca-internal-${process.pid}`;
+export const INTERNAL_SERVICE_USER_ID = 'rorca-internal-service';
+
+function resolveInternalServiceToken(): string {
+  const configured = String(process.env.RORCA_INTERNAL_SERVICE_TOKEN ?? '').trim();
+  if (configured) {
+    if (Buffer.byteLength(configured, 'utf8') < 32
+      || /^rorca-internal-(?:\d+|change-me|default)$/i.test(configured)) {
+      throw new Error('RORCA_INTERNAL_SERVICE_TOKEN must be an unpredictable secret of at least 32 bytes');
+    }
+    return configured;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('RORCA_INTERNAL_SERVICE_TOKEN is required in production');
+  }
+  // Non-production processes get an unpredictable process-local token. It is
+  // intentionally not derivable from PID and cannot authenticate another process.
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+export const INTERNAL_SERVICE_TOKEN = resolveInternalServiceToken();
+
+function sameInternalToken(supplied: unknown): boolean {
+  if (typeof supplied !== 'string') return false;
+  const expected = Buffer.from(INTERNAL_SERVICE_TOKEN, 'utf8');
+  const actual = Buffer.from(supplied, 'utf8');
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+function internalServiceUser(req: Request): AuthUser {
+  const service = String(req.headers['x-rorca-service'] ?? '').trim().toLowerCase();
+  if (service && service !== 'hermes' && service !== 'scheduler') {
+    throw new Error('Unsupported internal service identity');
+  }
+  const hermes = service === 'hermes';
+  return {
+    id: hermes ? 'rorca-hermes-service' : INTERNAL_SERVICE_USER_ID,
+    email: hermes ? 'hermes@rorca.internal' : 'scheduler@rorca.internal',
+    supabaseId: hermes
+      ? '00000000-0000-0000-0000-000000000002'
+      : '00000000-0000-0000-0000-000000000000',
+    role: 'admin',
+  };
+}
 
 function getDeveloperSuperuserEmails(): Set<string> {
   const configured = (process.env.RORCA_SUPERUSER_EMAILS || process.env.DEV_SUPERUSER_EMAILS || '')
@@ -127,6 +169,21 @@ export function isSuperUser(user: { role?: string } | null | undefined): boolean
   return user?.role === 'admin';
 }
 
+/**
+ * The unauthenticated local topology has one explicit human principal. This
+ * helper must stay narrower than a generic admin check: hosted/authenticated
+ * users and internal services require their provider-bound approval authority.
+ */
+export function isLocalHumanApprovalPrincipal(
+  user: { id?: string; email?: string; supabaseId?: string; role?: string } | null | undefined,
+): boolean {
+  return process.env.AUTH_REQUIRED !== 'true'
+    && user?.id === LOCAL_ADMIN.id
+    && user.email === LOCAL_ADMIN.email
+    && user.supabaseId === LOCAL_ADMIN.supabaseId
+    && user.role === LOCAL_ADMIN.role;
+}
+
 async function resolveAuthUserFromLocalJwt(token: string): Promise<AuthUser | null> {
   try {
     const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
@@ -163,44 +220,56 @@ export async function resolveAuthUserFromToken(token: string): Promise<AuthUser 
 }
 
 export async function authRequired(req: Request, res: Response, next: NextFunction): Promise<void> {
-  if (req.headers['x-rorca-internal'] === INTERNAL_SERVICE_TOKEN) {
-    req.user = {
-      id: '00000000-0000-0000-0000-000000000000',
-      email: 'scheduler@rorca.internal',
-      supabaseId: '00000000-0000-0000-0000-000000000000',
-      role: 'admin',
-    };
-    next();
+  const internalHeader = req.headers['x-rorca-internal'];
+  const serviceHeader = req.headers['x-rorca-service'];
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const validInternalHeader = internalHeader !== undefined && sameInternalToken(internalHeader);
+  const validInternalBearer = bearerToken !== null && sameInternalToken(bearerToken);
+  const claimsServiceIdentity = serviceHeader !== undefined || internalHeader !== undefined || validInternalBearer;
+
+  // Internal service identity is resolved before the local-human fallback in every
+  // supported topology. Every supplied service credential must be valid; a service
+  // label without a credential or contradictory credentials fail closed.
+  if (claimsServiceIdentity) {
+    const invalidInternalHeader = internalHeader !== undefined && !validInternalHeader;
+    const invalidBearer = bearerToken !== null && !validInternalBearer;
+    const missingServiceCredential = serviceHeader !== undefined && !validInternalHeader && !validInternalBearer;
+    if (invalidInternalHeader || invalidBearer || missingServiceCredential) {
+      res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
+      return;
+    }
+    try {
+      req.user = internalServiceUser(req);
+      next();
+    } catch {
+      res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
+    }
     return;
   }
 
-  // Local single-user mode (AUTH_REQUIRED not set): upstream middleware already
-  // populated req.user (LOCAL_ADMIN or a validated Supabase user). Pass through.
-  if (process.env.AUTH_REQUIRED !== 'true') {
+  if (process.env.AUTH_REQUIRED !== 'true' && !bearerToken) {
     if (!req.user) req.user = LOCAL_ADMIN;
     next();
     return;
   }
 
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-
-  if (!token) {
-    res.status(401).json({ error: 'Authentication required' });
+  if (!bearerToken) {
+    res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
     return;
   }
 
   try {
-    const resolvedUser = await resolveAuthUserFromToken(token);
+    const resolvedUser = await resolveAuthUserFromToken(bearerToken);
     if (!resolvedUser) {
-      res.status(401).json({ error: 'Invalid token' });
+      res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
       return;
     }
 
     req.user = resolvedUser;
     next();
   } catch {
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(401).json({ error: 'Unauthorized', code: 'AUTH_ERROR' });
   }
 }
 
@@ -230,7 +299,8 @@ function resolveWorkspaceId(req: Request): string | null {
     params.workspaceId ||
     params.id ||
     (typeof query.workspaceId === 'string' ? query.workspaceId : undefined) ||
-    (typeof body.workspaceId === 'string' ? body.workspaceId : undefined);
+    (typeof body.workspaceId === 'string' ? body.workspaceId : undefined) ||
+    (typeof body.workspace_id === 'string' ? body.workspace_id : undefined);
 
   return candidate ? String(candidate) : null;
 }
@@ -239,7 +309,7 @@ export function requireWorkspaceRole(minRole: WorkspaceRole) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.user;
     if (!user) {
-      res.status(401).json({ error: 'Authentication required' });
+      res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
       return;
     }
 
@@ -278,6 +348,20 @@ export function requireWorkspaceRole(minRole: WorkspaceRole) {
   };
 }
 
+export function requirePlatformAdmin() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
+      return;
+    }
+    if (!isSuperUser(req.user)) {
+      res.status(403).json({ error: 'Platform administrator authority required' });
+      return;
+    }
+    next();
+  };
+}
+
 export const requireWorkspaceMember = () => requireWorkspaceRole('member');
 export const requireWorkspaceAdmin = () => requireWorkspaceRole('admin');
 export const requireWorkspaceOwner = () => requireWorkspaceRole('owner');
@@ -286,7 +370,7 @@ export function requireRole(minRole: TeamRole) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.user;
     if (!user) {
-      res.status(401).json({ error: 'Authentication required' });
+      res.status(401).json({ error: 'Authentication required', code: 'AUTH_ERROR' });
       return;
     }
 

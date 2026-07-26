@@ -44,16 +44,17 @@ import templatesRouter from './routes/templates';
 import storiesRouter from './routes/stories';
 import schedulesRouter from './routes/schedules';
 import envVarsRouter from './routes/env-vars';
-import webhooksRouter from './routes/webhooks';
+import webhooksRouter, { webhookAdminRouter } from './routes/webhooks';
 import githubChecksRouter from './routes/github-checks';
 import workspaceGithubRouter from './routes/workspace-github';
+import workspaceGithubAppRouter from './routes/workspace-github-app';
 import activityRouter from './routes/activity';
 import analyticsRouter from './routes/analytics';
 import budgetRouter from './routes/budget';
 import finopsSettingsRouter from './routes/finops-settings';
 import usersRouter from './routes/users';
 import authRouter from './routes/auth';
-import { authRequired, LOCAL_ADMIN, resolveAuthUserFromToken } from './lib/auth-utils';
+import { authRequired } from './lib/auth-utils';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
@@ -67,7 +68,6 @@ import notificationsRouter from './routes/notifications';
 import settingsRouter from './routes/settings';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
-import { registerDraftPrSubscriber } from './lib/draft-pr-subscriber';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
@@ -121,7 +121,6 @@ import gitReinsEvidenceRouter from './routes/gitreins-evidence';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
 import { StoryLogFollower } from './lib/story-log-follower';
-import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import retrievalTracesRouter from './routes/retrieval-traces';
@@ -130,6 +129,7 @@ import diagnosticsRouter from './routes/diagnostics';
 import mcpToolsRouter from './routes/mcp-tools';
 import executionEnvironmentsRouter from './routes/execution-environments';
 import { initBoss } from './lib/pg-boss';
+import { recoverPendingDispatchPublications } from './lib/dispatch-publication';
 import {
   ensureMcpToken,
   isAllowedMcpOrigin,
@@ -156,6 +156,10 @@ if (agentType === 'opencode') {
 }
 
 const app = express();
+// Canonical API paths are case-sensitive and do not accept an implicit trailing
+// slash. Security boundaries and Express therefore share one routing contract.
+app.enable('case sensitive routing');
+app.enable('strict routing');
 const PORT = process.env.PORT || 3030;
 const BACKGROUND_RUNTIME_ENABLED =
   process.env.NODE_ENV !== 'test' &&
@@ -234,17 +238,26 @@ app.use(cors({
   origin: corsOrigin,
   credentials: allowCredentials,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key', 'Idempotency-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key', 'X-Rorca-Operator-Capability', 'Idempotency-Key'],
   maxAge: 86400,
 }));
 
-// Capture raw body for webhook signature verification.
-// The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
+// Capture raw bytes only for exact provider callback paths. Protected webhook
+// administration is deliberately not part of this signature/CSRF exemption.
+const WEBHOOK_CALLBACK_PATHS = new Set([
+  '/api/webhooks/github',
+  '/api/webhooks/linear',
+  '/api/webhooks/vercel',
+  '/api/webhooks/slack',
+]);
+// One megabyte safely covers the bounded 512 KiB TaskManifest/context contract
+// while retaining the incoming mainline fix that removes Express's 100 KiB default.
 app.use(express.json({
-  limit: '500kb',
+  limit: '1mb',
   verify: (req, _res, buf) => {
     const url = (req as express.Request).originalUrl || '';
-    if (url.startsWith('/api/webhooks/')) {
+    const callbackPath = url.split('?', 1)[0];
+    if (WEBHOOK_CALLBACK_PATHS.has(callbackPath)) {
       (req as any).rawBody = buf;
     }
   },
@@ -262,6 +275,7 @@ app.use(helmet({
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'https:'],
       connectSrc: ["'self'", 'ws:', 'wss:', 'http:', 'https:'],
+      formAction: ["'self'", 'https://github.com'],
       upgradeInsecureRequests: httpsEnabled ? [] : null,
     },
   },
@@ -300,6 +314,8 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 
 // Rate limit public routes by IP (unauthenticated tier)
 app.use('/api/auth', rateLimiter, authRouter);
+// Exact provider callbacks only. The GitHub Manifest browser callback remains the
+// static GET /settings/github route; credential exchange stays protected below.
 app.use('/api/webhooks', webhooksRouter);
 // EQ-007: Public review routes (no auth required — accessed via shareable token)
 app.use('/api/review', rateLimiter, publicReviewRouter);
@@ -370,46 +386,22 @@ if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
 }
 
 // ─── Auth middleware (all routes below require authentication) ───
-// PR-009: Conditional auth — AUTH_REQUIRED=true enforces JWT on all protected routes.
-// Default (false/absent) = local single-user mode: inject local admin so req.user is
-// always defined (prevents crashes in routes that access user.id unconditionally).
-if (process.env.AUTH_REQUIRED === 'true') {
-  app.use(authRequired);
-} else {
-  // Local single-user mode: use JWT if provided and valid, otherwise inject local admin.
-  // Stale/invalid tokens are ignored (not rejected) so local dev doesn't break when
-  // the frontend has a leftover Supabase session from a previous run.
-  app.use(async (req: any, _res: any, next: any) => {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    if (token) {
-      try {
-        const resolvedUser = await resolveAuthUserFromToken(token);
-        if (resolvedUser) {
-          req.user = resolvedUser;
-          return next();
-        }
-        // Stale/invalid token in local mode — fall through to LOCAL_ADMIN
-        req.user = LOCAL_ADMIN;
-        return next();
-      } catch {
-        // Stale/invalid token in local mode — fall through to LOCAL_ADMIN
-        req.user = LOCAL_ADMIN;
-        return next();
-      }
-    }
-    req.user = LOCAL_ADMIN;
-    next();
-  });
-}
+// The same resolver runs in both shipped topologies. In local mode an omitted
+// credential becomes LOCAL_ADMIN, but a supplied Bearer/internal credential is
+// always validated and classified before that human fallback.
+app.use(authRequired);
 
 // ─── Rate limiting (after auth so req.user is available) ───
 app.use(rateLimiter);
 
 // ─── CSRF protection (double-submit cookie pattern) ───
 // Validates X-CSRF-Token header against _csrf cookie on POST/PUT/PATCH/DELETE.
-// Exempt: webhooks, MCP, docs, health, CSRF bootstrap, login/register, billing webhook.
+// Exempt: exact provider callbacks, MCP, docs, health, and CSRF bootstrap.
 app.use(csrfProtection);
+// Default-denied/MCP-excluded webhook administration requires platform +
+// workspace authorization in the router. It mounts after auth/CSRF but before
+// planGate so default-denied native routes remain callable only here, never MCP.
+app.use('/api/webhooks', webhookAdminRouter);
 app.use(planGate());
 
 // ─── Protected routes ───
@@ -444,7 +436,11 @@ app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
+// Provider-facing mutations attach the capability boundary on each exact route
+// before its handler. Autonomous children cannot turn localhost access into host
+// App/PAT/vault authority; command wrappers are defense in depth only.
 app.use('/api/workspaces', workspaceGithubRouter);
+app.use('/api/workspaces', workspaceGithubAppRouter);
 app.use('/api/workspaces', deliveryGovernanceRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/activity', activityRouter);
@@ -499,7 +495,7 @@ if (BACKGROUND_RUNTIME_ENABLED) {
   startNotificationDispatcher();
 
   // US-034: Subscribe draft PR lifecycle to update PR body on story completions
-  registerDraftPrSubscriber();
+  // Draft/PR provider mutations are terminal release effects owned by the worker seam.
 
   // RQ-002: Subscribe queue consumer to auto-trigger next run on completion
   startQueueConsumer();
@@ -524,7 +520,6 @@ if (BACKGROUND_RUNTIME_ENABLED) {
   storyLogFollower.start();
 
   // US-027: Subscribe commit status poster to post GitHub status checks for story progress
-  startCommitStatusPoster();
 
   // US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
   startCheckRunPoster();
@@ -551,18 +546,18 @@ if (BACKGROUND_RUNTIME_ENABLED) {
   });
 }
 
-// Safety net: log unhandled rejections instead of crashing the process.
-// Routes should handle their own errors, but this prevents a single bad request
-// from taking down the entire backend.
-process.on('unhandledRejection', (reason) => {
-  logger.error({ err: reason }, '[UnhandledRejection] Caught — process kept alive');
-});
-process.on('uncaughtException', (err) => {
-  logger.error({ err }, '[UncaughtException] Caught — process kept alive');
-});
-
 /* istanbul ignore next -- only when run directly, not in tests */
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV !== 'test' && !process.env.JEST_WORKER_ID) {
+  // Safety net: log unhandled rejections instead of crashing the process.
+  // Routes should handle their own errors, but this prevents a single bad request
+  // from taking down the entire backend. Test imports must never mutate process-
+  // global listener state, especially when Jest reloads the server module.
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, '[UnhandledRejection] Caught — process kept alive');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error({ err }, '[UncaughtException] Caught — process kept alive');
+  });
   const tierSummary = summarizeRorcaTiers(swaggerSpec as any);
   const mcpToolDefinitions = getMcpToolDefinitions(swaggerSpec as any);
   logger.info(`[Rorca Tier] Route exposure: ${tierSummary.public} public, ${tierSummary.auth} auth, ${tierSummary.paid} paid, ${tierSummary.admin} admin (${tierSummary.denied} default-denied)`);
@@ -617,8 +612,6 @@ if (process.env.NODE_ENV !== 'test') {
       return;
     }
 
-    // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
-    cleanupOrphanRuns();
     // Scheduler runs in-process with API — see CLI-035 Supervisor decision.
     startScheduler();
     cleanupOldLogs();
@@ -630,8 +623,16 @@ if (process.env.NODE_ENV !== 'test') {
       .catch((err) => logger.error({ err }, '[pty-archive] Startup reconciliation failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
-    // PG-004: Initialise pg-boss so the Express process can send jobs
-    initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
+    // PG-004: Initialise the configured pg-boss schema before orphan cleanup.
+    // Cleanup must never interpret an absent/unstarted transport schema as proof
+    // that application-owned running state is orphaned.
+    initBoss()
+      .then(async () => {
+        const recovery = await recoverPendingDispatchPublications();
+        if (recovery.scanned > 0) logger.info({ recovery }, '[pipeline-dispatch] startup publication recovery complete');
+        await cleanupOrphanRuns();
+      })
+      .catch(err => logger.error({ err }, '[pg-boss] startup init/recovery/cleanup failed'));
     // US-004: Recover in-flight stories from before server restart
     storyLogFollower.recover().catch(err => logger.error({ err }, '[story-log-follower] Recovery failed'));
     // US-003: Start dedicated LISTEN/NOTIFY clients for real-time WAL and

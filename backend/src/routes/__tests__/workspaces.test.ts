@@ -8,165 +8,208 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import crypto from 'crypto';
+import { once } from 'events';
+import type { Server } from 'http';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, execute } from '../../db/index';
 
-let app: Express;
+const mockAutoHydrateWorkspaceContext = jest.fn().mockResolvedValue(undefined);
+jest.mock('../../lib/auto-memory', () => ({
+  ...jest.requireActual('../../lib/auto-memory'),
+  autoHydrateWorkspaceContext: (...args: unknown[]) => mockAutoHydrateWorkspaceContext(...args),
+}));
+
+const WORKSPACE_ID = `ws-routes-${crypto.randomUUID()}`;
+let server: Server;
 let tmpDir: string;
-let _dbPath: string;
 let authToken: string;
 
-beforeEach(async () => {
-  jest.resetModules();
+function workspace(overrides: Record<string, unknown> = {}) {
+  return {
+    id: WORKSPACE_ID,
+    label: 'Test Workspace',
+    path: tmpDir,
+    domains: ['frontend', 'backend'],
+    ...overrides,
+  };
+}
+
+async function cleanWorkspaceFixture(): Promise<void> {
+  await execute('DELETE FROM agent_profiles WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM workspace_context WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [WORKSPACE_ID]);
+  await execute('DELETE FROM workspaces WHERE id = $1', [WORKSPACE_ID]);
+}
+
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-ws-test-'));
-  _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-  const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
-  // Upgrade user to 'pro' plan to avoid requirePlan quota blocking workspace creation tests
-  await execute("UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'", []);
+  const serverModule = require('../../server');
+  const expressApp = serverModule.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: `workspace-routes-${crypto.randomUUID()}@test.rorca.local`,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  server = expressApp.listen(0, '127.0.0.1');
+  await once(server, 'listening');
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  mockAutoHydrateWorkspaceContext.mockClear();
+  await cleanWorkspaceFixture();
 });
 
-const validWorkspace = {
-  id: 'ws-test-1',
-  label: 'Test Workspace',
-  path: os.tmpdir(),
-  domains: ['frontend', 'backend'],
-};
+afterEach(cleanWorkspaceFixture);
+
+afterAll(async () => {
+  await cleanWorkspaceFixture();
+  server.closeAllConnections();
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
+});
+
+function api() {
+  return request(server);
+}
+
+async function createWorkspace() {
+  return api().post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(workspace());
+}
 
 test('POST /api/workspaces with valid path returns 201', async () => {
-  const res = await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+  const res = await createWorkspace();
 
   expect(res.status).toBe(201);
-  expect(res.body.workspace).toMatchObject({
-    id: 'ws-test-1',
-    label: 'Test Workspace',
-    path: os.tmpdir(),
-    domains: ['frontend', 'backend'],
-  });
+  expect(res.body.workspace).toMatchObject(workspace());
   expect(res.body.workspace.created_at).toBeDefined();
+  expect(mockAutoHydrateWorkspaceContext).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: WORKSPACE_ID }));
 });
 
 test('POST /api/workspaces with non-existent path returns 400', async () => {
-  const res = await request(app)
+  const nonexistentPath = path.join(tmpDir, 'does-not-exist');
+  const res = await api()
     .post('/api/workspaces')
     .set('Authorization', `Bearer ${authToken}`)
-    .send({ ...validWorkspace, path: '/does/not/exist/xyz' });
+    .send(workspace({ path: nonexistentPath }));
 
   expect(res.status).toBe(400);
-  expect(res.body.error).toContain('/does/not/exist/xyz');
+  expect(res.body.error).toContain(nonexistentPath);
 });
 
-test('POST /api/workspaces missing required field returns 400', async () => {
-  const res = await request(app)
+test('POST /api/workspaces missing required field returns 422', async () => {
+  const res = await api()
     .post('/api/workspaces')
     .set('Authorization', `Bearer ${authToken}`)
-    .send({ id: 'ws-1', label: 'Test' });
+    .send({ id: WORKSPACE_ID, label: 'Test' });
 
-  expect(res.status).toBe(422); // validateBody returns 422 for Zod validation failures
+  expect(res.status).toBe(422);
   expect(res.body.error).toBeDefined();
 });
 
-test('GET /api/workspaces returns array containing created workspace', async () => {
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+test('GET /api/workspaces returns the fixture workspace', async () => {
+  await createWorkspace();
 
-  const res = await request(app).get('/api/workspaces').set('Authorization', `Bearer ${authToken}`);
+  const res = await api().get('/api/workspaces').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(Array.isArray(res.body.items)).toBe(true);
-  const created = res.body.items.find((item: { id: string }) => item.id === 'ws-test-1');
+  const created = res.body.items.find((item: { id: string }) => item.id === WORKSPACE_ID);
   expect(created).toBeDefined();
-  expect(Array.isArray(created?.domains)).toBe(true);
+  expect(Array.isArray(created.domains)).toBe(true);
 });
 
 test('GET /api/workspaces/:id returns workspace', async () => {
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+  await createWorkspace();
 
-  const res = await request(app).get('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
+  const res = await api().get(`/api/workspaces/${WORKSPACE_ID}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.workspace.id).toBe('ws-test-1');
+  expect(res.body.workspace.id).toBe(WORKSPACE_ID);
 });
 
 test('GET /api/workspaces/:id returns 404 for nonexistent', async () => {
-  const res = await request(app).get('/api/workspaces/nonexistent').set('Authorization', `Bearer ${authToken}`);
+  const res = await api().get(`/api/workspaces/${WORKSPACE_ID}-missing`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(404);
   expect(res.body.error).toBe('Workspace not found');
 });
 
 test('DELETE /api/workspaces/:id returns 204 and workspace is gone', async () => {
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+  await createWorkspace();
 
-  const delRes = await request(app).delete('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
+  const delRes = await api().delete(`/api/workspaces/${WORKSPACE_ID}`).set('Authorization', `Bearer ${authToken}`);
   expect(delRes.status).toBe(204);
 
-  const getRes = await request(app).get('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
+  const getRes = await api().get(`/api/workspaces/${WORKSPACE_ID}`).set('Authorization', `Bearer ${authToken}`);
   expect(getRes.status).toBe(404);
 });
 
 test('WAL events logged for workspace_create and workspace_delete', async () => {
-  // Use a unique ID to avoid accumulating WAL events from other tests using ws-test-1
-  const uniqueId = `ws-wal-test-${Date.now()}`;
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send({ ...validWorkspace, id: uniqueId });
-  await request(app).delete(`/api/workspaces/${uniqueId}`).set('Authorization', `Bearer ${authToken}`);
+  await createWorkspace();
+  await api().delete(`/api/workspaces/${WORKSPACE_ID}`).set('Authorization', `Bearer ${authToken}`);
 
-  const events = await query(
-    "SELECT event_type, workspace_id FROM wal_events WHERE workspace_id = $1 AND event_type IN ('workspace_create', 'workspace_delete') ORDER BY id",
-    [uniqueId]
-  ) as { event_type: string; workspace_id: string }[];
+  const events = await query<{ event_type: string; workspace_id: string }>(
+    `SELECT event_type, workspace_id FROM wal_events
+     WHERE workspace_id = $1 AND event_type IN ('workspace_create', 'workspace_delete') ORDER BY id`,
+    [WORKSPACE_ID],
+  );
 
-  expect(events).toHaveLength(2);
-  expect(events[0].event_type).toBe('workspace_create');
-  expect(events[1].event_type).toBe('workspace_delete');
+  expect(events.map(event => event.event_type)).toEqual(['workspace_create', 'workspace_delete']);
 });
 
-test('GET /api/workspaces/:id/context returns 200 with null fields before hydration', async () => {
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+test('GET /api/workspaces/:id/context returns null fields before hydration', async () => {
+  await createWorkspace();
 
-  const res = await request(app).get('/api/workspaces/ws-test-1/context').set('Authorization', `Bearer ${authToken}`);
+  const res = await api().get(`/api/workspaces/${WORKSPACE_ID}/context`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.schemaSnapshot).toBeNull();
-  expect(res.body.schemaTableCount).toBeNull();
-  expect(res.body.gitMemory).toBeNull();
-  expect(res.body.lastIngestedCommitHash).toBeNull();
-  expect(res.body.gitCommitCount).toBeNull();
+  expect(res.body).toMatchObject({
+    schemaSnapshot: null,
+    schemaTableCount: null,
+    gitMemory: null,
+    lastIngestedCommitHash: null,
+    gitCommitCount: null,
+  });
 });
 
-test('GET /api/workspaces/:id/context returns populated fields after INSERT', async () => {
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+test('GET /api/workspaces/:id/context returns populated fields after hydration state update', async () => {
+  await createWorkspace();
+  await execute(
+    `INSERT INTO workspace_context
+       (workspace_id, schema_snapshot, schema_snapshot_at, schema_table_count, last_ingested_commit_hash, git_commit_count)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (workspace_id) DO UPDATE SET
+       schema_snapshot = EXCLUDED.schema_snapshot,
+       schema_snapshot_at = EXCLUDED.schema_snapshot_at,
+       schema_table_count = EXCLUDED.schema_table_count,
+       last_ingested_commit_hash = EXCLUDED.last_ingested_commit_hash,
+       git_commit_count = EXCLUDED.git_commit_count`,
+    [WORKSPACE_ID, 'CREATE TABLE users (id TEXT);', '2026-02-21T00:00:00Z', 1, 'abc123', 5],
+  );
 
-  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_snapshot_at, schema_table_count, last_ingested_commit_hash, git_commit_count)
-     VALUES ($1, $2, $3, $4, $5, $6)`, ['ws-test-1', 'CREATE TABLE users (id TEXT);', '2026-02-21T00:00:00Z', 1, 'abc123', 5]);
-
-  const res = await request(app).get('/api/workspaces/ws-test-1/context').set('Authorization', `Bearer ${authToken}`);
+  const res = await api().get(`/api/workspaces/${WORKSPACE_ID}/context`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.schemaSnapshot).toBe('CREATE TABLE users (id TEXT);');
-  expect(res.body.schemaTableCount).toBe(1);
-  expect(res.body.gitMemory).toBeNull();
-  expect(res.body.lastIngestedCommitHash).toBe('abc123');
-  expect(res.body.gitCommitCount).toBe(5);
+  expect(res.body).toMatchObject({
+    schemaSnapshot: 'CREATE TABLE users (id TEXT);',
+    schemaTableCount: 1,
+    gitMemory: null,
+    lastIngestedCommitHash: 'abc123',
+    gitCommitCount: 5,
+  });
 });
 
 test('GET /api/workspaces/:id/status returns canonical database capability with redacted connection metadata', async () => {
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+  await createWorkspace();
 
-  const res = await request(app).get('/api/workspaces/ws-test-1/status').set('Authorization', `Bearer ${authToken}`);
+  const res = await api().get(`/api/workspaces/${WORKSPACE_ID}/status`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.workspaceId).toBe('ws-test-1');
+  expect(res.body.workspaceId).toBe(WORKSPACE_ID);
   expect(res.body.databaseCapability).toMatchObject({
     dbMode: expect.any(String),
     provider: expect.any(String),
@@ -182,4 +225,5 @@ test('GET /api/workspaces/:id/status returns canonical database capability with 
   expect(res.body.databaseSetup.modes).toHaveLength(3);
   expect(res.body.databaseSetup.graphModes.map((entry: { mode: string }) => entry.mode).sort()).toEqual(['full', 'lite']);
   expect(res.body.graph).toHaveProperty('graphMode', res.body.databaseCapability.graphMode);
+  expect(res.body.graph).toHaveProperty('graphName', 'rorca_v2');
 });

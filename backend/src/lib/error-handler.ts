@@ -38,6 +38,17 @@ export function errorHandler(
     return;
   }
 
+  // Express reports malformed percent-encoded path parameters as URIError(400).
+  // Preserve that client rejection instead of converting malformed routing input
+  // into an internal error response.
+  if (err instanceof URIError && (err as URIError & { status?: number }).status === 400) {
+    res.status(400).json({
+      error: 'Malformed request path encoding',
+      code: 'MALFORMED_PATH',
+    });
+    return;
+  }
+
   // SQLite unique constraint — map to 409 Conflict
   if (err.message?.includes('UNIQUE constraint failed')) {
     res.status(409).json({

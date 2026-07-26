@@ -30,6 +30,7 @@ const baseData: PrTemplateData = {
     agentType: 'claude',
     model: 'claude-opus-4-6',
     diffStats: '3 files changed, 42 insertions(+), 5 deletions(-)',
+    diffSummary: '- Added the requested feature\n- Preserved existing behavior',
   },
 };
 

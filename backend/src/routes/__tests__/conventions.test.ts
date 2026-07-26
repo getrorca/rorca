@@ -5,88 +5,99 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
+import { once } from 'events';
 import * as fs from 'fs';
+import type { Server } from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
+import { execute, queryOne } from '../../db/index';
 import { getAuthToken } from './helpers/auth-helper';
-import { execute } from '../../db/index';
 
-let app: Express;
+const mockDiscoverConventions = jest.fn().mockResolvedValue({
+  stack: [{ name: 'React', version: '18', role: 'ui', confidence: 'high', evidence: ['package.json'] }],
+  conventions: [{ category: 'naming', observation: 'camelCase', source: 'src/', confidence: 'high' }],
+  architecture: { pattern: 'SPA', entryPoints: ['src/main.tsx'], directories: [] },
+  fileGovernance: [{ glob: 'src/**', owner: 'Frontend specialist', rules: ['Use TypeScript'] }],
+  directionL3: '## Stack\nReact + TypeScript',
+  claudeMd: null,
+  agentsMd: '# AGENTS.md\n\nFile governance.',
+  skills: [],
+});
+
+jest.mock('../../lib/convention-agent', () => ({
+  discoverConventions: (...args: unknown[]) => mockDiscoverConventions(...args),
+}));
+
+jest.mock('../../lib/llm-client', () => ({
+  chatComplete: jest.fn(),
+  getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+  isValidModel: jest.fn().mockReturnValue(true),
+  DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
+  SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+}));
+
+const fixtureId = crypto.randomUUID();
+const workspaceId = `ws-conventions-${fixtureId}`;
+const authEmail = `conventions-${fixtureId}@test.rorca.local`;
+let app: Server;
 let tmpDir: string;
 let authToken: string;
-let workspaceId: string;
+
+function api() {
+  return request(app);
+}
+
+async function cleanFixture(): Promise<void> {
+  await execute('DELETE FROM convention_proposals WHERE workspace_id = $1', [workspaceId]);
+  await execute('DELETE FROM wal_events WHERE workspace_id = $1', [workspaceId]);
+}
+
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-conventions-test-'));
+  const serverMod = require('../../server');
+  const expressApp = serverMod.default as Express;
+  authToken = await getAuthToken(expressApp, {
+    email: authEmail,
+    authId: crypto.randomUUID(),
+    role: 'admin',
+  });
+  await execute('INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)', [
+    workspaceId,
+    'Conventions Test Workspace',
+    tmpDir,
+  ]);
+  app = expressApp.listen(0, '127.0.0.1');
+  await once(app, 'listening');
+});
 
 beforeEach(async () => {
-  jest.resetModules();
-
-  jest.doMock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn().mockResolvedValue({
-      text: JSON.stringify({
-        l3: '## Stack\nReact + TypeScript',
-        agentsMd: '# AGENTS.md\n\nFile governance.',
-        libraryGuides: [],
-        reasoning: 'Test reasoning',
-      }),
-      usage: { input_tokens: 100, output_tokens: 50 },
-    }),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockReturnValue(true),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-  }));
-
-  jest.doMock('../../lib/convention-discovery', () => ({
-    discoverConventions: jest.fn().mockResolvedValue({
-      stack: [{ name: 'React', version: '18', role: 'ui' }],
-      conventions: [{ category: 'naming', observation: 'camelCase', source: 'src/', confidence: 'high' }],
-      architecture: { pattern: 'SPA', description: 'Single page app' },
-      fileGovernance: '# AGENTS.md\n\nFile governance.',
-      directionL3: '## Stack\nReact + TypeScript',
-      perLibraryGuides: {},
-    }),
-  }));
-
-  jest.doMock('../../lib/drift-detector', () => ({
-    detectDrift: jest.fn().mockResolvedValue({
-      violations: [],
-      summary: 'No drift detected.',
-      checkedAt: new Date().toISOString(),
-      score: 100,
-      conventionsChecked: 0,
-      filesSampled: 0,
-    }),
-  }));
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-conventions-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
-  const serverMod = require('../../server');
-  app = serverMod.default;
-authToken = await getAuthToken(app);
-
-  workspaceId = 'ws-conventions-test-' + Date.now();
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [workspaceId,
-    'Conventions Test Workspace',
-    tmpDir,]);
+  mockDiscoverConventions.mockClear();
+  await cleanFixture();
 });
 
-afterEach(async () => {
-  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
-  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
-});
+afterEach(cleanFixture);
 
-// ─── POST /api/conventions/discover ───────────────────────────────────────
+afterAll(async () => {
+  await cleanFixture();
+  await execute('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+  if (app) {
+    app.closeAllConnections();
+    await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+  }
+  await execute('DELETE FROM users WHERE email = $1', [authEmail]);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
+});
 
 describe('POST /api/conventions/discover', () => {
   test('returns 400 when workspaceId is missing', async () => {
-    const res = await request(app)
+    const res = await api()
       .post('/api/conventions/discover')
       .set('Authorization', `Bearer ${authToken}`)
       .send({});
@@ -96,7 +107,7 @@ describe('POST /api/conventions/discover', () => {
   });
 
   test('returns 404 for unknown workspace', async () => {
-    const res = await request(app)
+    const res = await api()
       .post('/api/conventions/discover')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'nonexistent-ws' });
@@ -104,41 +115,49 @@ describe('POST /api/conventions/discover', () => {
     expect(res.status).toBe(404);
   });
 
-  test('creates a convention proposal for valid workspace', async () => {
-    const res = await request(app)
+  test('creates one pending convention proposal with an exact WAL identity', async () => {
+    const res = await api()
       .post('/api/conventions/discover')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId });
 
-    expect([200, 201]).toContain(res.status);
-    if (res.status === 200 || res.status === 201) {
-      expect(res.body.ok).toBe(true);
-      expect(res.body.proposalId || res.body.proposal).toBeDefined();
-    }
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      id: expect.any(Number),
+      workspaceId,
+      status: 'pending',
+      proposal: expect.objectContaining({ directionL3: '## Stack\nReact + TypeScript' }),
+    });
+    expect(mockDiscoverConventions).toHaveBeenCalledWith(tmpDir);
+
+    const proposal = await queryOne<{ status: string }>(
+      'SELECT status FROM convention_proposals WHERE id = $1 AND workspace_id = $2',
+      [res.body.id, workspaceId],
+    );
+    const wal = await queryOne<{ payload: Record<string, unknown> | string }>(
+      "SELECT payload FROM wal_events WHERE workspace_id = $1 AND event_type = 'convention_discovered' ORDER BY id DESC LIMIT 1",
+      [workspaceId],
+    );
+    const payload = typeof wal?.payload === 'string' ? JSON.parse(wal.payload) : wal?.payload;
+    expect(proposal?.status).toBe('pending');
+    expect(payload).toMatchObject({ proposalId: res.body.id, conventionCount: 1, skillCount: 0 });
   });
 });
 
-// ─── GET /api/conventions/proposals/:workspaceId ──────────────────────────
-
 describe('GET /api/conventions/proposals/:workspaceId', () => {
-  test('returns empty array when no proposals exist', async () => {
-    const res = await request(app)
+  test('returns the canonical empty pageless collection shape', async () => {
+    const res = await api()
       .get(`/api/conventions/proposals/${workspaceId}`)
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.proposals || res.body).toBeDefined();
-    const proposals = res.body.proposals || res.body;
-    expect(Array.isArray(proposals)).toBe(true);
+    expect(res.body).toEqual({ items: [], total: 0 });
   });
 });
 
-// ─── POST /api/conventions/proposals/:id/reject ───────────────────────────
-
 describe('POST /api/conventions/proposals/:id/reject', () => {
-  test('returns 404 for non-existent proposal (numeric id)', async () => {
-    // Use a large numeric ID that won't exist
-    const res = await request(app)
+  test('returns 404 for a positive proposal id that does not exist', async () => {
+    const res = await api()
       .post('/api/conventions/proposals/999999/reject')
       .set('Authorization', `Bearer ${authToken}`)
       .send({});
@@ -146,25 +165,24 @@ describe('POST /api/conventions/proposals/:id/reject', () => {
     expect(res.status).toBe(404);
   });
 
-  test('returns 400 for non-numeric proposal id', async () => {
-    const res = await request(app)
+  test('rejects a non-numeric proposal id at the route boundary before SQL', async () => {
+    const res = await api()
       .post('/api/conventions/proposals/nonexistent-id/reject')
       .set('Authorization', `Bearer ${authToken}`)
       .send({});
 
     expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/positive integer/i);
   });
 });
 
-// ─── GET /api/conventions/drift/:workspaceId ──────────────────────────────
-
 describe('GET /api/conventions/drift/:workspaceId', () => {
-  test('returns null when no drift report exists', async () => {
-    const res = await request(app)
+  test('returns the explicit not-yet-implemented report shape', async () => {
+    const res = await api()
       .get(`/api/conventions/drift/${workspaceId}`)
       .set('Authorization', `Bearer ${authToken}`);
 
-    // Should be 200 with null report or 404
-    expect([200, 404]).toContain(res.status);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ report: null });
   });
 });

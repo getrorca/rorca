@@ -1,15 +1,13 @@
-/**
+/*
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
- * See LICENSE file in the project root for full license text.
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import TriggerPopover from '../../components/TriggerPopover';
 
-// ─── Mock apiFetch ────────────────────────────────────────────────────────────
 vi.mock('../../lib/apiFetch', () => ({
   apiFetch: vi.fn(),
   BASE_URL: 'http://localhost:3030',
@@ -28,145 +26,67 @@ beforeAll(() => {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
-afterAll(() => {
-  vi.restoreAllMocks();
-});
-
+afterAll(() => vi.restoreAllMocks());
 beforeEach(() => {
   vi.clearAllMocks();
   mockApiFetch.mockResolvedValue({} as never);
 });
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+describe('TriggerPopover — safe local execution defaults', () => {
+  it('keeps isolated worktree execution visibly required', () => {
+    render(<TriggerPopover loading={false} onTrigger={vi.fn()} onClose={vi.fn()} />);
 
-describe('TriggerPopover — autoMerge checkbox', () => {
-  it('completion action control is hidden when autoWorktree is off (default)', () => {
-    const onTrigger = vi.fn();
-    render(
-      <TriggerPopover
-        loading={false}
-        onTrigger={onTrigger}
-        onClose={vi.fn()}
-      />,
-    );
-
-    const completionAction = screen.queryByRole('combobox', { name: /completion action/i });
-    expect(completionAction).toBeNull();
+    const worktree = screen.getByRole('checkbox', { name: /isolate in worktree/i }) as HTMLInputElement;
+    expect(worktree.checked).toBe(true);
+    expect(worktree.disabled).toBe(true);
+    expect(screen.getByText('required')).toBeInTheDocument();
   });
 
-  it('completion action control is visible when autoWorktree is toggled on', () => {
-    const onTrigger = vi.fn();
-    render(
-      <TriggerPopover
-        loading={false}
-        onTrigger={onTrigger}
-        onClose={vi.fn()}
-      />,
-    );
+  it('offers only the local branch completion action', () => {
+    render(<TriggerPopover loading={false} onTrigger={vi.fn()} onClose={vi.fn()} />);
 
-    // Toggle on the worktree isolation checkbox
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
-    fireEvent.click(worktreeCheckbox);
-
-    const completionAction = screen.getByRole('combobox', { name: /completion action/i }) as HTMLSelectElement;
-    expect(completionAction).toBeInTheDocument();
-    expect(completionAction.value).toBe('direct');
+    const action = screen.getByRole('combobox', { name: /completion action/i }) as HTMLSelectElement;
+    expect(action.value).toBe('branch-only');
+    expect(Array.from(action.options).map(option => option.value)).toEqual(['branch-only']);
+    expect(screen.getByText(/no push, merge, PR, or deployment/i)).toBeInTheDocument();
   });
 
-  it('completion action defaults to direct merge when autoWorktree is enabled', () => {
+  it('submits the complete local-only sequential profile by default', () => {
     const onTrigger = vi.fn();
-    render(
-      <TriggerPopover
-        loading={false}
-        onTrigger={onTrigger}
-        onClose={vi.fn()}
-      />,
-    );
+    render(<TriggerPopover loading={false} onTrigger={onTrigger} onClose={vi.fn()} />);
 
-    // Toggle worktree isolation on
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
-    fireEvent.click(worktreeCheckbox);
-
-    const completionAction = screen.getByRole('combobox', { name: /completion action/i }) as HTMLSelectElement;
-    expect(completionAction.value).toBe('direct');
-  });
-
-  it('payload sent to onTrigger includes autoMerge:true when worktree on and merge checked', () => {
-    const onTrigger = vi.fn();
-    render(
-      <TriggerPopover
-        loading={false}
-        onTrigger={onTrigger}
-        onClose={vi.fn()}
-      />,
-    );
-
-    // Enable worktree isolation
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
-    fireEvent.click(worktreeCheckbox);
-
-    // Merge is checked by default — click Run Now
-    const runBtn = screen.getByRole('button', { name: /run now/i });
-    fireEvent.click(runBtn);
+    fireEvent.click(screen.getByRole('button', { name: /run now/i }));
 
     expect(onTrigger).toHaveBeenCalledOnce();
     const [autoWorktree, options] = onTrigger.mock.calls[0];
     expect(autoWorktree).toBe(true);
-    expect(options?.autoMerge).toBe(true);
-  });
-
-  it('defaults ordinary Run Now requests to truthful sequential options', () => {
-    const onTrigger = vi.fn();
-    render(
-      <TriggerPopover loading={false} onTrigger={onTrigger} onClose={vi.fn()} />,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: /run now/i }));
-
-    const [, options] = onTrigger.mock.calls[0];
     expect(options).toEqual(expect.objectContaining({
+      autoMerge: false,
+      mergeStrategy: 'branch-only',
+      terminal_mode: 'ansi-html',
       forceSequential: true,
       orchestrationMode: 'sequential',
       parallelism: 1,
     }));
   });
 
-  it('requests native PTY mode and sequential execution when the interactive terminal is selected', () => {
+  it('labels reliable autonomous output as the default terminal', () => {
+    render(<TriggerPopover loading={false} onTrigger={vi.fn()} onClose={vi.fn()} />);
+    const terminal = screen.getByRole('combobox', { name: /terminal stream/i }) as HTMLSelectElement;
+    expect(terminal.value).toBe('ansi-html');
+    expect(screen.getByRole('option', { name: /reliable autonomous/i })).toBeInTheDocument();
+  });
+
+  it('uses native PTY only after explicit interactive selection', () => {
     const onTrigger = vi.fn();
-    render(
-      <TriggerPopover loading={false} onTrigger={onTrigger} onClose={vi.fn()} />,
-    );
+    render(<TriggerPopover loading={false} onTrigger={onTrigger} onClose={vi.fn()} />);
 
     fireEvent.change(screen.getByRole('combobox', { name: /terminal stream/i }), {
       target: { value: 'native-pty' },
     });
     fireEvent.click(screen.getByRole('button', { name: /run now/i }));
 
-    expect(onTrigger).toHaveBeenCalledOnce();
     const [, options] = onTrigger.mock.calls[0];
-    expect(options).toEqual(expect.objectContaining({
-      terminal_mode: 'native-pty',
-      forceSequential: true,
-    }));
-  });
-
-  it('completion action control is hidden again after autoWorktree is toggled back off', () => {
-    const onTrigger = vi.fn();
-    render(
-      <TriggerPopover
-        loading={false}
-        onTrigger={onTrigger}
-        onClose={vi.fn()}
-      />,
-    );
-
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
-    // Toggle on
-    fireEvent.click(worktreeCheckbox);
-    expect(screen.getByRole('combobox', { name: /completion action/i })).toBeInTheDocument();
-
-    // Toggle off
-    fireEvent.click(worktreeCheckbox);
-    expect(screen.queryByRole('combobox', { name: /completion action/i })).toBeNull();
+    expect(options).toEqual(expect.objectContaining({ terminal_mode: 'native-pty', forceSequential: true }));
   });
 });

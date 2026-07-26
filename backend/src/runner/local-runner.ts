@@ -21,7 +21,7 @@
  * or equivalent, then set RORCA_ENGINE_API_PORT to that local port.
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -73,18 +73,15 @@ async function api<T>(pathSuffix: string, body: Record<string, unknown>): Promis
   return parsed as T;
 }
 
-function commandStatus(command: string): { installed: boolean; version?: string } {
-  try {
-    const version = execSync(`${command} --version`, { encoding: 'utf8', timeout: 5000 }).trim().split('\n')[0];
-    return { installed: true, ...(version ? { version } : {}) };
-  } catch {
+function commandStatus(command: string): { installed: boolean } {
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(dir, process.platform === 'win32' ? `${command}.cmd` : command);
     try {
-      execSync(`command -v ${command}`, { encoding: 'utf8', timeout: 5000, shell: '/bin/sh' });
+      fs.accessSync(candidate, fs.constants.X_OK);
       return { installed: true };
-    } catch {
-      return { installed: false };
-    }
+    } catch { /* continue */ }
   }
+  return { installed: false };
 }
 
 function localAgentReport() {
@@ -94,7 +91,6 @@ function localAgentReport() {
     agents[agent] = {
       installed: status.installed,
       credentialsReady: hasAgentCredentials(agent),
-      ...(status.version ? { version: status.version } : {}),
     };
   }
   return agents;
@@ -130,6 +126,45 @@ function resolveEnginePath(): string {
   return found;
 }
 
+function resolveTsxPath(): string {
+  const candidates = [
+    path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx'),
+    path.join(process.cwd(), 'node_modules', '.bin', 'tsx'),
+  ];
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) throw new Error(`trusted tsx launcher not found. Tried: ${candidates.join(', ')}`);
+  return fs.realpathSync(found);
+}
+
+function resolveRunnerPayloadPath(input: {
+  value: unknown;
+  label: string;
+  executionRoot: string;
+  payloadRoot: unknown;
+}): string {
+  if (typeof input.value !== 'string' || !path.isAbsolute(input.value)) {
+    throw new Error(`${input.label} must be an absolute host-frozen path`);
+  }
+  let candidate = path.resolve(input.value);
+  if (workspacePathOverride) {
+    if (typeof input.payloadRoot !== 'string' || !path.isAbsolute(input.payloadRoot)) {
+      throw new Error(`${input.label} cannot be remapped without an absolute payload execution root`);
+    }
+    const relative = path.relative(path.resolve(input.payloadRoot), candidate);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`${input.label} escaped the frozen payload execution root`);
+    }
+    candidate = path.resolve(input.executionRoot, relative);
+  }
+  const root = fs.realpathSync(input.executionRoot);
+  const resolved = fs.realpathSync(candidate);
+  const relative = path.relative(root, resolved);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${input.label} escaped the local execution root`);
+  }
+  return resolved;
+}
+
 async function runJob(job: any): Promise<void> {
   const payload = job.payload ?? {};
 
@@ -153,19 +188,16 @@ async function runJob(job: any): Promise<void> {
       throw new Error('wave_parallel_denied:local_runner_missing_policy');
     }
 
-    // Keep the legacy non-production experiment gate. Governed production wave
-    // dispatches instead require the stronger persisted envelope and server-side
-    // revalidation below; the legacy gate intentionally cannot authorize them.
-    if (!(process.env.NODE_ENV === 'production' && payloadParallelism > 1)) {
-      enforceWaveDispatchConsistency({
-        source: 'local-runner-job',
-        payloadMode,
-        payloadParallelism,
-        rowParallelism: payloadParallelism,
-        triggerOptions: payload.triggerOptions,
-        environment: currentWaveParallelPolicyEnvironment(),
-      });
-    }
+    // Legacy policy validates shape only. Production authority comes solely
+    // from the strict embedded envelope and server revalidation below.
+    enforceWaveDispatchConsistency({
+      source: 'local-runner-job',
+      payloadMode,
+      payloadParallelism,
+      rowParallelism: payloadParallelism,
+      triggerOptions: payload.triggerOptions,
+      environment: currentWaveParallelPolicyEnvironment(),
+    });
 
     const currentPolicy = await api<{
       allowed: boolean;
@@ -194,20 +226,44 @@ async function runJob(job: any): Promise<void> {
     return;
   }
 
-  const workspacePath = workspacePathOverride || payload.worktreePath || payload.workspacePath;
+  const payloadExecutionRoot = payload.worktreePath || payload.workspacePath;
+  if (workspacePathOverride && payload.worktreePath) {
+    throw new Error('Local workspace remapping cannot prove a distinct frozen worktree/base identity');
+  }
+  const workspacePath = workspacePathOverride || payloadExecutionRoot;
   if (!workspacePath || typeof workspacePath !== 'string') {
     throw new Error('Runner workspace path missing. Set RORCA_RUNNER_WORKSPACE_PATH or include workspacePath in job payload.');
   }
-  const specPath = String(payload.specPath);
-  const jsonPath = path.join(workspacePath, specPath);
+  const executionRoot = fs.realpathSync(workspacePath);
+  const repositoryRoot = workspacePathOverride
+    ? executionRoot
+    : fs.realpathSync(String(payload.workspacePath));
+  const jsonPath = resolveRunnerPayloadPath({
+    value: payload.runSpecPath,
+    label: 'runSpecPath',
+    executionRoot,
+    payloadRoot: payloadExecutionRoot,
+  });
+  const executionManifestPath = resolveRunnerPayloadPath({
+    value: payload.executionManifestPath,
+    label: 'executionManifestPath',
+    executionRoot,
+    payloadRoot: payloadExecutionRoot,
+  });
   const enginePath = resolveEnginePath();
-  const command = enginePath.endsWith('.ts') ? 'npx' : 'node';
-  const args = enginePath.endsWith('.ts') ? ['tsx', enginePath] : [enginePath];
+  const command = enginePath.endsWith('.ts') ? resolveTsxPath() : process.execPath;
+  const args = [enginePath];
 
   args.push('--json', jsonPath);
   args.push('--cwd', workspacePath);
   args.push('--run-id', String(payload.runId));
-  if (payload.wavePolicy?.workspaceId) args.push('--workspace-id', String(payload.wavePolicy.workspaceId));
+  if (typeof payload.workspaceId !== 'string' || !payload.workspaceId.trim()) {
+    throw new Error('Local runner payload lacks frozen workspaceId');
+  }
+  if (payload.wavePolicy?.workspaceId && payload.wavePolicy.workspaceId !== payload.workspaceId) {
+    throw new Error('Local runner wave policy workspace differs from frozen payload workspaceId');
+  }
+  args.push('--workspace-id', payload.workspaceId);
   args.push('--port', String(engineApiPort));
   args.push('--parallelism', String(effectiveParallelism));
   args.push('--agent', String(payload.agent ?? 'claude'));
@@ -218,6 +274,9 @@ async function runJob(job: any): Promise<void> {
   const terminalMode = payload.terminalMode ?? payload.terminal_mode;
   if (terminalMode) args.push('--terminal-mode', String(terminalMode));
   if (payload.branchName) args.push('--branch-name', String(payload.branchName));
+  args.push('--execution-manifests', executionManifestPath);
+  if (payload.worktreePath) args.push('--worktree-path', executionRoot);
+  args.push('--workspace-path', repositoryRoot);
   if (payload.thinkingEnabled) args.push('--thinking-enabled', String(payload.thinkingEnabled));
   if (payload.thinkingBudget) args.push('--thinking-budget', String(payload.thinkingBudget));
   if (payload.effortLevel) args.push('--effort-level', String(payload.effortLevel));
@@ -238,7 +297,7 @@ async function runJob(job: any): Promise<void> {
     ? payload.envOverrides as Record<string, string>
     : {};
   const child = spawn(command, args, {
-    cwd: workspacePath,
+    cwd: executionRoot,
     stdio: 'inherit',
     env: {
       ...inheritedEnv,

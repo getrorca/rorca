@@ -33,6 +33,10 @@
       "reason": "Public contract generation is shared release infrastructure."
     },
     {
+      "path": "scripts/build-cli.mjs",
+      "reason": "The deterministic bundled CLI build prevents shared runtime resolution from depending on source shadow modules."
+    },
+    {
       "path": "scripts/openapi-source.ts",
       "reason": "Current-checkout OpenAPI loading prevents cross-worktree contract contamination in both repositories."
     },
@@ -131,6 +135,54 @@
     {
       "path": "config/rorca-tier-snapshot.json",
       "reason": "Tier governance snapshots document the shared public API surface."
+    },
+    {
+      "path": "config/release-one-certification-gates.json",
+      "reason": "The deterministic supervised-core release gate and publication stop boundary apply to both OSS and OpenCore."
+    },
+    {
+      "path": "docs/release-certification/release-1-certification.md",
+      "reason": "Release-1 certification operation and human-only boundaries are shared release infrastructure."
+    },
+    {
+      "path": "docs/release-certification/release-1-f2-broad-classification.json",
+      "reason": "The evidence-bound Release-1 failure classification is shared release evidence."
+    },
+    {
+      "path": "scripts/__tests__/release-one-certification.test.mjs",
+      "reason": "Certification fail-fast and self-binding regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/build-cli.test.mjs",
+      "reason": "Deterministic bundled CLI and no-shadow regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/check-opencore-export.test.mjs",
+      "reason": "Candidate-aware OpenCore boundary regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/generate-release-one-f2-classification.mjs",
+      "reason": "Deterministic Release-1 evidence classification generation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/release-one-certification.mjs",
+      "reason": "The no-publication exact-pair certification runner is shared release infrastructure."
+    },
+    {
+      "path": "scripts/capture-real-terminal-boundaries.ts",
+      "reason": "Fail-closed scoped provider capture through the exact-host broker is shared release infrastructure."
+    },
+    {
+      "path": "scripts/verify-real-platform-boundaries.mjs",
+      "reason": "Mandatory actual platform-evidence validation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/real-platform-boundaries.test.mjs",
+      "reason": "Real platform artifact fail-closed regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/run-release-one-broad-certification.mjs",
+      "reason": "Current broad-result classification and no-waiver accounting is shared release infrastructure."
     },
     {
       "path": "docs/always-on-context-pr-notes.md",

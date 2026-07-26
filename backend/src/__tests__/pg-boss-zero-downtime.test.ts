@@ -45,15 +45,15 @@ import { spawn, type ChildProcess } from 'child_process';
 import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
+import { assertConnectedTestDatabase, resolveTestDatabaseUrl } from '../lib/test-db-safety';
+import { pgBossTestSchema } from './helpers/pg-boss-test-schema';
 
 jest.setTimeout(90_000);
 
 // ── DB URL ─────────────────────────────────────────────────────────────────────
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  'postgres://rorca:rorca@localhost:5432/rorca_test';
+const DB_URL = resolveTestDatabaseUrl();
+const BOSS_SCHEMA = pgBossTestSchema('zero_downtime');
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
 
@@ -110,6 +110,7 @@ let senderBoss: PgBoss;
 const allRunIds: number[] = [];
 const allWorkspaceIds: string[] = [];
 const tempSpecPaths: string[] = [];
+const activeWorkers = new Set<ChildProcess>();
 
 // ── Mini HTTP server (called by ten-second-mock-engine) ───────────────────────
 
@@ -222,7 +223,7 @@ async function insertAndEnqueueRun(
      RETURNING id`,
     [specPath, workspaceId],
   );
-  const runId = rows[0].id;
+  const runId = Number(rows[0].id);
   allRunIds.push(runId);
 
   // Enqueue via the sender boss instance (pollingIntervalSeconds=60 so it won't
@@ -252,6 +253,7 @@ function spawnWorker(): { proc: ChildProcess; logs: string[] } {
     {
       env: {
         DATABASE_URL: DB_URL,
+        PGBOSS_TEST_SCHEMA: BOSS_SCHEMA,
         WORKER_PORT: String(serverPort),
         PATH: process.env.PATH ?? '',
       },
@@ -268,6 +270,8 @@ function spawnWorker(): { proc: ChildProcess; logs: string[] } {
 
   proc.stdout?.on('data', capture);
   proc.stderr?.on('data', capture);
+  activeWorkers.add(proc);
+  proc.once('exit', () => activeWorkers.delete(proc));
 
   return { proc, logs };
 }
@@ -286,6 +290,7 @@ async function waitForWorkerReady(logs: string[], maxMs = 15_000): Promise<boole
 
 beforeAll(async () => {
   pool = new Pool({ connectionString: DB_URL, max: 5 });
+  await assertConnectedTestDatabase(pool, DB_URL);
 
   // Run migrations to ensure schema is current
   const { runPgMigrations } = await import('../db/pg-index');
@@ -294,7 +299,7 @@ beforeAll(async () => {
   // Start sender boss — used only to enqueue jobs, not to work on them
   senderBoss = new PgBoss({
     connectionString: DB_URL,
-    schema: 'pgboss',
+    schema: BOSS_SCHEMA,
     pollingIntervalSeconds: 60,
   });
   senderBoss.on('error', () => { /* suppress */ });
@@ -312,8 +317,16 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
+  for (const worker of [...activeWorkers]) {
+    try { worker.kill('SIGTERM'); } catch { /* ignore */ }
+  }
+  await sleep(500);
+  for (const worker of [...activeWorkers]) {
+    try { worker.kill('SIGKILL'); } catch { /* ignore */ }
+  }
+
   // Stop sender boss
-  try { await senderBoss.stop({ timeout: 5_000 }); } catch { /* ignore */ }
+  try { if (senderBoss) await senderBoss.stop({ timeout: 5_000 }); } catch { /* ignore */ }
 
   // Clean up test data in FK-safe order
   if (allRunIds.length > 0) {
@@ -332,8 +345,10 @@ afterAll(async () => {
     try { fs.unlinkSync(p); } catch { /* ignore */ }
   }
 
-  await new Promise<void>((res) => server.close(() => res()));
-  await pool.end();
+  if (server?.listening) {
+    await new Promise<void>((res) => server.close(() => res()));
+  }
+  if (pool) await pool.end();
 }, 20_000);
 
 // ── Test ──────────────────────────────────────────────────────────────────────
@@ -370,7 +385,18 @@ describe('pg-boss rolling deploy — zero-downtime worker handoff', () => {
       return rows.length === 3 && rows.every((r) => r.status === 'running');
     }, 15_000);
 
-    expect(allRunning).toBe(true);
+    if (!allRunning) {
+      const statuses = await pool.query<{ id: number; status: string }>(
+        `SELECT id, status FROM pipeline_runs WHERE id = ANY($1) ORDER BY id`,
+        [firstThreeRunIds],
+      );
+      const jobs = await pool.query<{ state: string; count: string }>(
+        `SELECT state::text, COUNT(*)::text AS count
+           FROM ${BOSS_SCHEMA}.job
+          WHERE name = 'pipeline:run' GROUP BY state ORDER BY state`,
+      );
+      throw new Error(`worker-v1 did not claim all jobs; runs=${JSON.stringify(statuses.rows)} jobs=${JSON.stringify(jobs.rows)} logs=${v1Logs.join('')}`);
+    }
 
     // ── Phase 4: SIGTERM worker-v1 + simultaneously start worker-v2 ──────────
     workerV1.kill('SIGTERM');

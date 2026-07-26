@@ -17,6 +17,14 @@ export interface WalEvent {
   story_id: string | null;
   actor: string;
   payload: string | null;
+  ingest_key?: string | null;
+  trust_provenance?: 'untrusted' | 'host';
+  trusted_source?: 'execution-engine' | 'worker' | 'story-result' | null;
+  canonical_run_id?: number | string | null;
+  story_result_id?: number | string | null;
+  event_identity_hash?: string | null;
+  outbox_ready_at?: string | null;
+  outbox_relayed_at?: string | null;
 }
 
 export const PI_NATIVE_WAL_EVENT_TYPES = [
@@ -27,11 +35,15 @@ export const PI_NATIVE_WAL_EVENT_TYPES = [
 export type PiNativeWalEventType = typeof PI_NATIVE_WAL_EVENT_TYPES[number];
 
 type Subscriber = (event: WalEvent) => void;
+type DurableSubscriber = (event: WalEvent) => Promise<void>;
 type TopicSubscriber<T = unknown> = (event: T) => void;
 
 const subscribers = new Map<number, Subscriber>();
+const durableSubscribers = new Map<number, DurableSubscriber>();
 const topicSubscribers = new Map<string, Map<number, TopicSubscriber>>();
 const recentlyBroadcastWalIds = new Set<number>();
+const durablyAcceptedWalIds = new Set<number>();
+const durableBroadcastsInFlight = new Map<number, Promise<void>>();
 const MAX_RECENT_WAL_IDS = 2_048;
 let nextId = 1;
 
@@ -46,22 +58,25 @@ export function subscribe(fn: Subscriber): () => void {
   };
 }
 
-/**
- * Broadcast a WAL event to all current subscribers.
- */
-export function broadcastAll(event: WalEvent): void {
+function rememberBounded(set: Set<number>, id: number): void {
+  set.add(id);
+  if (set.size > MAX_RECENT_WAL_IDS) {
+    const oldest = set.values().next().value as number | undefined;
+    if (oldest !== undefined) set.delete(oldest);
+  }
+}
+
+function claimBroadcast(event: WalEvent): boolean {
   // The inserting route and PostgreSQL LISTEN/NOTIFY can observe the same row in
   // one process. Suppress that duplicate without hiding events inserted by a
   // different process (which arrive only through LISTEN here).
-  if (Number.isSafeInteger(event.id)) {
-    if (recentlyBroadcastWalIds.has(event.id)) return;
-    recentlyBroadcastWalIds.add(event.id);
-    if (recentlyBroadcastWalIds.size > MAX_RECENT_WAL_IDS) {
-      const oldest = recentlyBroadcastWalIds.values().next().value as number | undefined;
-      if (oldest !== undefined) recentlyBroadcastWalIds.delete(oldest);
-    }
-  }
+  if (!Number.isSafeInteger(event.id)) return true;
+  if (recentlyBroadcastWalIds.has(event.id)) return false;
+  rememberBounded(recentlyBroadcastWalIds, event.id);
+  return true;
+}
 
+function broadcastVolatile(event: WalEvent): void {
   for (const fn of subscribers.values()) {
     try {
       fn(event);
@@ -69,6 +84,53 @@ export function broadcastAll(event: WalEvent): void {
       // subscriber threw — ignore to avoid breaking other subscribers
     }
   }
+}
+
+/** Broadcast to ordinary best-effort UI/telemetry subscribers. */
+export function broadcastAll(event: WalEvent): void {
+  if (!claimBroadcast(event)) return;
+  broadcastVolatile(event);
+}
+
+/**
+ * Broadcast and await durable acceptance subscribers. Trusted WAL relay calls
+ * this before acknowledgement, so acknowledgement means durable projection
+ * acceptance—not provider completion. A rejection leaves the outbox retryable.
+ */
+export async function broadcastAllDurably(event: WalEvent): Promise<void> {
+  if (!Number.isSafeInteger(event.id)) {
+    broadcastVolatile(event);
+    await Promise.all([...durableSubscribers.values()].map(fn => fn(event)));
+    return;
+  }
+  if (durablyAcceptedWalIds.has(event.id)) return;
+  const existing = durableBroadcastsInFlight.get(event.id);
+  if (existing) return existing;
+
+  const shouldBroadcastVolatile = claimBroadcast(event);
+  const durable = (async () => {
+    if (shouldBroadcastVolatile) broadcastVolatile(event);
+    await Promise.all([...durableSubscribers.values()].map(fn => fn(event)));
+    rememberBounded(durablyAcceptedWalIds, event.id);
+  })();
+  durableBroadcastsInFlight.set(event.id, durable);
+  try {
+    await durable;
+  } catch (error) {
+    durablyAcceptedWalIds.delete(event.id);
+    if (shouldBroadcastVolatile) recentlyBroadcastWalIds.delete(event.id);
+    throw error;
+  } finally {
+    if (durableBroadcastsInFlight.get(event.id) === durable) {
+      durableBroadcastsInFlight.delete(event.id);
+    }
+  }
+}
+
+export function subscribeDurable(fn: DurableSubscriber): () => void {
+  const id = nextId++;
+  durableSubscribers.set(id, fn);
+  return () => { durableSubscribers.delete(id); };
 }
 
 /**
@@ -111,6 +173,10 @@ export function broadcastTopic<T = unknown>(topic: string, event: T): void {
  */
 export function subscriberCount(): number {
   return subscribers.size;
+}
+
+export function durableSubscriberCount(): number {
+  return durableSubscribers.size;
 }
 
 /**

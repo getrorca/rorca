@@ -89,24 +89,13 @@ export interface WriteResult {
   diagramsPath: string;
 }
 
-export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResult {
-  const pendingDir = path.join(workspacePath, 'forge', 'specs', 'pending');
-  const specPath = path.join(pendingDir, `${spec.slug}.json`);
-  const diagramsPath = path.join(pendingDir, `${spec.slug}-diagrams.md`);
-  const canonicalSlug = path.basename(specPath, '.json');
-
-  if (fs.existsSync(specPath)) {
-    throw new Error(`Spec '${spec.slug}' already exists at ${specPath}. Delete it first or use a different title.`);
-  }
-
-  fs.mkdirSync(pendingDir, { recursive: true });
-
-  // Write spec in run-loop.sh compatible format
-  const specJson: Record<string, unknown> = {
+export function buildSpecDocument(spec: GeneratedSpec, generatedAt = new Date().toISOString()): Record<string, unknown> {
+  const canonicalSlug = spec.slug;
+  return {
     id: canonicalSlug,
     slug: canonicalSlug,
     title: spec.title,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     ...(spec.model ? { model: spec.model } : {}),
     ...(spec.reasoning ? { reasoning: spec.reasoning } : {}),
     autoWorktree: true,
@@ -131,14 +120,61 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
     ...(spec.postSavePolicy ? { postSavePolicy: spec.postSavePolicy } : {}),
     ...(spec.authoring ? { authoring: spec.authoring } : {}),
   };
-  fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');
+}
 
-  // Write diagrams as markdown
+export function buildSpecDiagramsDocument(spec: GeneratedSpec, generatedAt = new Date().toISOString()): string {
   const diagramSections = Object.entries(spec.diagrams).map(([type, output]) =>
     `## ${type}\n\n### Mermaid\n\`\`\`mermaid\n${output.mermaid}\n\`\`\`\n\n### ASCII\n\`\`\`\n${output.ascii}\n\`\`\``
   ).join('\n\n');
-  const diagramsMd = `# ${spec.title} — Diagrams\n\nGenerated: ${new Date().toISOString()}\n\n${diagramSections}\n`;
-  fs.writeFileSync(diagramsPath, diagramsMd, 'utf8');
+  return `# ${spec.title} — Diagrams\n\nGenerated: ${generatedAt}\n\n${diagramSections}\n`;
+}
+
+function specWriterFailpoint(name: string): void {
+  if (process.env.NODE_ENV === 'test' && process.env.RORCA_AUTHORING_FAILPOINT === name) {
+    throw new Error(`[authoring-failpoint] ${name}`);
+  }
+}
+
+function publishFile(targetPath: string, content: string): void {
+  const temporaryPath = `${targetPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const descriptor = fs.openSync(temporaryPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+  try {
+    fs.writeFileSync(descriptor, content, 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  try {
+    fs.renameSync(temporaryPath, targetPath);
+    const directoryDescriptor = fs.openSync(path.dirname(targetPath), fs.constants.O_RDONLY);
+    try { fs.fsyncSync(directoryDescriptor); } finally { fs.closeSync(directoryDescriptor); }
+  } catch (error) {
+    try { fs.unlinkSync(temporaryPath); } catch { /* best-effort removal of an unpublished temp file */ }
+    throw error;
+  }
+}
+
+export function writeSpecDiagramArtifact(workspacePath: string, spec: GeneratedSpec): string {
+  const diagramsPath = path.join(workspacePath, 'forge', 'specs', 'pending', `${spec.slug}-diagrams.md`);
+  fs.mkdirSync(path.dirname(diagramsPath), { recursive: true });
+  publishFile(diagramsPath, buildSpecDiagramsDocument(spec));
+  return diagramsPath;
+}
+
+export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResult {
+  const pendingDir = path.join(workspacePath, 'forge', 'specs', 'pending');
+  const specPath = path.join(pendingDir, `${spec.slug}.json`);
+  const diagramsPath = path.join(pendingDir, `${spec.slug}-diagrams.md`);
+  const canonicalSlug = path.basename(specPath, '.json');
+
+  if (fs.existsSync(specPath)) {
+    throw new Error(`Spec '${spec.slug}' already exists at ${specPath}. Delete it first or use a different title.`);
+  }
+
+  fs.mkdirSync(pendingDir, { recursive: true });
+  publishFile(specPath, JSON.stringify(buildSpecDocument({ ...spec, slug: canonicalSlug }), null, 2));
+  specWriterFailpoint('persist_after_spec_file_before_diagram');
+  publishFile(diagramsPath, buildSpecDiagramsDocument(spec));
 
   return { id: canonicalSlug, specPath, diagramsPath };
 }

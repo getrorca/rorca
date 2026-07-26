@@ -22,10 +22,11 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
+import type { Server } from 'http';
 import request from 'supertest';
-import type { Express } from 'express';
 import type { Pool } from 'pg';
-import { getTestPool, truncateAll } from '../../__tests__/helpers/pg-test-utils';
+import { closeTestPool, getTestPool } from '../../__tests__/helpers/pg-test-utils';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -57,32 +58,43 @@ interface MemoryCandidate {
 
 // ── Test Setup ──────────────────────────────────────────────────────────────
 
-let app: Express;
+let app: Server;
 let pool: Pool;
 let tmpDir: string;
-let workspaceId: string;
+let workspaceId = '';
 const WORKSPACE_LABEL = 'CI Capture E2E Workspace';
+
+async function cleanupWorkspaceFixture(id: string): Promise<void> {
+  if (!id) return;
+  await pool.query('DELETE FROM memory_relations WHERE source_memory_id IN (SELECT id FROM memories WHERE workspace_id = $1) OR target_memory_id IN (SELECT id FROM memories WHERE workspace_id = $1)', [id]);
+  await pool.query('DELETE FROM memory_candidates WHERE workspace_id = $1', [id]);
+  await pool.query('DELETE FROM context_events WHERE workspace_id = $1', [id]);
+  await pool.query('DELETE FROM memories WHERE workspace_id = $1', [id]);
+  await pool.query('DELETE FROM wal_events WHERE workspace_id = $1', [id]);
+  await pool.query('DELETE FROM workspace_members WHERE workspace_id = $1', [id]);
+  await pool.query('DELETE FROM workspaces WHERE id = $1', [id]);
+}
 
 beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-capture-e2e-'));
   process.env.NODE_ENV = 'test';
 
-  // Load the Express app (DB pool initialization is handled by initDb)
   const serverMod = require('../../server');
-  app = serverMod.default;
   const { initDb } = require('../../db/index');
   await initDb();
-
   pool = getTestPool();
+  app = serverMod.default.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    app.once('listening', resolve);
+    app.once('error', reject);
+  });
 }, 30_000);
 
 beforeEach(async () => {
-  await truncateAll(pool);
-
-  // Seed a workspace
-  workspaceId = 'ws-capture-' + Date.now();
+  await cleanupWorkspaceFixture(workspaceId);
+  workspaceId = randomUUID();
   await pool.query(
-    'INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+    'INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)',
     [workspaceId, WORKSPACE_LABEL, tmpDir],
   );
 
@@ -95,6 +107,10 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  await cleanupWorkspaceFixture(workspaceId);
+  app.closeAllConnections();
+  await new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve()));
+  await closeTestPool();
   if (tmpDir && fs.existsSync(tmpDir)) {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

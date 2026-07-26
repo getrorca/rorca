@@ -5,10 +5,12 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import crypto from 'crypto';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'fs/promises';
 import path from 'path';
 
-import { ValidationError } from './errors';
+import { ConflictError, ValidationError } from './errors';
 import type { TaskManifest, TaskManifestContextRef, TaskManifestTask } from './task-manifest';
 import {
   computeTaskManifestHash,
@@ -80,6 +82,7 @@ export interface SyntheticTaskManifestSpec extends JsonRecord {
     sourceSpecId?: string;
     sourceRunId?: string | number;
     sourceStoryIds: string[];
+    commandDenylist: string[];
     internal: true;
   };
   userStories: SyntheticTaskManifestStory[];
@@ -99,6 +102,7 @@ export interface WriteTaskManifestExecutionEnvelopeResult {
   manifestPath: string;
   tasksMdPath: string;
   manifestHash: string;
+  syntheticSpecHash: string;
   artifactReused: boolean;
 }
 
@@ -325,6 +329,10 @@ function storyFiles(manifest: TaskManifest, task: TaskManifestTask): string[] {
   ]);
 }
 
+export function computeSyntheticTaskManifestSpecHash(spec: SyntheticTaskManifestSpec): string {
+  return `sha256:${crypto.createHash('sha256').update(`${JSON.stringify(spec, null, 2)}\n`, 'utf8').digest('hex')}`;
+}
+
 export function createTaskManifestExecutionEnvelope(manifest: TaskManifest): SyntheticTaskManifestSpec {
   assertTaskManifestDirectExecutionAllowed(manifest);
 
@@ -340,8 +348,6 @@ export function createTaskManifestExecutionEnvelope(manifest: TaskManifest): Syn
       acceptanceCriteria: storyAcceptanceCriteria(manifest, task),
       dependsOn: task.dependsOn,
       ...(files.length > 0 ? { files } : {}),
-      ...(manifest.execution.agentOverride ? { agent: manifest.execution.agentOverride } : {}),
-      ...(manifest.execution.modelOverride ? { model: manifest.execution.modelOverride } : {}),
     };
   });
 
@@ -349,7 +355,7 @@ export function createTaskManifestExecutionEnvelope(manifest: TaskManifest): Syn
     id: specId,
     title: `Hermes Task Manifest ${manifest.manifestId}`,
     brief: manifest.objective,
-    generatedAt: new Date().toISOString(),
+    generatedAt: manifest.createdAt,
     internal: true,
     source: HERMES_TASK_MANIFEST_SOURCE,
     manifestId: manifest.manifestId,
@@ -371,10 +377,67 @@ export function createTaskManifestExecutionEnvelope(manifest: TaskManifest): Syn
       ...(manifest.source.rorca?.specId ? { sourceSpecId: manifest.source.rorca.specId } : {}),
       ...(manifest.source.rorca?.runId !== undefined ? { sourceRunId: manifest.source.rorca.runId } : {}),
       sourceStoryIds,
+      commandDenylist: [...manifest.policy.commandDenylist],
       internal: true,
     },
     userStories: stories,
   };
+}
+
+async function writeSyntheticSpecExclusive(input: {
+  workspacePath: string;
+  artifactRoot: string;
+  artifactDir: string;
+  specPath: string;
+  content: string;
+}): Promise<void> {
+  for (const component of [
+    path.join(input.workspacePath, 'forge'),
+    input.artifactRoot,
+    input.artifactDir,
+  ]) {
+    const stat = await fs.lstat(component);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new ConflictError('Synthetic task-manifest spec has a symlink or non-directory ancestor');
+    }
+  }
+
+  try {
+    const stat = await fs.lstat(input.specPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new ConflictError('Synthetic task-manifest spec authority must be a regular non-symlink file');
+    }
+    const handle = await fs.open(input.specPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const existing = await handle.readFile('utf8');
+      if (existing === input.content) return;
+    } finally {
+      await handle.close();
+    }
+    throw new ConflictError('Synthetic task-manifest spec already exists with different content');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(
+      input.specPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    await handle.writeFile(input.content, 'utf8');
+    await handle.sync();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new ConflictError('Synthetic task-manifest spec publication lost exclusive filesystem authority');
+    }
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+  const directory = await fs.open(input.artifactDir, fsConstants.O_RDONLY);
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 
 export async function writeTaskManifestExecutionEnvelope(
@@ -390,8 +453,13 @@ export async function writeTaskManifestExecutionEnvelope(
   const specPath = path.join(paths.artifactDir, fileName);
   const relativeSpecPath = path.join(paths.relativeArtifactDir, fileName);
 
-  await fs.mkdir(paths.artifactDir, { recursive: true });
-  await fs.writeFile(specPath, `${JSON.stringify(spec, null, 2)}\n`, 'utf8');
+  await writeSyntheticSpecExclusive({
+    workspacePath: paths.workspacePath,
+    artifactRoot: paths.artifactRoot,
+    artifactDir: paths.artifactDir,
+    specPath,
+    content: `${JSON.stringify(spec, null, 2)}\n`,
+  });
 
   return {
     spec,
@@ -402,6 +470,7 @@ export async function writeTaskManifestExecutionEnvelope(
     manifestPath: paths.manifestPath,
     tasksMdPath: paths.tasksMdPath,
     manifestHash: artifact.manifestHash,
+    syntheticSpecHash: computeSyntheticTaskManifestSpecHash(spec),
     artifactReused: artifact.reused,
   };
 }

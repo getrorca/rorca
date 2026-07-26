@@ -8,6 +8,16 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+jest.mock('../autonomous-model-egress', () => ({
+  ensureAutonomousModelEgress: jest.fn().mockResolvedValue('/test/model-egress.sock'),
+}));
+jest.mock('../autonomous-sandbox', () => ({
+  prepareAutonomousSandboxLaunch: jest.fn((options: any) => ({
+    command: options.command, args: [...options.args], cwd: options.cwd, env: options.env, isolated: true,
+  })),
+}));
+
 import {
   GITREINS_EVIDENCE_SCHEMA,
   runGitReinsJudge,
