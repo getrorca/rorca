@@ -47,7 +47,7 @@
       "agentType": "opencode",
       "captureFormat": "json",
       "fixturePath": "src/lib/__tests__/fixtures/opencode-parity.json",
-      "pinnedVersion": "opencode 0.1.0",
+      "pinnedVersion": "opencode 1.17.10",
       "terminal": {
         "cols": 80,
         "rows": 24
@@ -67,7 +67,7 @@
       "agentType": "pi",
       "captureFormat": "jsonl",
       "fixturePath": "src/__tests__/fixtures/pi/pi-parity.jsonl",
-      "pinnedVersion": "pi 0.67.0",
+      "pinnedVersion": "pi 0.80.6",
       "terminal": {
         "cols": 80,
         "rows": 24
@@ -76,9 +76,9 @@
         "requiresAuth": true,
         "skipReason": "pi installed but no provider auth available (run: pi auth login)"
       },
-      "byteLength": 1955,
+      "byteLength": 2041,
       "chunkCount": 3,
-      "normalizedSha256": "531b31b7aac0a89cf3c6e17f9eae1db0d84238b093d4d3baaec1886d4c15804f",
+      "normalizedSha256": "7e54f2635e391d60173f66aa6e7175792df1c1d3cf3fbdf142405e6a4611dfe2",
       "eventOrderSha256": "aeedec2d4e9389591eea139295d0ad25a170fb8e04d0a9d4dc3637959b6a6385",
       "terminalStateSha256": "7ac384f5a0ff8da17351184a916c5a2be0e8d3a59bff77469cba944c5ed7866c"
     }

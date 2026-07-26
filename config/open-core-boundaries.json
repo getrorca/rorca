@@ -169,6 +169,18 @@
       "reason": "The no-publication exact-pair certification runner is shared release infrastructure."
     },
     {
+      "path": "scripts/capture-real-terminal-boundaries.ts",
+      "reason": "Fail-closed scoped provider capture through the exact-host broker is shared release infrastructure."
+    },
+    {
+      "path": "scripts/verify-real-platform-boundaries.mjs",
+      "reason": "Mandatory actual platform-evidence validation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/real-platform-boundaries.test.mjs",
+      "reason": "Real platform artifact fail-closed regression coverage is shared release infrastructure."
+    },
+    {
       "path": "scripts/run-release-one-broad-certification.mjs",
       "reason": "Current broad-result classification and no-waiver accounting is shared release infrastructure."
     },

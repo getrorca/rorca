@@ -21,7 +21,7 @@ const protectedRoots = new Set([
 ]);
 const allowedPlaceholders = new Set([
   'node', 'rorcaRoot', 'hermesRoot', 'outputDir', 'historicalBroadJson',
-  'pairNonce', 'hermesClient', 'hermesManifest',
+  'pairNonce', 'hermesClient', 'hermesManifest', 'realPlatformBoundariesManifest',
 ]);
 const MAX_GATE_TIMEOUT_MS = 14_400_000;
 
@@ -475,6 +475,19 @@ export async function runCertification(options) {
       throw new Error('Gate 1 requires clean repositories before any command runs');
     }
 
+    const requiresRealPlatformBoundaries = selected.some(gate => gate.id === 'real-platform-boundaries');
+    const realPlatformBoundariesManifest = options.realPlatformBoundariesManifest
+      ? path.resolve(options.realPlatformBoundariesManifest)
+      : null;
+    if (requiresRealPlatformBoundaries && !realPlatformBoundariesManifest) {
+      throw new Error('Gate 1 requires --real-platform-boundaries-manifest from a completed actual non-skipped fixture');
+    }
+    if (realPlatformBoundariesManifest && Object.values(roots).some(root => (
+      realPlatformBoundariesManifest === root || realPlatformBoundariesManifest.startsWith(`${root}${path.sep}`)
+    ))) {
+      throw new Error('Real platform evidence must remain outside source repositories');
+    }
+
     let database;
     if (selected.some((gate) => gate.requiresDb)) {
       database = await verifyDatabaseIdentity(roots.rorca, options.credentialFile);
@@ -491,6 +504,7 @@ export async function runCertification(options) {
       pairNonce: result.pairNonce,
       hermesClient: path.join(roots.hermes, 'dist/src/clients/rorca.js'),
       hermesManifest: path.join(roots.hermes, 'dist/src/runtime/task-manifest.js'),
+      realPlatformBoundariesManifest: realPlatformBoundariesManifest ?? '',
     };
     const baseEnv = {
       ...process.env,
@@ -612,9 +626,23 @@ function parseCli(argv) {
   const definitionPath = path.resolve(values.definition ?? path.join(rorcaRoot, 'config/release-one-certification-gates.json'));
   const historicalBroadJson = path.resolve(values['historical-broad-json'] ?? '/private/tmp/rorca-f2-broad-rerun1-results.json');
   const credentialFile = path.resolve(values['credential-file'] ?? process.env.RORCA_TEST_DB_ENV_FILE ?? path.join(os.homedir(), '.rorca/test-db.env'));
+  const realPlatformBoundariesManifestValue = values['real-platform-boundaries-manifest']
+    ?? process.env.RORCA_REAL_PLATFORM_BOUNDARIES_MANIFEST;
+  const realPlatformBoundariesManifest = realPlatformBoundariesManifestValue
+    ? path.resolve(realPlatformBoundariesManifestValue)
+    : null;
   const seed = sha256(canonicalJson({ phase, rorcaRoot, hermesRoot, definitionPath })).slice(0, 12);
   const outputDir = path.resolve(values.output ?? `/private/tmp/rorca-release-one-${phase}-${seed}`);
-  return { phase, rorcaRoot, hermesRoot, definitionPath, historicalBroadJson, credentialFile, outputDir };
+  return {
+    phase,
+    rorcaRoot,
+    hermesRoot,
+    definitionPath,
+    historicalBroadJson,
+    credentialFile,
+    realPlatformBoundariesManifest,
+    outputDir,
+  };
 }
 
 if (path.resolve(process.argv[1] ?? '') === scriptPath) {

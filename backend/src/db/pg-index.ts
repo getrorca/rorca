@@ -23,6 +23,7 @@
 import { Pool } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
+import { bootstrapRorcaV2GraphForLifecycle } from '../lib/graph-contract';
 
 const MIGRATIONS_ADVISORY_LOCK_KEY = 8_244_250_520_000;
 
@@ -81,6 +82,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
   let client = await pool.connect();
   let clientUsable = true;
   let advisoryLockHeld = false;
+  let migrationsCompleted = false;
 
   const acquireMigrationSession = async (): Promise<void> => {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]);
@@ -251,12 +253,11 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         continue;
       }
 
-      // AGE graph names are PostgreSQL schemas. The legacy graph was named
-      // `rorca`, which now intentionally belongs to application tables. If AGE
-      // is installed but that graph was never created, executing migration 050
-      // would LOAD AGE, fail at create_graph('rorca'), and poison the backend
-      // session after rollback. Skip it before LOAD; the supported rorca_v2
-      // bootstrap uses its own non-conflicting graph schema.
+      // AGE graph names are PostgreSQL schemas. The obsolete graph was named
+      // `rorca`, which now belongs exclusively to application tables. Handle
+      // migration 050 without executing historical graph DDL, then run the
+      // idempotent rorca_v2 lifecycle bootstrap after every migration pass —
+      // including when version 050 was recorded by an older release.
       if (file.startsWith('050_knowledge_graph')) {
         // Keep the useful, non-conflicting part of the legacy migration: install
         // AGE when this PostgreSQL distribution and role support it. Failure is
@@ -283,14 +284,12 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           continue;
         }
 
-        // The legacy graph identifier is the application schema name. Never
-        // inspect provider-owned ag_catalog (the application role may correctly
-        // lack USAGE) and never execute create_graph('rorca') in a current
-        // installation. AGE availability and graph ownership are independent.
-        await persistMigrationMarker(version, `${file} [skipped: application schema collision]`, true);
+        // Never execute the historical migration body: it is capability-only,
+        // and graph ownership belongs to the lifecycle bootstrap below.
+        await persistMigrationMarker(version, `${file} [graph bootstrap: rorca_v2]`, false);
         appliedVersions.add(version);
-        skippedCount++;
-        console.warn('[pg-migrate] Skipping legacy rorca AGE graph: application schema owns that name; use rorca_v2 bootstrap');
+        appliedCount++;
+        console.log('[pg-migrate] AGE capability recorded; rorca_v2 lifecycle bootstrap pending');
         continue;
       }
 
@@ -345,6 +344,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     }
 
     console.log(`[pg-migrate] Done. Applied: ${appliedCount}, Skipped: ${skippedCount}, Total: ${files.length}`);
+    migrationsCompleted = true;
   } finally {
     // Restore search_path before releasing connection back to pool.
     // We set search_path=public above; without restoring, subsequent queries
@@ -356,7 +356,18 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       }
       client.release();
     }
-    if (ownPool) await pool.end();
+    try {
+      if (migrationsCompleted) {
+        const graphLifecycle = await bootstrapRorcaV2GraphForLifecycle(pool);
+        if (graphLifecycle.available) {
+          console.log(`[pg-migrate] Graph bootstrap ready: ${graphLifecycle.graphName} (${graphLifecycle.labels.length} keyed labels)`);
+        } else {
+          console.warn(`[pg-migrate] Graph Lite active: rorca_v2 bootstrap ${graphLifecycle.reason}${graphLifecycle.errorCode ? ` (${graphLifecycle.errorCode})` : ''}`);
+        }
+      }
+    } finally {
+      if (ownPool) await pool.end();
+    }
   }
 }
 

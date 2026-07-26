@@ -21,6 +21,7 @@ import { pool } from '../db/index';
 import { logger } from './logger';
 import { chatComplete } from './llm-client';
 import type { ChatMessage } from './llm-client';
+import { buildRorcaCypherSql } from './graph-contract';
 import { addConventionViolation, isGraphAvailable } from './knowledge-graph';
 import type { PoolClient } from 'pg';
 
@@ -68,7 +69,7 @@ async function cypherRead<T = Record<string, unknown>>(
   columns: Array<{ name: string; type: string }>,
 ): Promise<T[]> {
   const columnDef = columns.map(c => `${c.name} ${c.type}`).join(', ');
-  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
+  const sql = buildRorcaCypherSql(cypher, columnDef);
 
   const client = await pool.connect();
   try {
@@ -91,7 +92,7 @@ async function cypherRead<T = Record<string, unknown>>(
  * Execute a Cypher mutation.
  */
 async function _cypherMutate(cypher: string): Promise<void> {
-  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (v agtype)`;
+  const sql = buildRorcaCypherSql(cypher, 'v agtype');
   const client = await pool.connect();
   try {
     await setupAgeSession(client);

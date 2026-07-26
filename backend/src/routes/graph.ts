@@ -23,6 +23,7 @@ import {
 } from '../lib/retrieval-telemetry';
 import { listRetrievalFeedback, summarizeRetrievalFeedback } from '../lib/retrieval-feedback';
 import { getAgeUnavailableBody } from '../lib/age-guard';
+import { RORCA_GRAPH_NAME } from '../lib/graph-contract';
 import { describeRuntimeGraph, getRuntimeGraphCapability } from '../lib/graph-runtime';
 import { ForbiddenError, ValidationError } from '../lib/errors';
 import { invalidateGraphContextCacheForWorkspace } from '../lib/graph-context';
@@ -152,7 +153,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
         runtime,
         vertexCount: 0,
         edgeCount: 0,
-        graphName: 'rorca',
+        graphName: RORCA_GRAPH_NAME,
         lastPopulatedAt: null,
       };
       return res.json(result);
@@ -171,7 +172,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
       runtime,
       vertexCount: stats.vertexCount,
       edgeCount: stats.edgeCount,
-      graphName: 'rorca',
+      graphName: RORCA_GRAPH_NAME,
       lastPopulatedAt: lastEvent?.ts ?? null,
     };
 

@@ -34,6 +34,7 @@
         "migration-real-postgres",
         "real-pgboss-runtime",
         "sandbox-egress-containment",
+        "real-platform-boundaries",
         "hermes-build",
         "rorca-build",
         "live-built-pair",
@@ -75,7 +76,12 @@
         "scripts/__tests__/build-cli.test.mjs",
         "scripts/__tests__/check-opencore-export.test.mjs",
         "backend/src/db/__tests__/runtime-migration-resolution.node.test.ts",
-        "backend/src/lib/__tests__/pg-boss-configured-schema.node.test.ts"
+        "backend/src/lib/__tests__/pg-boss-configured-schema.node.test.ts",
+        "backend/src/__tests__/golden-terminal-contract.node.test.ts",
+        "backend/src/lib/__tests__/graph-runtime-identity.node.test.ts",
+        "backend/src/lib/__tests__/real-terminal-certification.node.test.ts",
+        "scripts/__tests__/release-one-certification.test.mjs",
+        "scripts/__tests__/real-platform-boundaries.test.mjs"
       ],
       "timeoutMs": 180000
     },
@@ -236,6 +242,20 @@
         "--runInBand", "--no-cache", "--detectOpenHandles"
       ],
       "timeoutMs": 900000
+    },
+    {
+      "id": "real-platform-boundaries",
+      "repo": "rorca",
+      "description": "Require one exact-source disposable Linux artifact with actual non-skipped bwrap, PG16+AGE/Cypher, Pi, and OpenCode evidence plus broker and teardown bindings.",
+      "command": "{node}",
+      "args": [
+        "scripts/verify-real-platform-boundaries.mjs",
+        "--manifest", "{realPlatformBoundariesManifest}",
+        "--rorca-root", "{rorcaRoot}",
+        "--output", "{outputDir}/real-platform-boundaries.verified.json"
+      ],
+      "artifacts": ["{outputDir}/real-platform-boundaries.verified.json"],
+      "timeoutMs": 120000
     },
     {
       "id": "hermes-build",

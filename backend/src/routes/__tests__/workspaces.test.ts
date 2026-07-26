@@ -225,4 +225,5 @@ test('GET /api/workspaces/:id/status returns canonical database capability with 
   expect(res.body.databaseSetup.modes).toHaveLength(3);
   expect(res.body.databaseSetup.graphModes.map((entry: { mode: string }) => entry.mode).sort()).toEqual(['full', 'lite']);
   expect(res.body.graph).toHaveProperty('graphMode', res.body.databaseCapability.graphMode);
+  expect(res.body.graph).toHaveProperty('graphName', 'rorca_v2');
 });

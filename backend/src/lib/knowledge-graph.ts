@@ -11,7 +11,7 @@
  * Provides typed wrappers around Apache AGE Cypher queries executed via
  * PostgreSQL's SQL/Cypher bridge:
  *
- *   SELECT * FROM cypher('rorca', $$ MATCH ... RETURN ... $$) AS (col agtype)
+ *   SELECT * FROM cypher('rorca_v2', $$ MATCH ... RETURN ... $$) AS (col agtype)
  *
  * All queries are parameterized. The graph is additive (append-only) —
  * historical edges are preserved for temporal analysis.
@@ -30,11 +30,14 @@ import { logger } from './logger';
 import type { PoolClient } from 'pg';
 import { checkAge, getAgeUnavailableBody, invalidateAgeCache } from './age-guard';
 import { getRuntimeGraphCapability } from './graph-runtime';
+import {
+  bootstrapRorcaV2GraphOnClient,
+  buildRorcaCypherSql,
+  RORCA_GRAPH_NAME,
+  type RorcaKeyedNodeLabel,
+} from './graph-contract';
 
-const RORCA_V2_GRAPH = 'rorca_v2';
-const RORCA_V2_KEYED_NODE_LABELS = ['Story', 'File', 'Spec', 'Memory', 'Convention', 'Skill'] as const;
-
-export type RorcaV2KeyedNodeLabel = typeof RORCA_V2_KEYED_NODE_LABELS[number];
+export type RorcaV2KeyedNodeLabel = RorcaKeyedNodeLabel;
 
 export interface GraphBootstrapUnavailable {
   available: false;
@@ -47,7 +50,7 @@ export interface GraphBootstrapUnavailable {
 
 export interface GraphBootstrapReady {
   available: true;
-  graphName: typeof RORCA_V2_GRAPH;
+  graphName: typeof RORCA_GRAPH_NAME;
   labels: RorcaV2KeyedNodeLabel[];
   keyIndexes: string[];
 }
@@ -133,63 +136,11 @@ async function setupAgeSession(client: PoolClient): Promise<void> {
   await client.query("SET search_path = ag_catalog, \"$user\", public");
 }
 
-function quoteIdent(identifier: string): string {
-  return `"${identifier.replace(/"/g, '""')}"`;
-}
-
-function rorcaV2KeyIndexName(label: RorcaV2KeyedNodeLabel): string {
-  return `idx_${RORCA_V2_GRAPH}_${label.toLowerCase()}_key`;
-}
-
-async function ensureGraphExists(client: PoolClient, graphName: string): Promise<void> {
-  const existing = await client.query(
-    'SELECT 1 FROM ag_catalog.ag_graph WHERE name = $1',
-    [graphName],
-  );
-  if (existing.rowCount === 0) {
-    await client.query('SELECT create_graph($1)', [graphName]);
-  }
-}
-
-async function ensureVertexLabelExists(
-  client: PoolClient,
-  graphName: string,
-  label: RorcaV2KeyedNodeLabel,
-): Promise<void> {
-  const existing = await client.query(
-    `SELECT 1 FROM ag_catalog.ag_label
-     WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph WHERE name = $1)
-       AND name = $2
-       AND kind = 'v'`,
-    [graphName, label],
-  );
-  if (existing.rowCount === 0) {
-    await client.query('SELECT create_vlabel($1, $2)', [graphName, label]);
-  }
-}
-
-async function ensureCanonicalKeyIndex(
-  client: PoolClient,
-  graphName: typeof RORCA_V2_GRAPH,
-  label: RorcaV2KeyedNodeLabel,
-): Promise<string> {
-  const indexName = rorcaV2KeyIndexName(label);
-  await client.query(
-    `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexName)}
-     ON ${quoteIdent(graphName)}.${quoteIdent(label)}
-     USING btree (agtype_access_operator(properties, '"key"'::agtype))`,
-  );
-  return indexName;
-}
-
 /**
- * Explicit bootstrap for the next-generation graph projection.
- *
- * This intentionally does not change any existing runtime reads/writes, which
- * still target the legacy `rorca` graph. AGE does not provide Neo4j-style
- * property uniqueness constraints in the current stack, so the strongest
- * compatible lookup support here is an idempotent btree expression index over
- * each label table's canonical `properties.key` value.
+ * Explicit bootstrap for the canonical graph projection. AGE does not provide
+ * Neo4j-style property uniqueness constraints in the current stack, so the
+ * strongest compatible lookup support is an idempotent btree expression index
+ * over each keyed label table's canonical `properties.key` value.
  */
 export async function initRorcaV2Graph(): Promise<GraphBootstrapResult> {
   if (!(await checkAge())) {
@@ -202,26 +153,9 @@ export async function initRorcaV2Graph(): Promise<GraphBootstrapResult> {
 
   const client = await pool.connect();
   try {
-    await setupAgeSession(client);
-    await ensureGraphExists(client, RORCA_V2_GRAPH);
-
-    const keyIndexes: string[] = [];
-    for (const label of RORCA_V2_KEYED_NODE_LABELS) {
-      await ensureVertexLabelExists(client, RORCA_V2_GRAPH, label);
-      keyIndexes.push(await ensureCanonicalKeyIndex(client, RORCA_V2_GRAPH, label));
-    }
-
-    logger.info(
-      { graphName: RORCA_V2_GRAPH, labels: RORCA_V2_KEYED_NODE_LABELS, keyIndexes },
-      '[knowledge-graph] rorca_v2 graph bootstrap complete',
-    );
-
-    return {
-      available: true,
-      graphName: RORCA_V2_GRAPH,
-      labels: [...RORCA_V2_KEYED_NODE_LABELS],
-      keyIndexes,
-    };
+    const result = await bootstrapRorcaV2GraphOnClient(client);
+    logger.info(result, '[knowledge-graph] rorca_v2 graph bootstrap complete');
+    return result;
   } finally {
     await client.query('SET search_path = rorca, public');
     client.release();
@@ -236,7 +170,7 @@ interface CypherColumn {
 }
 
 /**
- * Execute a Cypher query against the 'rorca' graph.
+ * Execute a Cypher query against the canonical `rorca_v2` graph.
  *
  * @param cypher - Cypher query string (parameterize with $param syntax)
  * @param returnColumns - Column definitions for the RETURN clause
@@ -255,7 +189,7 @@ async function cypherQuery<T = Record<string, unknown>>(
   returnColumns: CypherColumn[],
 ): Promise<T[]> {
   const columnDef = returnColumns.map(c => `${c.name} ${c.type}`).join(', ');
-  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
+  const sql = buildRorcaCypherSql(cypher, columnDef);
 
   const p = pool;
   logger.debug('[knowledge-graph] cypherQuery: acquiring pool client');
@@ -293,7 +227,7 @@ async function cypherMutate(cypher: string): Promise<void> {
   try {
     await setupAgeSession(client);
     const resolvedCypher = await resolveCypherNow(client, cypher);
-    const sql = `SELECT * FROM cypher('rorca', $$ ${resolvedCypher} $$) AS (v agtype)`;
+    const sql = buildRorcaCypherSql(resolvedCypher, 'v agtype');
     await client.query(sql);
     logger.debug('[knowledge-graph] cypherMutate: mutation complete');
   } catch (err) {
@@ -1977,9 +1911,10 @@ export async function graphStats(): Promise<GraphStats> {
     // Get labels from catalog
     const labelRows = await query<{ name: string }>(
       `SELECT name FROM ag_catalog.ag_label
-       WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph WHERE name = 'rorca')
+       WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph WHERE name = $1)
          AND name NOT IN ('_ag_label_vertex', '_ag_label_edge')
        ORDER BY name`,
+      [RORCA_GRAPH_NAME],
     );
 
     return {

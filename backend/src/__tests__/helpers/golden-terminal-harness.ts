@@ -12,6 +12,7 @@ import { getClaudeAuthState } from '../../lib/claude-auth';
 import { detectCodex } from '../../lib/codex-detector';
 import { detectOpenCode } from '../../lib/opencode-detector';
 import { detectPi, listPiModels } from '../../lib/pi-detector';
+import { RELEASE_TERMINAL_RUNTIME } from '../../lib/terminal-runtime-contract';
 
 export type GoldenEngine = 'claude' | 'codex' | 'opencode' | 'pi';
 
@@ -51,6 +52,7 @@ export interface GoldenFixtureData {
   normalizedText: string;
   eventOrderTokens: string[];
   terminalStateTokens: string[];
+  capturedVersion: string;
 }
 
 export interface GoldenAvailability {
@@ -201,6 +203,7 @@ function extractTerminalStateTokens(text: string): string[] {
 
 function loadClaudeFixture(entry: GoldenEngineManifestEntry, fixtureAbsolutePath: string): GoldenFixtureData {
   const lines = fs.readFileSync(fixtureAbsolutePath, 'utf8').trimEnd().split('\n');
+  const metadata = JSON.parse(lines[0]) as { claudeVersion?: string };
   const directBytes = Buffer.from(extractClaudeTextBlocks(lines), 'utf8');
   const replayChunks = [
     { sequence: 2, chunk: directBytes.subarray(Math.ceil(directBytes.length / 3), Math.ceil((directBytes.length / 3) * 2)) },
@@ -220,6 +223,7 @@ function loadClaudeFixture(entry: GoldenEngineManifestEntry, fixtureAbsolutePath
     normalizedText,
     eventOrderTokens,
     terminalStateTokens,
+    capturedVersion: String(metadata.claudeVersion ?? ''),
   };
 }
 
@@ -230,6 +234,8 @@ function loadChunkFixture(
 ): GoldenFixtureData {
   const fixture = JSON.parse(fs.readFileSync(fixtureAbsolutePath, 'utf8')) as {
     chunks: Array<{ sequence: number; base64: string }>;
+    codexVersion?: string;
+    opencodeVersion?: string;
   };
   const orderedChunks = fixture.chunks
     .slice()
@@ -252,11 +258,13 @@ function loadChunkFixture(
     normalizedText,
     eventOrderTokens,
     terminalStateTokens,
+    capturedVersion: String(engine === 'opencode' ? fixture.opencodeVersion ?? '' : fixture.codexVersion ?? ''),
   };
 }
 
 function loadPiFixture(entry: GoldenEngineManifestEntry, fixtureAbsolutePath: string): GoldenFixtureData {
   const directBytes = fs.readFileSync(fixtureAbsolutePath);
+  const metadata = JSON.parse(directBytes.toString('utf8').split('\n', 1)[0]) as { piVersion?: string };
   const segmentSize = Math.ceil(directBytes.length / 3);
   const replayChunks = [
     { sequence: 3, chunk: directBytes.subarray(segmentSize * 2) },
@@ -276,11 +284,21 @@ function loadPiFixture(entry: GoldenEngineManifestEntry, fixtureAbsolutePath: st
     normalizedText,
     eventOrderTokens,
     terminalStateTokens,
+    capturedVersion: String(metadata.piVersion ?? ''),
   };
 }
 
 export function readGoldenManifest(): GoldenManifest {
-  return JSON.parse(fs.readFileSync(GOLDEN_MANIFEST_PATH, 'utf8')) as GoldenManifest;
+  const manifest = JSON.parse(fs.readFileSync(GOLDEN_MANIFEST_PATH, 'utf8')) as GoldenManifest;
+  if (manifest.engines.pi.pinnedVersion !== RELEASE_TERMINAL_RUNTIME.pi.displayVersion
+    || manifest.engines.opencode.pinnedVersion !== RELEASE_TERMINAL_RUNTIME.opencode.displayVersion
+    || manifest.engines.pi.terminal.cols !== RELEASE_TERMINAL_RUNTIME.terminal.cols
+    || manifest.engines.pi.terminal.rows !== RELEASE_TERMINAL_RUNTIME.terminal.rows
+    || manifest.engines.opencode.terminal.cols !== RELEASE_TERMINAL_RUNTIME.terminal.cols
+    || manifest.engines.opencode.terminal.rows !== RELEASE_TERMINAL_RUNTIME.terminal.rows) {
+    throw new Error('Golden terminal manifest does not match the shipped Pi/OpenCode runtime contract');
+  }
+  return manifest;
 }
 
 export function loadGoldenFixture(engine: GoldenEngine): GoldenFixtureData {
@@ -425,8 +443,10 @@ export function compareGoldenReplay(
     .sort((left, right) => left.sequence - right.sequence)
     .map((chunk) => String(chunk.sequence));
   const pinnedVersion = extractSemver(entry.pinnedVersion);
+  const capturedVersion = extractSemver(fixture.capturedVersion);
   const installedVersion = extractSemver(availability.installedVersion);
   const normalizedChunkIds = normalizedPtyChunkIds(chunkIds);
+  const requiresExactRuntime = fixture.engine === 'pi' || fixture.engine === 'opencode';
 
   return {
     directNormalizedSha256: sha256(fixture.normalizedText),
@@ -437,7 +457,11 @@ export function compareGoldenReplay(
     expectedChunkIds,
     rawMatches: fixture.directBytes.equals(replayBytes),
     contracts: {
-      version: !availability.available || !installedVersion || !pinnedVersion || installedVersion === pinnedVersion,
+      version: pinnedVersion !== null
+        && capturedVersion === pinnedVersion
+        && (requiresExactRuntime
+          ? availability.available && installedVersion === pinnedVersion
+          : installedVersion === null || installedVersion === pinnedVersion),
       layout: sha256(fixture.normalizedText) === entry.normalizedSha256
         && sha256(replayNormalizedText) === entry.normalizedSha256,
       eventOrder: sha256(fixture.eventOrderTokens.join('\n')) === entry.eventOrderSha256
@@ -463,12 +487,18 @@ export function buildGoldenDiffReport(
     .sort((left, right) => left.sequence - right.sequence)
     .map((chunk) => String(chunk.sequence));
   const pinnedVersion = entry.pinnedVersion;
+  const capturedVersion = fixture.capturedVersion || '<missing>';
   const installedVersion = availability.installedVersion ?? '<unavailable>';
   const normalizedChunkIds = normalizedPtyChunkIds(chunkIds);
   const contracts: string[] = [];
+  const requiresExactRuntime = fixture.engine === 'pi' || fixture.engine === 'opencode';
 
-  if (extractSemver(pinnedVersion) !== null && extractSemver(installedVersion) !== null && extractSemver(pinnedVersion) !== extractSemver(installedVersion)) {
-    contracts.push(`version mismatch: pinned=${pinnedVersion} installed=${installedVersion}`);
+  if (extractSemver(pinnedVersion) === null
+    || extractSemver(capturedVersion) !== extractSemver(pinnedVersion)
+    || (requiresExactRuntime
+      ? !availability.available || extractSemver(installedVersion) !== extractSemver(pinnedVersion)
+      : extractSemver(installedVersion) !== null && extractSemver(installedVersion) !== extractSemver(pinnedVersion))) {
+    contracts.push(`version mismatch: pinned=${pinnedVersion} captured=${capturedVersion} installed=${installedVersion}`);
   }
 
   if (sha256(fixture.normalizedText) !== entry.normalizedSha256 || sha256(replayNormalizedText) !== entry.normalizedSha256) {
@@ -496,6 +526,7 @@ export function buildGoldenDiffReport(
     `fixture: ${path.relative(BACKEND_ROOT, fixture.fixtureAbsolutePath)}`,
     `terminal: ${entry.terminal.cols}x${entry.terminal.rows}`,
     `pinned version: ${pinnedVersion}`,
+    `captured version: ${capturedVersion}`,
     `installed version: ${installedVersion}`,
     ...contracts.map((contract) => `- ${contract}`),
   ].join('\n');
@@ -508,7 +539,8 @@ export function assertGoldenReplay(
   availability: GoldenAvailability,
 ): void {
   const comparison = compareGoldenReplay(fixture, replayBytes, chunkIds, availability);
-  if (comparison.contracts.layout
+  if (comparison.contracts.version
+    && comparison.contracts.layout
     && comparison.contracts.eventOrder
     && comparison.contracts.terminalState
     && comparison.contracts.byteOrder) {

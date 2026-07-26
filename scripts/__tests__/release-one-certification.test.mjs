@@ -83,6 +83,7 @@ test('production gate definition is dependency ordered, complete, and contains n
   for (const required of [
     'real-pgboss-runtime',
     'sandbox-egress-containment',
+    'real-platform-boundaries',
     'release-image-build',
     'classified-broad-harness',
   ]) assert.ok(gate1.has(required), `Gate 1 is missing ${required}`);
@@ -93,8 +94,12 @@ test('production gate definition is dependency ordered, complete, and contains n
     .join('\n');
   assert.match(serializedCommands, /split:check -- --candidate --report-review-boundary/);
   assert.match(serializedCommands, /check-opencore-export\.test\.mjs/);
+  assert.match(serializedCommands, /golden-terminal-contract\.node\.test\.ts/);
   const realPgBossGate = definition.gates.find((gate) => gate.id === 'real-pgboss-runtime');
   assert.equal(realPgBossGate.env.RORCA_PGBOSS_SCHEMA, 'pgboss_cert_{pairNonce}');
+  const platformGate = definition.gates.find((gate) => gate.id === 'real-platform-boundaries');
+  assert.deepEqual(platformGate.artifacts, ['{outputDir}/real-platform-boundaries.verified.json']);
+  assert.match([platformGate.command, ...platformGate.args].join(' '), /\{realPlatformBoundariesManifest\}/);
   const broadGate = definition.gates.find((gate) => gate.id === 'classified-broad-harness');
   assert.ok(broadGate.timeoutMs >= 7_200_000, 'isolated complete-corpus broad gate must have at least two hours');
   assert.ok(broadGate.timeoutMs <= 14_400_000, 'broad gate timeout must remain bounded to four hours');
@@ -257,6 +262,30 @@ test('broad classifier rejects detected open handles even when all assertions pa
     assert.equal(classification.status, 'failed');
     assert.equal(classification.policy.noDetectedOpenHandles, false);
     assert.equal(classification.result.openHandles, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Gate 1 requiring real platform evidence fails before commands when no explicit manifest is supplied', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'release-one-cert-real-platform-'));
+  try {
+    const rorcaRoot = makeRepository(root, 'rorca');
+    const hermesRoot = makeRepository(root, 'hermes');
+    const marker = path.join(root, 'must-not-run');
+    const definitionPath = writeDefinition(root, [{
+      id: 'real-platform-boundaries', repo: 'rorca', command: '{node}',
+      args: ['--eval', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`], timeoutMs: 5_000,
+    }]);
+    const result = await runCertification({
+      phase: 'gate1', definitionPath, rorcaRoot, hermesRoot,
+      outputDir: path.join(root, 'evidence'),
+      credentialFile: path.join(root, 'unused-test-db.env'),
+    });
+    assert.equal(result.status, 'failed');
+    assert.match(result.failure.message, /real-platform-boundaries-manifest/);
+    assert.equal(result.gates.length, 0);
+    assert.equal(fs.existsSync(marker), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

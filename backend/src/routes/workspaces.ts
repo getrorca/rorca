@@ -24,6 +24,7 @@ import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { echolocate, computeHealthReport, discoverMonorepo, generateMonorepoCLAUDESection, inferSkillsFromStack } from '../lib/workspace-echolocation';
+import { RORCA_GRAPH_NAME } from '../lib/graph-contract';
 import { graphStats } from '../lib/knowledge-graph';
 import { getEmbeddingCounts } from '../lib/embedding-pipeline';
 import { loadRorcaConfig, writeRorcaConfig, hasRorcaDir, ensureRorcaDirStructure, defaultRorcaConfig } from '../lib/rorca-config';
@@ -389,7 +390,7 @@ router.get('/:id/status', async (req, res, next) => {
         graphMode: databaseCapability.graphMode,
         vertexCount: stats.vertexCount,
         edgeCount: stats.edgeCount,
-        graphName: 'rorca',
+        graphName: RORCA_GRAPH_NAME,
         lastPopulatedAt: lastEvent?.ts ?? null,
         warnings: databaseCapability.warnings,
       },

@@ -975,8 +975,8 @@ var require_command = __commonJS({
   "node_modules/commander/lib/command.js"(exports) {
     var EventEmitter2 = __require("node:events").EventEmitter;
     var childProcess = __require("node:child_process");
-    var path14 = __require("node:path");
-    var fs8 = __require("node:fs");
+    var path15 = __require("node:path");
+    var fs9 = __require("node:fs");
     var process11 = __require("node:process");
     var { Argument: Argument2, humanReadableArgName } = require_argument();
     var { CommanderError: CommanderError2 } = require_error();
@@ -1908,11 +1908,11 @@ Expecting one of '${allowedValues.join("', '")}'`);
         let launchWithNode = false;
         const sourceExt = [".js", ".ts", ".tsx", ".mjs", ".cjs"];
         function findFile(baseDir, baseName) {
-          const localBin = path14.resolve(baseDir, baseName);
-          if (fs8.existsSync(localBin)) return localBin;
-          if (sourceExt.includes(path14.extname(baseName))) return void 0;
+          const localBin = path15.resolve(baseDir, baseName);
+          if (fs9.existsSync(localBin)) return localBin;
+          if (sourceExt.includes(path15.extname(baseName))) return void 0;
           const foundExt = sourceExt.find(
-            (ext) => fs8.existsSync(`${localBin}${ext}`)
+            (ext) => fs9.existsSync(`${localBin}${ext}`)
           );
           if (foundExt) return `${localBin}${foundExt}`;
           return void 0;
@@ -1924,21 +1924,21 @@ Expecting one of '${allowedValues.join("', '")}'`);
         if (this._scriptPath) {
           let resolvedScriptPath;
           try {
-            resolvedScriptPath = fs8.realpathSync(this._scriptPath);
+            resolvedScriptPath = fs9.realpathSync(this._scriptPath);
           } catch (err) {
             resolvedScriptPath = this._scriptPath;
           }
-          executableDir = path14.resolve(
-            path14.dirname(resolvedScriptPath),
+          executableDir = path15.resolve(
+            path15.dirname(resolvedScriptPath),
             executableDir
           );
         }
         if (executableDir) {
           let localFile = findFile(executableDir, executableFile);
           if (!localFile && !subcommand._executableFile && this._scriptPath) {
-            const legacyName = path14.basename(
+            const legacyName = path15.basename(
               this._scriptPath,
-              path14.extname(this._scriptPath)
+              path15.extname(this._scriptPath)
             );
             if (legacyName !== this._name) {
               localFile = findFile(
@@ -1949,7 +1949,7 @@ Expecting one of '${allowedValues.join("', '")}'`);
           }
           executableFile = localFile || executableFile;
         }
-        launchWithNode = sourceExt.includes(path14.extname(executableFile));
+        launchWithNode = sourceExt.includes(path15.extname(executableFile));
         let proc;
         if (process11.platform !== "win32") {
           if (launchWithNode) {
@@ -2789,7 +2789,7 @@ Expecting one of '${allowedValues.join("', '")}'`);
        * @return {Command}
        */
       nameFromFilename(filename) {
-        this._name = path14.basename(filename, path14.extname(filename));
+        this._name = path15.basename(filename, path15.extname(filename));
         return this;
       }
       /**
@@ -2803,9 +2803,9 @@ Expecting one of '${allowedValues.join("', '")}'`);
        * @param {string} [path]
        * @return {(string|null|Command)}
        */
-      executableDir(path15) {
-        if (path15 === void 0) return this._executableDir;
-        this._executableDir = path15;
+      executableDir(path16) {
+        if (path16 === void 0) return this._executableDir;
+        this._executableDir = path16;
         return this;
       }
       /**
@@ -3040,8 +3040,8 @@ var require_windows = __commonJS({
   "node_modules/isexe/windows.js"(exports, module2) {
     module2.exports = isexe;
     isexe.sync = sync;
-    var fs8 = __require("fs");
-    function checkPathExt(path14, options) {
+    var fs9 = __require("fs");
+    function checkPathExt(path15, options) {
       var pathext = options.pathExt !== void 0 ? options.pathExt : process.env.PATHEXT;
       if (!pathext) {
         return true;
@@ -3052,25 +3052,25 @@ var require_windows = __commonJS({
       }
       for (var i2 = 0; i2 < pathext.length; i2++) {
         var p = pathext[i2].toLowerCase();
-        if (p && path14.substr(-p.length).toLowerCase() === p) {
+        if (p && path15.substr(-p.length).toLowerCase() === p) {
           return true;
         }
       }
       return false;
     }
-    function checkStat(stat, path14, options) {
+    function checkStat(stat, path15, options) {
       if (!stat.isSymbolicLink() && !stat.isFile()) {
         return false;
       }
-      return checkPathExt(path14, options);
+      return checkPathExt(path15, options);
     }
-    function isexe(path14, options, cb) {
-      fs8.stat(path14, function(er, stat) {
-        cb(er, er ? false : checkStat(stat, path14, options));
+    function isexe(path15, options, cb) {
+      fs9.stat(path15, function(er, stat) {
+        cb(er, er ? false : checkStat(stat, path15, options));
       });
     }
-    function sync(path14, options) {
-      return checkStat(fs8.statSync(path14), path14, options);
+    function sync(path15, options) {
+      return checkStat(fs9.statSync(path15), path15, options);
     }
   }
 });
@@ -3080,14 +3080,14 @@ var require_mode = __commonJS({
   "node_modules/isexe/mode.js"(exports, module2) {
     module2.exports = isexe;
     isexe.sync = sync;
-    var fs8 = __require("fs");
-    function isexe(path14, options, cb) {
-      fs8.stat(path14, function(er, stat) {
+    var fs9 = __require("fs");
+    function isexe(path15, options, cb) {
+      fs9.stat(path15, function(er, stat) {
         cb(er, er ? false : checkStat(stat, options));
       });
     }
-    function sync(path14, options) {
-      return checkStat(fs8.statSync(path14), options);
+    function sync(path15, options) {
+      return checkStat(fs9.statSync(path15), options);
     }
     function checkStat(stat, options) {
       return stat.isFile() && checkMode(stat, options);
@@ -3111,7 +3111,7 @@ var require_mode = __commonJS({
 // node_modules/isexe/index.js
 var require_isexe = __commonJS({
   "node_modules/isexe/index.js"(exports, module2) {
-    var fs8 = __require("fs");
+    var fs9 = __require("fs");
     var core;
     if (process.platform === "win32" || global.TESTING_WINDOWS) {
       core = require_windows();
@@ -3120,7 +3120,7 @@ var require_isexe = __commonJS({
     }
     module2.exports = isexe;
     isexe.sync = sync;
-    function isexe(path14, options, cb) {
+    function isexe(path15, options, cb) {
       if (typeof options === "function") {
         cb = options;
         options = {};
@@ -3129,17 +3129,17 @@ var require_isexe = __commonJS({
         if (typeof Promise !== "function") {
           throw new TypeError("callback not provided");
         }
-        return new Promise(function(resolve2, reject) {
-          isexe(path14, options || {}, function(er, is) {
+        return new Promise(function(resolve3, reject) {
+          isexe(path15, options || {}, function(er, is) {
             if (er) {
               reject(er);
             } else {
-              resolve2(is);
+              resolve3(is);
             }
           });
         });
       }
-      core(path14, options || {}, function(er, is) {
+      core(path15, options || {}, function(er, is) {
         if (er) {
           if (er.code === "EACCES" || options && options.ignoreErrors) {
             er = null;
@@ -3149,9 +3149,9 @@ var require_isexe = __commonJS({
         cb(er, is);
       });
     }
-    function sync(path14, options) {
+    function sync(path15, options) {
       try {
-        return core.sync(path14, options || {});
+        return core.sync(path15, options || {});
       } catch (er) {
         if (options && options.ignoreErrors || er.code === "EACCES") {
           return false;
@@ -3167,7 +3167,7 @@ var require_isexe = __commonJS({
 var require_which = __commonJS({
   "node_modules/which/which.js"(exports, module2) {
     var isWindows = process.platform === "win32" || process.env.OSTYPE === "cygwin" || process.env.OSTYPE === "msys";
-    var path14 = __require("path");
+    var path15 = __require("path");
     var COLON = isWindows ? ";" : ":";
     var isexe = require_isexe();
     var getNotFoundError = (cmd) => Object.assign(new Error(`not found: ${cmd}`), { code: "ENOENT" });
@@ -3200,27 +3200,27 @@ var require_which = __commonJS({
         opt = {};
       const { pathEnv, pathExt, pathExtExe } = getPathInfo(cmd, opt);
       const found = [];
-      const step = (i2) => new Promise((resolve2, reject) => {
+      const step = (i2) => new Promise((resolve3, reject) => {
         if (i2 === pathEnv.length)
-          return opt.all && found.length ? resolve2(found) : reject(getNotFoundError(cmd));
+          return opt.all && found.length ? resolve3(found) : reject(getNotFoundError(cmd));
         const ppRaw = pathEnv[i2];
         const pathPart = /^".*"$/.test(ppRaw) ? ppRaw.slice(1, -1) : ppRaw;
-        const pCmd = path14.join(pathPart, cmd);
+        const pCmd = path15.join(pathPart, cmd);
         const p = !pathPart && /^\.[\\\/]/.test(cmd) ? cmd.slice(0, 2) + pCmd : pCmd;
-        resolve2(subStep(p, i2, 0));
+        resolve3(subStep(p, i2, 0));
       });
-      const subStep = (p, i2, ii) => new Promise((resolve2, reject) => {
+      const subStep = (p, i2, ii) => new Promise((resolve3, reject) => {
         if (ii === pathExt.length)
-          return resolve2(step(i2 + 1));
+          return resolve3(step(i2 + 1));
         const ext = pathExt[ii];
         isexe(p + ext, { pathExt: pathExtExe }, (er, is) => {
           if (!er && is) {
             if (opt.all)
               found.push(p + ext);
             else
-              return resolve2(p + ext);
+              return resolve3(p + ext);
           }
-          return resolve2(subStep(p, i2, ii + 1));
+          return resolve3(subStep(p, i2, ii + 1));
         });
       });
       return cb ? step(0).then((res) => cb(null, res), cb) : step(0);
@@ -3232,7 +3232,7 @@ var require_which = __commonJS({
       for (let i2 = 0; i2 < pathEnv.length; i2++) {
         const ppRaw = pathEnv[i2];
         const pathPart = /^".*"$/.test(ppRaw) ? ppRaw.slice(1, -1) : ppRaw;
-        const pCmd = path14.join(pathPart, cmd);
+        const pCmd = path15.join(pathPart, cmd);
         const p = !pathPart && /^\.[\\\/]/.test(cmd) ? cmd.slice(0, 2) + pCmd : pCmd;
         for (let j = 0; j < pathExt.length; j++) {
           const cur = p + pathExt[j];
@@ -3280,7 +3280,7 @@ var require_path_key = __commonJS({
 var require_resolveCommand = __commonJS({
   "node_modules/cross-spawn/lib/util/resolveCommand.js"(exports, module2) {
     "use strict";
-    var path14 = __require("path");
+    var path15 = __require("path");
     var which = require_which();
     var getPathKey = require_path_key();
     function resolveCommandAttempt(parsed, withoutPathExt) {
@@ -3298,7 +3298,7 @@ var require_resolveCommand = __commonJS({
       try {
         resolved = which.sync(parsed.command, {
           path: env[getPathKey({ env })],
-          pathExt: withoutPathExt ? path14.delimiter : void 0
+          pathExt: withoutPathExt ? path15.delimiter : void 0
         });
       } catch (e) {
       } finally {
@@ -3307,7 +3307,7 @@ var require_resolveCommand = __commonJS({
         }
       }
       if (resolved) {
-        resolved = path14.resolve(hasCustomCwd ? parsed.options.cwd : "", resolved);
+        resolved = path15.resolve(hasCustomCwd ? parsed.options.cwd : "", resolved);
       }
       return resolved;
     }
@@ -3361,8 +3361,8 @@ var require_shebang_command = __commonJS({
       if (!match) {
         return null;
       }
-      const [path14, argument] = match[0].replace(/#! ?/, "").split(" ");
-      const binary = path14.split("/").pop();
+      const [path15, argument] = match[0].replace(/#! ?/, "").split(" ");
+      const binary = path15.split("/").pop();
       if (binary === "env") {
         return argument;
       }
@@ -3375,16 +3375,16 @@ var require_shebang_command = __commonJS({
 var require_readShebang = __commonJS({
   "node_modules/cross-spawn/lib/util/readShebang.js"(exports, module2) {
     "use strict";
-    var fs8 = __require("fs");
+    var fs9 = __require("fs");
     var shebangCommand = require_shebang_command();
     function readShebang(command) {
       const size = 150;
       const buffer = Buffer.alloc(size);
       let fd;
       try {
-        fd = fs8.openSync(command, "r");
-        fs8.readSync(fd, buffer, 0, size, 0);
-        fs8.closeSync(fd);
+        fd = fs9.openSync(command, "r");
+        fs9.readSync(fd, buffer, 0, size, 0);
+        fs9.closeSync(fd);
       } catch (e) {
       }
       return shebangCommand(buffer.toString());
@@ -3397,7 +3397,7 @@ var require_readShebang = __commonJS({
 var require_parse = __commonJS({
   "node_modules/cross-spawn/lib/parse.js"(exports, module2) {
     "use strict";
-    var path14 = __require("path");
+    var path15 = __require("path");
     var resolveCommand = require_resolveCommand();
     var escape = require_escape();
     var readShebang = require_readShebang();
@@ -3422,7 +3422,7 @@ var require_parse = __commonJS({
       const needsShell = !isExecutableRegExp.test(commandFile);
       if (parsed.options.forceShell || needsShell) {
         const needsDoubleEscapeMetaChars = isCmdShimRegExp.test(commandFile);
-        parsed.command = path14.normalize(parsed.command);
+        parsed.command = path15.normalize(parsed.command);
         parsed.command = escape.command(parsed.command);
         parsed.args = parsed.args.map((arg) => escape.argument(arg, needsDoubleEscapeMetaChars));
         const shellCommand = [parsed.command].concat(parsed.args).join(" ");
@@ -5163,15 +5163,15 @@ var require_pg_connection_string = __commonJS({
       if (config.sslcert || config.sslkey || config.sslrootcert || config.sslmode) {
         config.ssl = {};
       }
-      const fs8 = config.sslcert || config.sslkey || config.sslrootcert ? __require("fs") : null;
+      const fs9 = config.sslcert || config.sslkey || config.sslrootcert ? __require("fs") : null;
       if (config.sslcert) {
-        config.ssl.cert = fs8.readFileSync(config.sslcert).toString();
+        config.ssl.cert = fs9.readFileSync(config.sslcert).toString();
       }
       if (config.sslkey) {
-        config.ssl.key = fs8.readFileSync(config.sslkey).toString();
+        config.ssl.key = fs9.readFileSync(config.sslkey).toString();
       }
       if (config.sslrootcert) {
-        config.ssl.ca = fs8.readFileSync(config.sslrootcert).toString();
+        config.ssl.ca = fs9.readFileSync(config.sslrootcert).toString();
       }
       if (options.useLibpqCompat && config.uselibpqcompat) {
         throw new Error("Both useLibpqCompat and uselibpqcompat are set. Please use only one of them.");
@@ -6567,7 +6567,7 @@ var require_dist = __commonJS({
     function parse(stream, callback) {
       const parser = new parser_1.Parser();
       stream.on("data", (buffer) => parser.parse(buffer, callback));
-      return new Promise((resolve2) => stream.on("end", () => resolve2()));
+      return new Promise((resolve3) => stream.on("end", () => resolve3()));
     }
     exports.parse = parse;
   }
@@ -6936,7 +6936,7 @@ var require_split2 = __commonJS({
 var require_helper = __commonJS({
   "backend/node_modules/pgpass/lib/helper.js"(exports, module2) {
     "use strict";
-    var path14 = __require("path");
+    var path15 = __require("path");
     var Stream = __require("stream").Stream;
     var split = require_split2();
     var util = __require("util");
@@ -6975,7 +6975,7 @@ var require_helper = __commonJS({
     };
     module2.exports.getFileName = function(rawEnv) {
       var env = rawEnv || process.env;
-      var file = env.PGPASSFILE || (isWin ? path14.join(env.APPDATA || "./", "postgresql", "pgpass.conf") : path14.join(env.HOME || "./", ".pgpass"));
+      var file = env.PGPASSFILE || (isWin ? path15.join(env.APPDATA || "./", "postgresql", "pgpass.conf") : path15.join(env.HOME || "./", ".pgpass"));
       return file;
     };
     module2.exports.usePgPass = function(stats, fname) {
@@ -7107,16 +7107,16 @@ var require_helper = __commonJS({
 var require_lib = __commonJS({
   "backend/node_modules/pgpass/lib/index.js"(exports, module2) {
     "use strict";
-    var path14 = __require("path");
-    var fs8 = __require("fs");
+    var path15 = __require("path");
+    var fs9 = __require("fs");
     var helper = require_helper();
     module2.exports = function(connInfo, cb) {
       var file = helper.getFileName();
-      fs8.stat(file, function(err, stat) {
+      fs9.stat(file, function(err, stat) {
         if (err || !helper.usePgPass(stat, file)) {
           return cb(void 0);
         }
-        var st = fs8.createReadStream(file);
+        var st = fs9.createReadStream(file);
         helper.getPassword(connInfo, st, cb);
       });
     };
@@ -7298,12 +7298,12 @@ var require_client = __commonJS({
           this._connect(callback);
           return;
         }
-        return new this._Promise((resolve2, reject) => {
+        return new this._Promise((resolve3, reject) => {
           this._connect((error) => {
             if (error) {
               reject(error);
             } else {
-              resolve2(this);
+              resolve3(this);
             }
           });
         });
@@ -7649,8 +7649,8 @@ var require_client = __commonJS({
           readTimeout = config.query_timeout || this.connectionParameters.query_timeout;
           query2 = new Query2(config, values, callback);
           if (!query2.callback) {
-            result = new this._Promise((resolve2, reject) => {
-              query2.callback = (err, res) => err ? reject(err) : resolve2(res);
+            result = new this._Promise((resolve3, reject) => {
+              query2.callback = (err, res) => err ? reject(err) : resolve3(res);
             }).catch((err) => {
               Error.captureStackTrace(err);
               throw err;
@@ -7727,8 +7727,8 @@ var require_client = __commonJS({
         if (cb) {
           this.connection.once("end", cb);
         } else {
-          return new this._Promise((resolve2) => {
-            this.connection.once("end", resolve2);
+          return new this._Promise((resolve3) => {
+            this.connection.once("end", resolve3);
           });
         }
       }
@@ -7777,8 +7777,8 @@ var require_pg_pool = __commonJS({
       const cb = function(err, client) {
         err ? rej(err) : res(client);
       };
-      const result = new Promise2(function(resolve2, reject) {
-        res = resolve2;
+      const result = new Promise2(function(resolve3, reject) {
+        res = resolve3;
         rej = reject;
       }).catch((err) => {
         Error.captureStackTrace(err);
@@ -7839,7 +7839,7 @@ var require_pg_pool = __commonJS({
         if (typeof Promise2.try === "function") {
           return Promise2.try(f);
         }
-        return new Promise2((resolve2) => resolve2(f()));
+        return new Promise2((resolve3) => resolve3(f()));
       }
       _isFull() {
         return this._clients.length >= this.options.max;
@@ -8232,8 +8232,8 @@ var require_query2 = __commonJS({
     NativeQuery.prototype._getPromise = function() {
       if (this._promise) return this._promise;
       this._promise = new Promise(
-        function(resolve2, reject) {
-          this._once("end", resolve2);
+        function(resolve3, reject) {
+          this._once("end", resolve3);
           this._once("error", reject);
         }.bind(this)
       );
@@ -8410,12 +8410,12 @@ var require_client2 = __commonJS({
         this._connect(callback);
         return;
       }
-      return new this._Promise((resolve2, reject) => {
+      return new this._Promise((resolve3, reject) => {
         this._connect((error) => {
           if (error) {
             reject(error);
           } else {
-            resolve2(this);
+            resolve3(this);
           }
         });
       });
@@ -8439,8 +8439,8 @@ var require_client2 = __commonJS({
         query2 = new NativeQuery(config, values, callback);
         if (!query2.callback) {
           let resolveOut, rejectOut;
-          result = new this._Promise((resolve2, reject) => {
-            resolveOut = resolve2;
+          result = new this._Promise((resolve3, reject) => {
+            resolveOut = resolve3;
             rejectOut = reject;
           }).catch((err) => {
             Error.captureStackTrace(err);
@@ -8500,8 +8500,8 @@ var require_client2 = __commonJS({
       }
       let result;
       if (!cb) {
-        result = new this._Promise(function(resolve2, reject) {
-          cb = (err) => err ? reject(err) : resolve2();
+        result = new this._Promise(function(resolve3, reject) {
+          cb = (err) => err ? reject(err) : resolve3();
         });
       }
       this.native.end(function() {
@@ -8899,8 +8899,8 @@ var require_req = __commonJS({
       if (req.originalUrl) {
         _req.url = req.originalUrl;
       } else {
-        const path14 = req.path;
-        _req.url = typeof path14 === "string" ? path14 : req.url ? req.url.path || req.url : void 0;
+        const path15 = req.path;
+        _req.url = typeof path15 === "string" ? path15 : req.url ? req.url.path || req.url : void 0;
       }
       if (req.query) {
         _req.query = req.query;
@@ -9065,14 +9065,14 @@ var require_redact = __commonJS({
       }
       return obj;
     }
-    function parsePath(path14) {
+    function parsePath(path15) {
       const parts = [];
       let current = "";
       let inBrackets = false;
       let inQuotes = false;
       let quoteChar = "";
-      for (let i2 = 0; i2 < path14.length; i2++) {
-        const char = path14[i2];
+      for (let i2 = 0; i2 < path15.length; i2++) {
+        const char = path15[i2];
         if (!inBrackets && char === ".") {
           if (current) {
             parts.push(current);
@@ -9203,10 +9203,10 @@ var require_redact = __commonJS({
       return current;
     }
     function redactPaths(obj, paths, censor, remove = false) {
-      for (const path14 of paths) {
-        const parts = parsePath(path14);
+      for (const path15 of paths) {
+        const parts = parsePath(path15);
         if (parts.includes("*")) {
-          redactWildcardPath(obj, parts, censor, path14, remove);
+          redactWildcardPath(obj, parts, censor, path15, remove);
         } else {
           if (remove) {
             removeKey(obj, parts);
@@ -9291,8 +9291,8 @@ var require_redact = __commonJS({
           }
         } else {
           if (afterWildcard.includes("*")) {
-            const wrappedCensor = typeof censor === "function" ? (value, path14) => {
-              const fullPath = [...pathArray.slice(0, pathLength), ...path14];
+            const wrappedCensor = typeof censor === "function" ? (value, path15) => {
+              const fullPath = [...pathArray.slice(0, pathLength), ...path15];
               return censor(value, fullPath);
             } : censor;
             redactWildcardPath(current, afterWildcard, wrappedCensor, originalPath, remove);
@@ -9327,8 +9327,8 @@ var require_redact = __commonJS({
         return null;
       }
       const pathStructure = /* @__PURE__ */ new Map();
-      for (const path14 of pathsToClone) {
-        const parts = parsePath(path14);
+      for (const path15 of pathsToClone) {
+        const parts = parsePath(path15);
         let current = pathStructure;
         for (let i2 = 0; i2 < parts.length; i2++) {
           const part = parts[i2];
@@ -9380,24 +9380,24 @@ var require_redact = __commonJS({
       }
       return cloneSelectively(obj, pathStructure);
     }
-    function validatePath(path14) {
-      if (typeof path14 !== "string") {
+    function validatePath(path15) {
+      if (typeof path15 !== "string") {
         throw new Error("Paths must be (non-empty) strings");
       }
-      if (path14 === "") {
+      if (path15 === "") {
         throw new Error("Invalid redaction path ()");
       }
-      if (path14.includes("..")) {
-        throw new Error(`Invalid redaction path (${path14})`);
+      if (path15.includes("..")) {
+        throw new Error(`Invalid redaction path (${path15})`);
       }
-      if (path14.includes(",")) {
-        throw new Error(`Invalid redaction path (${path14})`);
+      if (path15.includes(",")) {
+        throw new Error(`Invalid redaction path (${path15})`);
       }
       let bracketCount = 0;
       let inQuotes = false;
       let quoteChar = "";
-      for (let i2 = 0; i2 < path14.length; i2++) {
-        const char = path14[i2];
+      for (let i2 = 0; i2 < path15.length; i2++) {
+        const char = path15[i2];
         if ((char === '"' || char === "'") && bracketCount > 0) {
           if (!inQuotes) {
             inQuotes = true;
@@ -9411,20 +9411,20 @@ var require_redact = __commonJS({
         } else if (char === "]" && !inQuotes) {
           bracketCount--;
           if (bracketCount < 0) {
-            throw new Error(`Invalid redaction path (${path14})`);
+            throw new Error(`Invalid redaction path (${path15})`);
           }
         }
       }
       if (bracketCount !== 0) {
-        throw new Error(`Invalid redaction path (${path14})`);
+        throw new Error(`Invalid redaction path (${path15})`);
       }
     }
     function validatePaths(paths) {
       if (!Array.isArray(paths)) {
         throw new TypeError("paths must be an array");
       }
-      for (const path14 of paths) {
-        validatePath(path14);
+      for (const path15 of paths) {
+        validatePath(path15);
       }
     }
     function slowRedact(options = {}) {
@@ -9592,8 +9592,8 @@ var require_redaction = __commonJS({
         if (shape[k] === null) {
           o2[k] = (value) => topCensor(value, [k]);
         } else {
-          const wrappedCensor = typeof censor === "function" ? (value, path14) => {
-            return censor(value, [k, ...path14]);
+          const wrappedCensor = typeof censor === "function" ? (value, path15) => {
+            return censor(value, [k, ...path15]);
           } : censor;
           o2[k] = Redact({
             paths: shape[k],
@@ -9811,10 +9811,10 @@ var require_atomic_sleep = __commonJS({
 var require_sonic_boom = __commonJS({
   "backend/node_modules/sonic-boom/index.js"(exports, module2) {
     "use strict";
-    var fs8 = __require("fs");
+    var fs9 = __require("fs");
     var EventEmitter2 = __require("events");
     var inherits = __require("util").inherits;
-    var path14 = __require("path");
+    var path15 = __require("path");
     var sleep2 = require_atomic_sleep();
     var assert = __require("assert");
     var BUSY_WRITE_TIMEOUT = 100;
@@ -9868,20 +9868,20 @@ var require_sonic_boom = __commonJS({
       const mode = sonic.mode;
       if (sonic.sync) {
         try {
-          if (sonic.mkdir) fs8.mkdirSync(path14.dirname(file), { recursive: true });
-          const fd = fs8.openSync(file, flags, mode);
+          if (sonic.mkdir) fs9.mkdirSync(path15.dirname(file), { recursive: true });
+          const fd = fs9.openSync(file, flags, mode);
           fileOpened(null, fd);
         } catch (err) {
           fileOpened(err);
           throw err;
         }
       } else if (sonic.mkdir) {
-        fs8.mkdir(path14.dirname(file), { recursive: true }, (err) => {
+        fs9.mkdir(path15.dirname(file), { recursive: true }, (err) => {
           if (err) return fileOpened(err);
-          fs8.open(file, flags, mode, fileOpened);
+          fs9.open(file, flags, mode, fileOpened);
         });
       } else {
-        fs8.open(file, flags, mode, fileOpened);
+        fs9.open(file, flags, mode, fileOpened);
       }
     }
     function SonicBoom(opts) {
@@ -9922,8 +9922,8 @@ var require_sonic_boom = __commonJS({
         this.flush = flushBuffer;
         this.flushSync = flushBufferSync;
         this._actualWrite = actualWriteBuffer;
-        fsWriteSync = () => fs8.writeSync(this.fd, this._writingBuf);
-        fsWrite = () => fs8.write(this.fd, this._writingBuf, this.release);
+        fsWriteSync = () => fs9.writeSync(this.fd, this._writingBuf);
+        fsWrite = () => fs9.write(this.fd, this._writingBuf, this.release);
       } else if (contentMode === void 0 || contentMode === kContentModeUtf8) {
         this._writingBuf = "";
         this.write = write;
@@ -9932,15 +9932,15 @@ var require_sonic_boom = __commonJS({
         this._actualWrite = actualWrite;
         fsWriteSync = () => {
           if (Buffer.isBuffer(this._writingBuf)) {
-            return fs8.writeSync(this.fd, this._writingBuf);
+            return fs9.writeSync(this.fd, this._writingBuf);
           }
-          return fs8.writeSync(this.fd, this._writingBuf, "utf8");
+          return fs9.writeSync(this.fd, this._writingBuf, "utf8");
         };
         fsWrite = () => {
           if (Buffer.isBuffer(this._writingBuf)) {
-            return fs8.write(this.fd, this._writingBuf, this.release);
+            return fs9.write(this.fd, this._writingBuf, this.release);
           }
-          return fs8.write(this.fd, this._writingBuf, "utf8", this.release);
+          return fs9.write(this.fd, this._writingBuf, "utf8", this.release);
         };
       } else {
         throw new Error(`SonicBoom supports "${kContentModeUtf8}" and "${kContentModeBuffer}", but passed ${contentMode}`);
@@ -9997,7 +9997,7 @@ var require_sonic_boom = __commonJS({
           }
         }
         if (this._fsync) {
-          fs8.fsyncSync(this.fd);
+          fs9.fsyncSync(this.fd);
         }
         const len = this._len;
         if (this._reopening) {
@@ -10111,7 +10111,7 @@ var require_sonic_boom = __commonJS({
       const onDrain = () => {
         if (!this._fsync) {
           try {
-            fs8.fsync(this.fd, (err) => {
+            fs9.fsync(this.fd, (err) => {
               this._flushPending = false;
               cb(err);
             });
@@ -10213,7 +10213,7 @@ var require_sonic_boom = __commonJS({
       const fd = this.fd;
       this.once("ready", () => {
         if (fd !== this.fd) {
-          fs8.close(fd, (err) => {
+          fs9.close(fd, (err) => {
             if (err) {
               return this.emit("error", err);
             }
@@ -10262,7 +10262,7 @@ var require_sonic_boom = __commonJS({
           buf = this._bufs[0];
         }
         try {
-          const n2 = Buffer.isBuffer(buf) ? fs8.writeSync(this.fd, buf) : fs8.writeSync(this.fd, buf, "utf8");
+          const n2 = Buffer.isBuffer(buf) ? fs9.writeSync(this.fd, buf) : fs9.writeSync(this.fd, buf, "utf8");
           const releasedBufObj = releaseWritingBuf(buf, this._len, n2);
           buf = releasedBufObj.writingBuf;
           this._len = releasedBufObj.len;
@@ -10278,7 +10278,7 @@ var require_sonic_boom = __commonJS({
         }
       }
       try {
-        fs8.fsyncSync(this.fd);
+        fs9.fsyncSync(this.fd);
       } catch {
       }
     }
@@ -10299,7 +10299,7 @@ var require_sonic_boom = __commonJS({
           buf = mergeBuf(this._bufs[0], this._lens[0]);
         }
         try {
-          const n2 = fs8.writeSync(this.fd, buf);
+          const n2 = fs9.writeSync(this.fd, buf);
           buf = buf.subarray(n2);
           this._len = Math.max(this._len - n2, 0);
           if (buf.length <= 0) {
@@ -10327,13 +10327,13 @@ var require_sonic_boom = __commonJS({
       this._writingBuf = this._writingBuf.length ? this._writingBuf : this._bufs.shift() || "";
       if (this.sync) {
         try {
-          const written = Buffer.isBuffer(this._writingBuf) ? fs8.writeSync(this.fd, this._writingBuf) : fs8.writeSync(this.fd, this._writingBuf, "utf8");
+          const written = Buffer.isBuffer(this._writingBuf) ? fs9.writeSync(this.fd, this._writingBuf) : fs9.writeSync(this.fd, this._writingBuf, "utf8");
           release(null, written);
         } catch (err) {
           release(err);
         }
       } else {
-        fs8.write(this.fd, this._writingBuf, release);
+        fs9.write(this.fd, this._writingBuf, release);
       }
     }
     function actualWriteBuffer() {
@@ -10342,7 +10342,7 @@ var require_sonic_boom = __commonJS({
       this._writingBuf = this._writingBuf.length ? this._writingBuf : mergeBuf(this._bufs.shift(), this._lens.shift());
       if (this.sync) {
         try {
-          const written = fs8.writeSync(this.fd, this._writingBuf);
+          const written = fs9.writeSync(this.fd, this._writingBuf);
           release(null, written);
         } catch (err) {
           release(err);
@@ -10351,7 +10351,7 @@ var require_sonic_boom = __commonJS({
         if (kCopyBuffer) {
           this._writingBuf = Buffer.from(this._writingBuf);
         }
-        fs8.write(this.fd, this._writingBuf, release);
+        fs9.write(this.fd, this._writingBuf, release);
       }
     }
     function actualClose(sonic) {
@@ -10367,12 +10367,12 @@ var require_sonic_boom = __commonJS({
       sonic._lens = [];
       assert(typeof sonic.fd === "number", `sonic.fd must be a number, got ${typeof sonic.fd}`);
       try {
-        fs8.fsync(sonic.fd, closeWrapped);
+        fs9.fsync(sonic.fd, closeWrapped);
       } catch {
       }
       function closeWrapped() {
         if (sonic.fd !== 1 && sonic.fd !== 2) {
-          fs8.close(sonic.fd, done);
+          fs9.close(sonic.fd, done);
         } else {
           done();
         }
@@ -11044,9 +11044,9 @@ var require_transport = __commonJS({
   "backend/node_modules/pino/lib/transport.js"(exports, module2) {
     "use strict";
     var { createRequire } = __require("module");
-    var { existsSync: existsSync4 } = __require("node:fs");
+    var { existsSync: existsSync6 } = __require("node:fs");
     var getCallers = require_caller();
-    var { join: join7, isAbsolute: isAbsolute2, sep: sep2 } = __require("node:path");
+    var { join: join7, isAbsolute: isAbsolute4, sep: sep3 } = __require("node:path");
     var { fileURLToPath: fileURLToPath4 } = __require("node:url");
     var sleep2 = require_atomic_sleep();
     var onExit2 = require_on_exit_leak_free();
@@ -11110,15 +11110,15 @@ var require_transport = __commonJS({
       if (!unquoted) {
         return false;
       }
-      let path14 = unquoted;
-      if (path14.startsWith("file://")) {
+      let path15 = unquoted;
+      if (path15.startsWith("file://")) {
         try {
-          path14 = fileURLToPath4(path14);
+          path15 = fileURLToPath4(path15);
         } catch {
           return false;
         }
       }
-      return isAbsolute2(path14) && !existsSync4(path14);
+      return isAbsolute4(path15) && !existsSync6(path15);
     }
     function stripQuotes(value) {
       const first = value[0];
@@ -11236,7 +11236,7 @@ var require_transport = __commonJS({
       return buildStream(fixTarget(target), options, worker, sync, name);
       function fixTarget(origin) {
         origin = bundlerOverrides[origin] || origin;
-        if (isAbsolute2(origin) || origin.indexOf("file://") === 0) {
+        if (isAbsolute4(origin) || origin.indexOf("file://") === 0) {
           return origin;
         }
         if (origin === "pino/file") {
@@ -11245,7 +11245,7 @@ var require_transport = __commonJS({
         let fixTarget2;
         for (const filePath of callers) {
           try {
-            const context = filePath === "node:repl" ? process.cwd() + sep2 : filePath;
+            const context = filePath === "node:repl" ? process.cwd() + sep3 : filePath;
             fixTarget2 = createRequire(context).resolve(origin);
             break;
           } catch (err) {
@@ -13036,9 +13036,9 @@ var {
 } = import_index.default;
 
 // bin/rorca.ts
-import { mkdirSync as mkdirSync3, existsSync as existsSync3, writeFileSync as writeFileSync4, readFileSync as readFileSync7, unlinkSync as unlinkSync2, statSync as statSync3, readdirSync as readdirSync3 } from "node:fs";
-import { homedir as homedir3, tmpdir as tmpdir3 } from "node:os";
-import path13 from "node:path";
+import { mkdirSync as mkdirSync3, existsSync as existsSync5, writeFileSync as writeFileSync4, readFileSync as readFileSync7, unlinkSync as unlinkSync2, statSync as statSync3, readdirSync as readdirSync3 } from "node:fs";
+import { homedir as homedir5, tmpdir as tmpdir3 } from "node:os";
+import path14 from "node:path";
 import process10 from "node:process";
 import { execSync, spawn as spawn4, spawnSync as spawnSync4 } from "node:child_process";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -14593,8 +14593,8 @@ var disconnect = (anyProcess) => {
 // node_modules/execa/lib/utils/deferred.js
 var createDeferred = () => {
   const methods = {};
-  const promise = new Promise((resolve2, reject) => {
-    Object.assign(methods, { resolve: resolve2, reject });
+  const promise = new Promise((resolve3, reject) => {
+    Object.assign(methods, { resolve: resolve3, reject });
   });
   return Object.assign(promise, methods);
 };
@@ -15813,14 +15813,14 @@ var createMessages = ({
   timeout,
   cwd
 }) => {
-  const errorCode = originalError?.code;
+  const errorCode2 = originalError?.code;
   const prefix = getErrorPrefix({
     originalError,
     timedOut,
     timeout,
     isMaxBuffer,
     maxBuffer,
-    errorCode,
+    errorCode: errorCode2,
     signal,
     signalDescription,
     exitCode,
@@ -15849,7 +15849,7 @@ var getErrorPrefix = ({
   timeout,
   isMaxBuffer,
   maxBuffer,
-  errorCode,
+  errorCode: errorCode2,
   signal,
   signalDescription,
   exitCode,
@@ -15875,8 +15875,8 @@ var getErrorPrefix = ({
   if (isMaxBuffer) {
     return `${getMaxBufferMessage(originalError, maxBuffer)}${forcefulSuffix}`;
   }
-  if (errorCode !== void 0) {
-    return `Command failed with ${errorCode}${forcefulSuffix}`;
+  if (errorCode2 !== void 0) {
+    return `Command failed with ${errorCode2}${forcefulSuffix}`;
   }
   if (isForcefullyTerminated) {
     return `Command was killed with ${killSignal} (${getSignalDescription(killSignal)})${forcefulSuffix}`;
@@ -17426,13 +17426,13 @@ var logOutputSync = ({ serializedResult, fdNumber, state, verboseInfo, encoding,
   }
 };
 var writeToFiles = (serializedResult, stdioItems, outputFiles) => {
-  for (const { path: path14, append } of stdioItems.filter(({ type }) => FILE_TYPES.has(type))) {
-    const pathString = typeof path14 === "string" ? path14 : path14.toString();
+  for (const { path: path15, append } of stdioItems.filter(({ type }) => FILE_TYPES.has(type))) {
+    const pathString = typeof path15 === "string" ? path15 : path15.toString();
     if (append || outputFiles.has(pathString)) {
-      appendFileSync(path14, serializedResult);
+      appendFileSync(path15, serializedResult);
     } else {
       outputFiles.add(pathString);
-      writeFileSync(path14, serializedResult);
+      writeFileSync(path15, serializedResult);
     }
   }
 };
@@ -19236,11 +19236,11 @@ var addConcurrentStream = (concurrentStreams, stream, waitName) => {
   const promises = weakMap.get(stream);
   const promise = createDeferred();
   promises.push(promise);
-  const resolve2 = promise.resolve.bind(promise);
-  return { resolve: resolve2, promises };
+  const resolve3 = promise.resolve.bind(promise);
+  return { resolve: resolve3, promises };
 };
-var waitForConcurrentStreams = async ({ resolve: resolve2, promises }, subprocess) => {
-  resolve2();
+var waitForConcurrentStreams = async ({ resolve: resolve3, promises }, subprocess) => {
+  resolve3();
   const [isSubprocessExit] = await Promise.race([
     Promise.allSettled([true, subprocess]),
     Promise.all([false, ...promises])
@@ -19958,6 +19958,148 @@ async function assertConnectedTestDatabase(client, expectedUrl) {
 // backend/src/db/pg-index.ts
 import * as fs from "fs";
 import * as path7 from "path";
+
+// backend/src/lib/graph-contract.ts
+var RORCA_GRAPH_NAME = "rorca_v2";
+var RORCA_GRAPH_BOOTSTRAP_LOCK_KEY = 8244250520001;
+var RORCA_KEYED_NODE_LABELS = [
+  "Story",
+  "File",
+  "Spec",
+  "Memory",
+  "Convention",
+  "Skill"
+];
+function quoteIdent(identifier) {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+function keyIndexName(label) {
+  return `idx_${RORCA_GRAPH_NAME}_${label.toLowerCase()}_key`;
+}
+async function setupRorcaAgeSession(client) {
+  await client.query("LOAD 'age'");
+  await client.query('SET search_path = ag_catalog, "$user", public');
+}
+async function ensureGraphExists(client) {
+  const existing = await client.query(
+    "SELECT 1 FROM ag_catalog.ag_graph WHERE name = $1",
+    [RORCA_GRAPH_NAME]
+  );
+  if (existing.rowCount === 0) {
+    await client.query("SELECT create_graph($1)", [RORCA_GRAPH_NAME]);
+  }
+}
+async function ensureVertexLabelExists(client, label) {
+  const existing = await client.query(
+    `SELECT 1 FROM ag_catalog.ag_label
+     WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph WHERE name = $1)
+       AND name = $2
+       AND kind = 'v'`,
+    [RORCA_GRAPH_NAME, label]
+  );
+  if (existing.rowCount === 0) {
+    await client.query("SELECT create_vlabel($1, $2)", [RORCA_GRAPH_NAME, label]);
+  }
+}
+async function ensureCanonicalKeyIndex(client, label) {
+  const indexName = keyIndexName(label);
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexName)}
+     ON ${quoteIdent(RORCA_GRAPH_NAME)}.${quoteIdent(label)}
+     USING btree (agtype_access_operator(properties, '"key"'::agtype))`
+  );
+  return indexName;
+}
+async function bootstrapRorcaV2GraphOnClient(client) {
+  await setupRorcaAgeSession(client);
+  await ensureGraphExists(client);
+  const keyIndexes = [];
+  for (const label of RORCA_KEYED_NODE_LABELS) {
+    await ensureVertexLabelExists(client, label);
+    keyIndexes.push(await ensureCanonicalKeyIndex(client, label));
+  }
+  return {
+    available: true,
+    graphName: RORCA_GRAPH_NAME,
+    labels: [...RORCA_KEYED_NODE_LABELS],
+    keyIndexes
+  };
+}
+function errorCode(error) {
+  if (!error || typeof error !== "object") return null;
+  const code = error.code;
+  return typeof code === "string" ? code : null;
+}
+function isAgeCapabilityUnavailableError(error) {
+  return (/* @__PURE__ */ new Set([
+    "0A000",
+    // feature_not_supported
+    "3F000",
+    // invalid_schema_name / AGE catalog unavailable
+    "42501",
+    // insufficient_privilege
+    "42883",
+    // undefined_function (AGE not loaded for this distribution)
+    "58P01"
+    // undefined_file (AGE shared library unavailable)
+  ])).has(errorCode(error) ?? "");
+}
+async function bootstrapRorcaV2GraphForLifecycle(pool2) {
+  const client = await pool2.connect();
+  let destroyClient = false;
+  let transactionOpen = false;
+  let bootstrapLockHeld = false;
+  try {
+    await client.query("SELECT pg_advisory_lock($1)", [RORCA_GRAPH_BOOTSTRAP_LOCK_KEY]);
+    bootstrapLockHeld = true;
+    const extension = await client.query("SELECT 1 FROM pg_extension WHERE extname = 'age'");
+    if (extension.rowCount === 0) {
+      return { available: false, reason: "extension-not-installed", errorCode: null };
+    }
+    await client.query("BEGIN");
+    transactionOpen = true;
+    const result = await bootstrapRorcaV2GraphOnClient(client);
+    await client.query("COMMIT");
+    transactionOpen = false;
+    return result;
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        destroyClient = true;
+      }
+      transactionOpen = false;
+    }
+    if (isAgeCapabilityUnavailableError(error)) {
+      destroyClient = true;
+      return {
+        available: false,
+        reason: "capability-unavailable",
+        errorCode: errorCode(error)
+      };
+    }
+    throw error;
+  } finally {
+    if (!destroyClient && bootstrapLockHeld) {
+      try {
+        await client.query("SELECT pg_advisory_unlock($1)", [RORCA_GRAPH_BOOTSTRAP_LOCK_KEY]);
+      } catch {
+        destroyClient = true;
+      }
+    }
+    if (!destroyClient) {
+      try {
+        await client.query("SET search_path = rorca, public");
+      } catch {
+        destroyClient = true;
+      }
+    }
+    client.release(destroyClient);
+  }
+}
+
+// backend/src/db/pg-index.ts
 var MIGRATIONS_ADVISORY_LOCK_KEY = 824425052e4;
 var DATABASE_URL = process.env.DATABASE_URL || "postgres://localhost:5432/rorca";
 function createPool() {
@@ -19992,6 +20134,7 @@ async function runPgMigrations(pool2) {
   let client = await pool2.connect();
   let clientUsable = true;
   let advisoryLockHeld = false;
+  let migrationsCompleted = false;
   const acquireMigrationSession = async () => {
     await client.query("SELECT pg_advisory_lock($1)", [MIGRATIONS_ADVISORY_LOCK_KEY]);
     advisoryLockHeld = true;
@@ -20126,10 +20269,10 @@ async function runPgMigrations(pool2) {
           skippedCount++;
           continue;
         }
-        await persistMigrationMarker(version, `${file} [skipped: application schema collision]`, true);
+        await persistMigrationMarker(version, `${file} [graph bootstrap: rorca_v2]`, false);
         appliedVersions.add(version);
-        skippedCount++;
-        console.warn("[pg-migrate] Skipping legacy rorca AGE graph: application schema owns that name; use rorca_v2 bootstrap");
+        appliedCount++;
+        console.log("[pg-migrate] AGE capability recorded; rorca_v2 lifecycle bootstrap pending");
         continue;
       }
       const sql = fs.readFileSync(path7.join(migrationsDir, file), "utf8");
@@ -20166,6 +20309,7 @@ async function runPgMigrations(pool2) {
       }
     }
     console.log(`[pg-migrate] Done. Applied: ${appliedCount}, Skipped: ${skippedCount}, Total: ${files.length}`);
+    migrationsCompleted = true;
   } finally {
     if (clientUsable) {
       try {
@@ -20180,7 +20324,18 @@ async function runPgMigrations(pool2) {
       }
       client.release();
     }
-    if (ownPool) await pool2.end();
+    try {
+      if (migrationsCompleted) {
+        const graphLifecycle = await bootstrapRorcaV2GraphForLifecycle(pool2);
+        if (graphLifecycle.available) {
+          console.log(`[pg-migrate] Graph bootstrap ready: ${graphLifecycle.graphName} (${graphLifecycle.labels.length} keyed labels)`);
+        } else {
+          console.warn(`[pg-migrate] Graph Lite active: rorca_v2 bootstrap ${graphLifecycle.reason}${graphLifecycle.errorCode ? ` (${graphLifecycle.errorCode})` : ""}`);
+        }
+      }
+    } finally {
+      if (ownPool) await pool2.end();
+    }
   }
 }
 var isDirectRun = typeof __require !== "undefined" && typeof module !== "undefined" && __require.main === module;
@@ -21001,10 +21156,10 @@ var CONTAINER_NAME = "rorca-db";
 var VOLUME_NAME = "rorca-db-data";
 var DOCKER_IMAGE = "apache/age:latest";
 function delay(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
 function runDockerCommand(args, options) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const stdio = options?.stdio ?? "pipe";
     const child = spawn2("docker", args, {
       stdio: stdio === "inherit" ? "inherit" : ["ignore", "pipe", "pipe"],
@@ -21021,7 +21176,7 @@ function runDockerCommand(args, options) {
       });
     }
     child.on("error", reject);
-    child.on("close", (code) => resolve2({ code, stdout: stdout.trim(), stderr: stderr.trim() }));
+    child.on("close", (code) => resolve3({ code, stdout: stdout.trim(), stderr: stderr.trim() }));
   });
 }
 async function runDockerOrThrow(args, options) {
@@ -21144,20 +21299,110 @@ async function enableAgeExtension() {
 }
 
 // backend/src/lib/pi-detector.ts
-import * as fs7 from "fs";
-import * as path12 from "path";
+import * as fs8 from "fs";
+import * as path13 from "path";
 
 // backend/src/lib/autonomous-cli-probe.ts
 import { spawn as spawn3, spawnSync as spawnSync3 } from "node:child_process";
-import * as fs6 from "node:fs";
+import * as fs7 from "node:fs";
 import * as os4 from "node:os";
-import * as path11 from "node:path";
+import * as path12 from "node:path";
 
 // backend/src/lib/autonomous-sandbox.ts
 import { execFileSync, spawnSync as spawnSync2 } from "node:child_process";
-import * as fs5 from "node:fs";
+import * as fs6 from "node:fs";
 import * as os3 from "node:os";
+import * as path11 from "node:path";
+
+// backend/src/lib/ordinary-local-pi-profile.ts
+import * as fs5 from "node:fs";
 import * as path10 from "node:path";
+var ORDINARY_LOCAL_PI_PROFILE_ENV = "RORCA_ORDINARY_LOCAL_PI_PROFILE";
+var ORDINARY_LOCAL_PI_PROFILE_VERSION = "rorca.ordinary-local-pi/v1";
+var RorcaExecutionSandboxError = class extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.name = "RorcaExecutionSandboxError";
+  }
+  code;
+};
+function realExecutable(pathname) {
+  try {
+    fs5.accessSync(pathname, fs5.constants.X_OK);
+    return fs5.realpathSync(pathname);
+  } catch {
+    return null;
+  }
+}
+function resolveExplicitLocalPiBinary(env = process.env) {
+  const configured = String(env.PI_BIN ?? "").trim();
+  if (!configured || !path10.isAbsolute(configured)) return null;
+  return realExecutable(configured) ? path10.resolve(configured) : null;
+}
+function canonicalPath(value) {
+  try {
+    return fs5.realpathSync(value);
+  } catch {
+    return path10.resolve(value);
+  }
+}
+function pathsAreSeparate(workspacePath, worktreePath) {
+  if (!workspacePath || !worktreePath) return false;
+  const workspace = canonicalPath(workspacePath);
+  const worktree = canonicalPath(worktreePath);
+  if (workspace === worktree) return false;
+  return !workspace.startsWith(`${worktree}${path10.sep}`) && !worktree.startsWith(`${workspace}${path10.sep}`);
+}
+function parseRuntimeProfile(value) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new RorcaExecutionSandboxError("unsupported_sandbox_mode", "unsupported_sandbox_mode: ordinary local Pi profile is malformed");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new RorcaExecutionSandboxError("unsupported_sandbox_mode", "unsupported_sandbox_mode: ordinary local Pi profile is malformed");
+  }
+  const candidate = parsed;
+  if (candidate.schemaVersion !== ORDINARY_LOCAL_PI_PROFILE_VERSION || !Number.isSafeInteger(candidate.runId) || Number(candidate.runId) <= 0 || typeof candidate.workspacePath !== "string" || !path10.isAbsolute(candidate.workspacePath) || typeof candidate.worktreePath !== "string" || !path10.isAbsolute(candidate.worktreePath) || typeof candidate.branchName !== "string" || candidate.branchName.length === 0 || typeof candidate.piBinPath !== "string" || !path10.isAbsolute(candidate.piBinPath) || typeof candidate.piRealPath !== "string" || !path10.isAbsolute(candidate.piRealPath)) {
+    throw new RorcaExecutionSandboxError("unsupported_sandbox_mode", "unsupported_sandbox_mode: ordinary local Pi profile is malformed");
+  }
+  return candidate;
+}
+function ordinaryLocalPiRuntimeProfileFromEnv(env = process.env, platform2 = process.platform) {
+  const raw = env[ORDINARY_LOCAL_PI_PROFILE_ENV];
+  if (!raw) return null;
+  if (platform2 !== "darwin") {
+    throw new RorcaExecutionSandboxError(
+      "unsupported_sandbox_mode",
+      `unsupported_sandbox_mode: ordinary local Pi profile cannot run on ${platform2}`
+    );
+  }
+  const profile = parseRuntimeProfile(raw);
+  const configuredPi = resolveExplicitLocalPiBinary(env);
+  const configuredRealPi = configuredPi ? realExecutable(configuredPi) : null;
+  if (!configuredPi || path10.resolve(configuredPi) !== path10.resolve(profile.piBinPath) || configuredRealPi !== profile.piRealPath) {
+    throw new RorcaExecutionSandboxError(
+      "pi_not_installed",
+      "pi_not_installed: worker-issued ordinary local Pi profile no longer matches executable PI_BIN"
+    );
+  }
+  return profile;
+}
+function assertOrdinaryLocalPiRuntimeProfile(cwd, env = process.env, platform2 = process.platform) {
+  const profile = ordinaryLocalPiRuntimeProfileFromEnv(env, platform2);
+  if (!profile) return null;
+  if (path10.resolve(cwd) !== path10.resolve(profile.worktreePath) || !pathsAreSeparate(profile.workspacePath, profile.worktreePath)) {
+    throw new RorcaExecutionSandboxError(
+      "unsupported_sandbox_mode",
+      "unsupported_sandbox_mode: ordinary local Pi launch escaped its frozen worktree"
+    );
+  }
+  return profile;
+}
+
+// backend/src/lib/autonomous-sandbox.ts
 var SAFE_PRODUCTION_ENV_KEYS = /* @__PURE__ */ new Set([
   "PATH",
   "LANG",
@@ -21186,6 +21431,11 @@ var SAFE_PRODUCTION_ENV_KEYS = /* @__PURE__ */ new Set([
   "GIT_SSH_COMMAND",
   "GCM_INTERACTIVE",
   "GH_CONFIG_DIR",
+  "PI_OFFLINE",
+  "PI_SKIP_VERSION_CHECK",
+  "PI_TELEMETRY",
+  "OPENCODE_DISABLE_AUTOUPDATE",
+  "OPENCODE_DISABLE_DEFAULT_PLUGINS",
   "RORCA_AUTONOMOUS_COMMAND_GUARD",
   "RORCA_AUTONOMOUS_WORKSPACE_ROOT",
   "RORCA_EVENT",
@@ -21228,21 +21478,21 @@ function configuredPosture(env = process.env) {
 }
 function bwrapBinary(env = process.env) {
   const configured = String(env.RORCA_BWRAP_BIN ?? "/usr/bin/bwrap").trim();
-  if (!path10.isAbsolute(configured)) throw new Error("RORCA_BWRAP_BIN must be an absolute path");
+  if (!path11.isAbsolute(configured)) throw new Error("RORCA_BWRAP_BIN must be an absolute path");
   return configured;
 }
 function realExisting(value) {
   try {
-    return fs5.realpathSync(value);
+    return fs6.realpathSync(value);
   } catch {
     return null;
   }
 }
 function assertSafeToolRoot(root) {
   const real = realExisting(root);
-  if (!real || !path10.isAbsolute(real)) throw new Error(`Autonomous tool root is unavailable: ${root}`);
+  if (!real || !path11.isAbsolute(real)) throw new Error(`Autonomous tool root is unavailable: ${root}`);
   if (FORBIDDEN_TOOL_ROOTS.includes(real)) throw new Error(`Autonomous tool root is over-broad: ${real}`);
-  const stat = fs5.statSync(real);
+  const stat = fs6.statSync(real);
   if (!stat.isDirectory() || (stat.mode & 18) !== 0 || stat.uid !== 0) {
     throw new Error(`Autonomous tool root must be root-owned and not group/world writable: ${real}`);
   }
@@ -21254,15 +21504,15 @@ function toolRoots(env = process.env) {
   return [...new Set(roots.map(assertSafeToolRoot))];
 }
 function within(candidate, root) {
-  return candidate === root || candidate.startsWith(`${root}${path10.sep}`);
+  return candidate === root || candidate.startsWith(`${root}${path11.sep}`);
 }
 function resolveExecutable(command, env, roots) {
-  const candidates = path10.isAbsolute(command) ? [command] : String(env.PATH ?? process.env.PATH ?? "").split(path10.delimiter).filter(Boolean).map((dir) => path10.join(dir, command));
+  const candidates = path11.isAbsolute(command) ? [command] : String(env.PATH ?? process.env.PATH ?? "").split(path11.delimiter).filter(Boolean).map((dir) => path11.join(dir, command));
   for (const candidate of candidates) {
     const real = realExisting(candidate);
     if (!real || !roots.some((root) => within(real, root))) continue;
     try {
-      fs5.accessSync(real, fs5.constants.X_OK);
+      fs6.accessSync(real, fs6.constants.X_OK);
       return real;
     } catch {
     }
@@ -21297,6 +21547,37 @@ function safeProductionEnv(input, modelCredentials = false) {
   }
   return selected;
 }
+function ordinaryLocalGuardDirs(input) {
+  const guardPrefix = `${path11.resolve(os3.tmpdir())}${path11.sep}rorca-autonomous-guard-`;
+  return String(input.PATH ?? "").split(path11.delimiter).filter((entry) => path11.resolve(entry).startsWith(guardPrefix)).map((entry) => realExisting(entry)).filter((entry) => entry !== null);
+}
+function safeOrdinaryLocalPiEnv(input, profile, cwd, modelCredentials) {
+  const selected = safeProductionEnv(input, modelCredentials);
+  const home = input.HOME && path11.isAbsolute(input.HOME) ? input.HOME : os3.homedir();
+  const tmpdir4 = path11.join(fs6.realpathSync(cwd), ".rorca", "ordinary-local-pi-tmp");
+  fs6.mkdirSync(tmpdir4, { recursive: true, mode: 448 });
+  const guardDirs = ordinaryLocalGuardDirs(input);
+  selected.PATH = [.../* @__PURE__ */ new Set([
+    ...guardDirs,
+    path11.dirname(profile.piBinPath),
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin"
+  ])].join(path11.delimiter);
+  selected.HOME = home;
+  selected.TMPDIR = tmpdir4;
+  selected.XDG_CONFIG_HOME = path11.join(home, ".config");
+  selected.XDG_CACHE_HOME = path11.join(home, ".cache");
+  selected.npm_config_cache = path11.join(home, ".cache", "npm");
+  selected.PI_BIN = profile.piBinPath;
+  selected[ORDINARY_LOCAL_PI_PROFILE_ENV] = input[ORDINARY_LOCAL_PI_PROFILE_ENV];
+  delete selected.HTTP_PROXY;
+  delete selected.HTTPS_PROXY;
+  delete selected.ALL_PROXY;
+  delete selected.NO_PROXY;
+  delete selected.RORCA_AUTONOMOUS_EGRESS_SOCKET;
+  return selected;
+}
 function absoluteGitPath(cwd, flag) {
   try {
     const value = execFileSync("git", ["-C", cwd, "rev-parse", flag], {
@@ -21305,25 +21586,25 @@ function absoluteGitPath(cwd, flag) {
       timeout: 1e4,
       env: { PATH: process.env.PATH ?? "", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os3.devNull }
     }).trim();
-    return fs5.realpathSync(path10.isAbsolute(value) ? value : path10.resolve(cwd, value));
+    return fs6.realpathSync(path11.isAbsolute(value) ? value : path11.resolve(cwd, value));
   } catch {
     return null;
   }
 }
 function assertRepositoryConfigHasNoEmbeddedCredential(gitRoot) {
-  const config = path10.join(gitRoot, "config");
-  if (!fs5.existsSync(config)) return;
-  const content = fs5.readFileSync(config, "utf8");
+  const config = path11.join(gitRoot, "config");
+  if (!fs6.existsSync(config)) return;
+  const content = fs6.readFileSync(config, "utf8");
   if (/https?:\/\/[^\s/@:]+:[^\s/@]+@/i.test(content) || /(?:gh[pousr]_|github_pat_|x-access-token)[A-Za-z0-9_.-]{8,}/i.test(content)) {
     throw new Error("Repository Git config contains an embedded credential and cannot enter autonomous isolation");
   }
 }
 function mountParentDirs(args, destination, coveredRoots) {
-  let current = path10.dirname(destination);
+  let current = path11.dirname(destination);
   const pending = [];
-  while (current !== path10.dirname(current) && !coveredRoots.some((root) => within(current, root))) {
+  while (current !== path11.dirname(current) && !coveredRoots.some((root) => within(current, root))) {
     pending.push(current);
-    current = path10.dirname(current);
+    current = path11.dirname(current);
   }
   for (const dir of pending.reverse()) args.push("--dir", dir);
 }
@@ -21333,7 +21614,7 @@ function addBind(args, source, destination, readOnly, coveredRoots) {
   args.push(readOnly ? "--ro-bind" : "--bind", source, destination);
   coveredRoots.push(destination);
 }
-function maskWorkspaceCredentialFiles(args, cwd) {
+function workspaceCredentialPaths(cwd) {
   const candidates = [];
   const stack = [cwd];
   let visited = 0;
@@ -21349,11 +21630,11 @@ function maskWorkspaceCredentialFiles(args, cwd) {
   ];
   while (stack.length > 0) {
     const directory = stack.pop();
-    for (const entry of fs5.readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of fs6.readdirSync(directory, { withFileTypes: true })) {
       visited += 1;
       if (visited > 25e4) throw new Error("Autonomous credential scan exceeded its bounded workspace inventory");
-      const candidate = path10.join(directory, entry.name);
-      const relative2 = path10.relative(cwd, candidate).split(path10.sep).join("/");
+      const candidate = path11.join(directory, entry.name);
+      const relative2 = path11.relative(cwd, candidate).split(path11.sep).join("/");
       const envFile = /^\.env(?:\..+)?$/.test(entry.name) && !/\.(?:example|sample|template)$/.test(entry.name);
       const sensitive = envFile || sensitiveFileNames.has(entry.name) || sensitiveDirectoryNames.has(entry.name) || sensitiveSuffixes.some((suffix) => relative2 === suffix || relative2.endsWith(`/${suffix}`));
       if (sensitive) {
@@ -21363,24 +21644,124 @@ function maskWorkspaceCredentialFiles(args, cwd) {
       if (entry.isDirectory() && entry.name !== ".git") stack.push(candidate);
     }
   }
-  for (const candidate of [...new Set(candidates)]) {
-    const stat = fs5.lstatSync(candidate);
+  return [...new Set(candidates)];
+}
+function maskWorkspaceCredentialFiles(args, cwd) {
+  for (const candidate of workspaceCredentialPaths(cwd)) {
+    const stat = fs6.lstatSync(candidate);
     if (stat.isSymbolicLink()) throw new Error("Autonomous workspace credential/archive path cannot be a symbolic link");
     if (stat.isDirectory()) args.push("--tmpfs", candidate);
     else args.push("--ro-bind", os3.devNull, candidate);
   }
 }
+function seatbeltString(value) {
+  return JSON.stringify(value);
+}
+function seatbeltSubpaths(paths) {
+  return paths.map((value) => `(subpath ${seatbeltString(value)})`).join(" ");
+}
+function seatbeltLiterals(paths) {
+  return paths.map((value) => `(literal ${seatbeltString(value)})`).join(" ");
+}
+function pathAncestors(value) {
+  const ancestors = [];
+  let current = path11.resolve(value);
+  while (true) {
+    ancestors.push(current);
+    const parent = path11.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return ancestors;
+}
+function localPiRuntimeRoots(piBinPath) {
+  const launcherDir = path11.dirname(piBinPath);
+  const roots = [launcherDir];
+  const globalNodeModules = path11.resolve(launcherDir, "..", "lib", "node_modules");
+  if (fs6.existsSync(globalNodeModules) && fs6.statSync(globalNodeModules).isDirectory()) {
+    roots.push(globalNodeModules);
+  }
+  let current = path11.dirname(fs6.realpathSync(piBinPath));
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (fs6.existsSync(path11.join(current, "package.json"))) {
+      roots.push(current);
+      break;
+    }
+    const parent = path11.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return [...new Set(roots.map((value) => path11.resolve(value)))];
+}
+function buildDarwinOrdinaryLocalPiSeatbeltProfile(cwd, profile, env) {
+  const worktree = fs6.realpathSync(cwd);
+  const home = env.HOME;
+  const configuredTmpdir = env.TMPDIR;
+  if (!home || !path11.isAbsolute(home) || !configuredTmpdir || !path11.isAbsolute(configuredTmpdir)) {
+    throw new Error("ordinary local Pi Seatbelt environment is incomplete");
+  }
+  const tmpdir4 = fs6.realpathSync(configuredTmpdir);
+  const gitRoots = [...new Set([
+    absoluteGitPath(worktree, "--absolute-git-dir"),
+    absoluteGitPath(worktree, "--git-common-dir")
+  ].filter((value) => value !== null))];
+  for (const gitRoot of gitRoots) assertRepositoryConfigHasNoEmbeddedCredential(gitRoot);
+  const runtimeRoots = localPiRuntimeRoots(profile.piBinPath);
+  const guardDirs = ordinaryLocalGuardDirs(env);
+  const readableRoots = [...new Set([
+    "/usr",
+    "/bin",
+    "/System",
+    "/Library",
+    worktree,
+    tmpdir4,
+    ...runtimeRoots,
+    ...guardDirs,
+    path11.join(home, ".pi"),
+    path11.join(home, ".config"),
+    path11.join(home, ".cache"),
+    ...gitRoots
+  ].map((value) => path11.resolve(value)))];
+  const writableRoots = [...new Set([
+    worktree,
+    tmpdir4,
+    path11.join(home, ".pi", "agent"),
+    path11.join(home, ".cache"),
+    ...gitRoots
+  ].map((value) => path11.resolve(value)))];
+  const metadataRoots = [...new Set([home, ...readableRoots].flatMap(pathAncestors))];
+  const credentialDenyRules = workspaceCredentialPaths(worktree).map((candidate) => {
+    const stat = fs6.lstatSync(candidate);
+    if (stat.isSymbolicLink()) throw new Error("Autonomous workspace credential/archive path cannot be a symbolic link");
+    const filter = stat.isDirectory() ? `(subpath ${seatbeltString(candidate)})` : `(literal ${seatbeltString(candidate)})`;
+    return `(deny file-read* file-write* file-map-executable ${filter})`;
+  });
+  return [
+    "(version 1)",
+    '(import "system.sb")',
+    "(allow process-exec process-fork)",
+    "(deny network-inbound)",
+    "(allow network-outbound)",
+    "(deny file-read*)",
+    `(allow file-read-metadata file-test-existence ${seatbeltLiterals(metadataRoots)})`,
+    `(allow file-read* ${seatbeltSubpaths(readableRoots)})`,
+    `(allow file-map-executable ${seatbeltSubpaths(readableRoots)})`,
+    "(deny file-write*)",
+    `(allow file-write* ${seatbeltSubpaths(writableRoots)})`,
+    ...credentialDenyRules
+  ].join("\n");
+}
 function assertWorkspaceSeparatedFromTrustedRuntime(cwd, roots) {
   if (roots.some((root) => within(cwd, root))) {
     throw new Error("Autonomous worktree overlaps a read-only tool root");
   }
-  const trustedBackend = fs5.realpathSync(path10.resolve(__dirname, "..", ".."));
+  const trustedBackend = fs6.realpathSync(path11.resolve(__dirname, "..", ".."));
   if (within(cwd, trustedBackend) || within(trustedBackend, cwd)) {
     throw new Error("Autonomous worktree overlaps the trusted engine installation");
   }
 }
 function buildBwrapArgs(options, executable, roots) {
-  const cwd = fs5.realpathSync(options.cwd);
+  const cwd = fs6.realpathSync(options.cwd);
   assertWorkspaceSeparatedFromTrustedRuntime(cwd, roots);
   const args = [
     "--die-with-parent",
@@ -21411,8 +21792,8 @@ function buildBwrapArgs(options, executable, roots) {
   ].filter((value) => value !== null))) {
     assertRepositoryConfigHasNoEmbeddedCredential(gitPath);
     addBind(args, gitPath, gitPath, false, covered);
-    const config = path10.join(gitPath, "config");
-    if (fs5.existsSync(config)) args.push("--ro-bind", config, config);
+    const config = path11.join(gitPath, "config");
+    if (fs6.existsSync(config)) args.push("--ro-bind", config, config);
   }
   maskWorkspaceCredentialFiles(args, cwd);
   const innerEnv = safeProductionEnv(options.env, options.modelCredentials === true);
@@ -21421,8 +21802,8 @@ function buildBwrapArgs(options, executable, roots) {
     throw new Error("Autonomous model credentials require the confined egress broker");
   }
   if (egressSocket) {
-    const realSocket = fs5.realpathSync(egressSocket);
-    if (!fs5.statSync(realSocket).isSocket()) throw new Error("Autonomous model egress endpoint is not a Unix socket");
+    const realSocket = fs6.realpathSync(egressSocket);
+    if (!fs6.statSync(realSocket).isSocket()) throw new Error("Autonomous model egress endpoint is not a Unix socket");
     addBind(args, realSocket, SANDBOX_EGRESS_SOCKET, true, covered);
   }
   for (const [key, value] of Object.entries(innerEnv).sort(([a2], [b]) => a2.localeCompare(b))) {
@@ -21448,8 +21829,20 @@ function buildBwrapArgs(options, executable, roots) {
   return args;
 }
 function prepareAutonomousSandboxLaunch(options) {
+  const ordinaryLocalProfile = assertOrdinaryLocalPiRuntimeProfile(options.cwd, options.env);
+  if (ordinaryLocalProfile) {
+    const cwd2 = fs6.realpathSync(options.cwd);
+    const env2 = safeOrdinaryLocalPiEnv(options.env, ordinaryLocalProfile, cwd2, options.modelCredentials === true);
+    return {
+      command: "/usr/bin/sandbox-exec",
+      args: ["-p", buildDarwinOrdinaryLocalPiSeatbeltProfile(cwd2, ordinaryLocalProfile, env2), options.command, ...options.args],
+      cwd: cwd2,
+      env: env2,
+      isolated: true
+    };
+  }
   configuredPosture();
-  const cwd = fs5.realpathSync(options.cwd);
+  const cwd = fs6.realpathSync(options.cwd);
   if (process.platform !== "linux") throw new Error("linux-bwrap autonomous isolation requires Linux");
   const roots = toolRoots();
   const executable = resolveExecutable(options.command, options.env, roots);
@@ -21467,7 +21860,61 @@ function prepareAutonomousSandboxLaunch(options) {
 
 // backend/src/lib/autonomous-cli-probe.ts
 function probeWorkspace() {
-  return fs6.mkdtempSync(path11.join(os4.tmpdir(), "rorca-cli-probe-"));
+  return fs7.mkdtempSync(path12.join(os4.tmpdir(), "rorca-cli-probe-"));
+}
+function isDarwinPiProbeArgs(args) {
+  const joined = args.join("\0");
+  return joined === "--no-extensions\0--offline\0--version" || joined === "--list-models" || joined === "--no-extensions\0--list-models";
+}
+function prepareProbeLaunch(command, args, cwd, env, options) {
+  if (options.sandboxMode !== "darwin-local-pi") {
+    return prepareAutonomousSandboxLaunch({ command, args, cwd, env });
+  }
+  const piBinPath = resolveExplicitLocalPiBinary(options.env);
+  if (!piBinPath) {
+    throw new RorcaExecutionSandboxError(
+      "pi_not_installed",
+      "pi_not_installed: Darwin ordinary-local probes require an executable absolute PI_BIN"
+    );
+  }
+  let commandRealPath;
+  try {
+    commandRealPath = fs7.realpathSync(command);
+  } catch {
+    throw new RorcaExecutionSandboxError("pi_not_installed", "pi_not_installed: configured PI_BIN is unavailable");
+  }
+  let piRealPath;
+  try {
+    piRealPath = fs7.realpathSync(piBinPath);
+  } catch {
+    throw new RorcaExecutionSandboxError("pi_not_installed", "pi_not_installed: configured PI_BIN is unavailable");
+  }
+  if (commandRealPath !== piRealPath || !isDarwinPiProbeArgs(args)) {
+    throw new RorcaExecutionSandboxError(
+      "unsupported_sandbox_mode",
+      "unsupported_sandbox_mode: the Darwin local probe is restricted to Pi version/model discovery"
+    );
+  }
+  if (process.platform !== "darwin" || !fs7.existsSync("/usr/bin/sandbox-exec")) {
+    throw new RorcaExecutionSandboxError(
+      "unsupported_sandbox_mode",
+      "unsupported_sandbox_mode: the Darwin no-network Pi probe sandbox is unavailable"
+    );
+  }
+  return {
+    command: "/usr/bin/sandbox-exec",
+    args: ["-n", "no-network", piBinPath, ...args],
+    cwd,
+    env: {
+      PATH: `${path12.dirname(piBinPath)}:/usr/local/bin:/usr/bin:/bin`,
+      HOME: String(options.env?.HOME ?? process.env.HOME ?? os4.homedir()),
+      ...options.env?.LANG ? { LANG: options.env.LANG } : {},
+      ...options.env?.LC_ALL ? { LC_ALL: options.env.LC_ALL } : {},
+      ...options.env?.LC_CTYPE ? { LC_CTYPE: options.env.LC_CTYPE } : {},
+      PI_OFFLINE: "1"
+    },
+    isolated: true
+  };
 }
 function probeAutonomousCliSync(command, args, options = {}) {
   const cwd = probeWorkspace();
@@ -21475,7 +21922,7 @@ function probeAutonomousCliSync(command, args, options = {}) {
     const env = Object.fromEntries(
       Object.entries(options.env ?? process.env).filter((entry) => entry[1] !== void 0)
     );
-    const launch = prepareAutonomousSandboxLaunch({ command, args, cwd, env });
+    const launch = prepareProbeLaunch(command, args, cwd, env, options);
     const result = spawnSync3(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,
@@ -21501,7 +21948,7 @@ function probeAutonomousCliSync(command, args, options = {}) {
       error: error instanceof Error ? error : new Error(String(error))
     };
   } finally {
-    fs6.rmSync(cwd, { recursive: true, force: true });
+    fs7.rmSync(cwd, { recursive: true, force: true });
   }
 }
 
@@ -21509,17 +21956,18 @@ function probeAutonomousCliSync(command, args, options = {}) {
 var MIN_PI_VERSION = "0.67.0";
 var PI_VERSION_ARGS = ["--no-extensions", "--offline", "--version"];
 var PI_PROBE_TIMEOUT_MS = 2e3;
-function resolveBinPath() {
+function resolveBinPath(requireExplicit = false) {
   const envBin = process.env.PI_BIN?.trim();
   if (envBin) {
     try {
-      fs7.accessSync(envBin, fs7.constants.X_OK);
-      return fs7.realpathSync(envBin);
+      if (!path13.isAbsolute(envBin)) return null;
+      fs8.accessSync(envBin, fs8.constants.X_OK);
+      return fs8.realpathSync(envBin);
     } catch {
       return null;
     }
   }
-  return detectPiAvailability().piBinPath;
+  return requireExplicit ? null : detectPiAvailability().piBinPath;
 }
 function parseVersion(output) {
   const match = output.match(/(\d+\.\d+\.\d+)/);
@@ -21527,37 +21975,62 @@ function parseVersion(output) {
 }
 function detectPiAvailability() {
   const configuredPath = process.env.PI_BIN?.trim();
-  const candidates = configuredPath ? [configuredPath] : (process.env.PATH ?? "").split(path12.delimiter).filter(Boolean).map((entry) => path12.join(entry, process.platform === "win32" ? "pi.cmd" : "pi"));
+  const candidates = configuredPath ? [configuredPath] : (process.env.PATH ?? "").split(path13.delimiter).filter(Boolean).map((entry) => path13.join(entry, process.platform === "win32" ? "pi.cmd" : "pi"));
   for (const candidate of candidates) {
     try {
-      fs7.accessSync(candidate, fs7.constants.X_OK);
+      fs8.accessSync(candidate, fs8.constants.X_OK);
       return { piInstalled: true, piVersion: null, piBinPath: candidate };
     } catch {
     }
   }
   return { piInstalled: false, piVersion: null, piBinPath: null };
 }
-function detectPi() {
-  const binPath = resolveBinPath();
-  if (!binPath) {
-    return { piInstalled: false, piVersion: null, piBinPath: null };
+function inheritedPiProbeMode() {
+  if (!process.env[ORDINARY_LOCAL_PI_PROFILE_ENV]) return void 0;
+  ordinaryLocalPiRuntimeProfileFromEnv();
+  return "darwin-local-pi";
+}
+function emptyInspection(failureCode) {
+  return {
+    status: { piInstalled: false, piVersion: null, piBinPath: null },
+    ...failureCode ? { failureCode } : {}
+  };
+}
+function failureCodeForProbe(error, sandboxMode) {
+  if (error instanceof RorcaExecutionSandboxError) return error.code;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (/linux-bwrap|bubblewrap|sandbox|isolation/i.test(message)) {
+    return "linux_bwrap_required_for_requested_mode";
   }
+  if (sandboxMode === "darwin-local-pi") return "unsupported_sandbox_mode";
+  return "pi_not_installed";
+}
+function probeOptions(timeoutMs, sandboxMode) {
+  return sandboxMode ? { timeoutMs, sandboxMode } : { timeoutMs };
+}
+function inspectPi(options = {}) {
+  let sandboxMode;
   try {
-    const result = probeAutonomousCliSync(binPath, PI_VERSION_ARGS, { timeoutMs: PI_PROBE_TIMEOUT_MS });
-    if (result.status !== 0) {
-      return { piInstalled: false, piVersion: null, piBinPath: null };
-    }
-    const raw = `${result.stdout ?? ""}
-${result.stderr ?? ""}`;
-    const version = parseVersion(raw);
-    return {
-      piInstalled: true,
-      piVersion: version,
-      piBinPath: binPath
-    };
-  } catch {
-    return { piInstalled: false, piVersion: null, piBinPath: null };
+    sandboxMode = options.sandboxMode ?? inheritedPiProbeMode();
+  } catch (error) {
+    return emptyInspection(failureCodeForProbe(error, options.sandboxMode));
   }
+  const binPath = resolveBinPath(sandboxMode === "darwin-local-pi");
+  if (!binPath) return emptyInspection("pi_not_installed");
+  const result = probeAutonomousCliSync(binPath, PI_VERSION_ARGS, probeOptions(PI_PROBE_TIMEOUT_MS, sandboxMode));
+  if (result.status !== 0) return emptyInspection(failureCodeForProbe(result.error, sandboxMode));
+  const raw = `${result.stdout ?? ""}
+${result.stderr ?? ""}`;
+  return {
+    status: {
+      piInstalled: true,
+      piVersion: parseVersion(raw),
+      piBinPath: binPath
+    }
+  };
+}
+function detectPi() {
+  return inspectPi().status;
 }
 
 // packages/rorca-cli/package.json
@@ -21635,15 +22108,15 @@ async function checkVersion(backendUrl) {
 
 // bin/rorca.ts
 var __filename = fileURLToPath3(import.meta.url);
-var __dirname2 = path13.dirname(__filename);
-var ROOT_DIR = path13.resolve(__dirname2, "..");
-var BACKEND_DIR = path13.join(ROOT_DIR, "backend");
-var DIST_DIR = path13.join(ROOT_DIR, "dist");
+var __dirname2 = path14.dirname(__filename);
+var ROOT_DIR = path14.resolve(__dirname2, "..");
+var BACKEND_DIR = path14.join(ROOT_DIR, "backend");
+var DIST_DIR = path14.join(ROOT_DIR, "dist");
 var API_BASE = (process10.env.RORCA_API_URL || "http://127.0.0.1:3030").replace(/\/$/, "");
 var DB_CONTAINER = "rorca-db";
 var DB_VOLUME = "rorca-db-data";
 var DB_IMAGE = "apache/age:latest";
-var pkg = JSON.parse(readFileSync7(path13.join(ROOT_DIR, "package.json"), "utf8"));
+var pkg = JSON.parse(readFileSync7(path14.join(ROOT_DIR, "package.json"), "utf8"));
 var PI_INSTALL_METHODS = {
   npm: "npm install -g @mariozechner/pi-coding-agent",
   pnpm: "pnpm add -g @mariozechner/pi-coding-agent",
@@ -21703,10 +22176,10 @@ var PrintedCliError = class extends Error {
   }
 };
 function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
 function formatSpecFromPath(specPath) {
-  return path13.basename(specPath, ".json");
+  return path14.basename(specPath, ".json");
 }
 function formatDate(iso) {
   if (!iso) return "-";
@@ -21761,7 +22234,7 @@ function spawnLogged(label, command, args, options) {
   return child;
 }
 function runCommand(command, args, options = {}) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn4(command, args, {
       cwd: options.cwd,
       env: options.env,
@@ -21780,31 +22253,31 @@ function runCommand(command, args, options = {}) {
     }
     child.on("error", reject);
     child.on("close", (code) => {
-      resolve2({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+      resolve3({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
     });
   });
 }
 async function runCaptureAlias(args) {
-  const distEntry = path13.join(ROOT_DIR, "packages", "rorca-capture", "dist", "cli.js");
-  const sourceEntry = path13.join(ROOT_DIR, "packages", "rorca-capture", "src", "cli.ts");
-  if (existsSync3(distEntry)) {
+  const distEntry = path14.join(ROOT_DIR, "packages", "rorca-capture", "dist", "cli.js");
+  const sourceEntry = path14.join(ROOT_DIR, "packages", "rorca-capture", "src", "cli.ts");
+  if (existsSync5(distEntry)) {
     return spawnPassthrough(process10.execPath, [distEntry, ...args]);
   }
-  if (existsSync3(sourceEntry)) {
+  if (existsSync5(sourceEntry)) {
     return spawnPassthrough("npx", ["tsx", sourceEntry, ...args]);
   }
   console.error("rorca-capture entrypoint not found. Run `npm run build` first.");
   return 1;
 }
 function spawnPassthrough(command, args) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn4(command, args, {
       cwd: ROOT_DIR,
       stdio: "inherit",
       shell: process10.platform === "win32"
     });
     child.on("error", reject);
-    child.on("close", (code) => resolve2(code ?? 1));
+    child.on("close", (code) => resolve3(code ?? 1));
   });
 }
 async function docker(args, stdio = "pipe") {
@@ -22193,7 +22666,7 @@ function resolveClaudeBinPathLocal() {
   return output || null;
 }
 function checkMcpTokenFile(tokenPath) {
-  if (!existsSync3(tokenPath)) {
+  if (!existsSync5(tokenPath)) {
     return { exists: false, modeOk: false, mode: null };
   }
   if (process10.platform === "win32") {
@@ -22455,19 +22928,19 @@ function appendUniquePath(paths, candidate) {
 }
 function getClaudeDesktopConfigPaths() {
   const paths = [];
-  appendUniquePath(paths, path13.join(homedir3(), "Library", "Application Support", "Claude", "claude_desktop_config.json"));
-  appendUniquePath(paths, path13.join(homedir3(), ".config", "Claude", "claude_desktop_config.json"));
+  appendUniquePath(paths, path14.join(homedir5(), "Library", "Application Support", "Claude", "claude_desktop_config.json"));
+  appendUniquePath(paths, path14.join(homedir5(), ".config", "Claude", "claude_desktop_config.json"));
   if (process10.env.APPDATA) {
-    appendUniquePath(paths, path13.join(process10.env.APPDATA, "Claude", "claude_desktop_config.json"));
+    appendUniquePath(paths, path14.join(process10.env.APPDATA, "Claude", "claude_desktop_config.json"));
   }
   return paths;
 }
 function getVsCodeSettingsPaths() {
   const paths = [];
-  appendUniquePath(paths, path13.join(homedir3(), "Library", "Application Support", "Code", "User", "settings.json"));
-  appendUniquePath(paths, path13.join(homedir3(), ".config", "Code", "User", "settings.json"));
+  appendUniquePath(paths, path14.join(homedir5(), "Library", "Application Support", "Code", "User", "settings.json"));
+  appendUniquePath(paths, path14.join(homedir5(), ".config", "Code", "User", "settings.json"));
   if (process10.env.APPDATA) {
-    appendUniquePath(paths, path13.join(process10.env.APPDATA, "Code", "User", "settings.json"));
+    appendUniquePath(paths, path14.join(process10.env.APPDATA, "Code", "User", "settings.json"));
   }
   return paths;
 }
@@ -22521,7 +22994,7 @@ async function runMcpDiagnoseClients() {
   const findings = [];
   const parseWarnings = [];
   for (const configPath of getClaudeDesktopConfigPaths()) {
-    if (!existsSync3(configPath)) continue;
+    if (!existsSync5(configPath)) continue;
     const result = inspectJsonConfig(configPath, (parsed, filePath) => collectSectionFindings(
       parsed.mcpServers,
       "Claude Desktop",
@@ -22535,7 +23008,7 @@ async function runMcpDiagnoseClients() {
     }
   }
   for (const configPath of getVsCodeSettingsPaths()) {
-    if (!existsSync3(configPath)) continue;
+    if (!existsSync5(configPath)) continue;
     const result = inspectJsonConfig(configPath, (parsed, filePath) => collectSectionFindings(
       parsed["mcp.servers"],
       "VS Code",
@@ -22573,7 +23046,7 @@ async function runMcpDiagnoseClients() {
   return findings.length > 0 ? 1 : 0;
 }
 async function spawnInteractivePi(piBinPath, args, env) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn4(piBinPath, args, {
       env: env ? { ...process10.env, ...env } : process10.env,
       stdio: "inherit",
@@ -22594,13 +23067,13 @@ async function spawnInteractivePi(piBinPath, args, env) {
     child.on("close", (code) => {
       process10.removeListener("SIGINT", forwardSignal);
       process10.removeListener("SIGTERM", forwardSignal);
-      resolve2(code ?? 1);
+      resolve3(code ?? 1);
     });
   });
 }
 function resolveRorcaPiExtensionEntry() {
-  const entry = path13.join(ROOT_DIR, "packages", "rorca-pi-extension", "extensions", "rorca", "index.ts");
-  if (!existsSync3(entry)) {
+  const entry = path14.join(ROOT_DIR, "packages", "rorca-pi-extension", "extensions", "rorca", "index.ts");
+  if (!existsSync5(entry)) {
     throw new Error(`Rorca Pi extension not found at ${entry}`);
   }
   return entry;
@@ -22635,7 +23108,7 @@ async function runChat(options) {
         workspaceId: workspace.id
       })
     });
-    tempSkillFile = path13.join(tmpdir3(), `rorca-chat-context-${Date.now()}-${process10.pid}.md`);
+    tempSkillFile = path14.join(tmpdir3(), `rorca-chat-context-${Date.now()}-${process10.pid}.md`);
     writeFileSync4(
       tempSkillFile,
       [
@@ -22712,7 +23185,7 @@ async function resolveApprovedSpec(specSlug) {
   return matches[0];
 }
 async function ensureFrontendBuild() {
-  if (existsSync3(path13.join(DIST_DIR, "index.html"))) {
+  if (existsSync5(path14.join(DIST_DIR, "index.html"))) {
     return;
   }
   console.log("Building frontend bundle...");
@@ -22739,12 +23212,12 @@ async function startServer(options) {
     RORCA_STATIC_DIR: DIST_DIR,
     NODE_ENV: process10.env.NODE_ENV || "production"
   };
-  const serverJs = path13.join(BACKEND_DIR, "dist", "server.js");
-  const workerJs = path13.join(BACKEND_DIR, "dist", "worker.js");
-  const serverTs = path13.join(BACKEND_DIR, "src", "server.ts");
-  const workerTs = path13.join(BACKEND_DIR, "src", "worker.ts");
-  const server = existsSync3(serverJs) ? spawnLogged("server", process10.execPath, [serverJs], { cwd: BACKEND_DIR, env }) : spawnLogged("server", "npx", ["tsx", serverTs], { cwd: BACKEND_DIR, env });
-  const worker = existsSync3(workerJs) ? spawnLogged("worker", process10.execPath, [workerJs], { cwd: BACKEND_DIR, env }) : spawnLogged("worker", "npx", ["tsx", workerTs], { cwd: BACKEND_DIR, env });
+  const serverJs = path14.join(BACKEND_DIR, "dist", "server.js");
+  const workerJs = path14.join(BACKEND_DIR, "dist", "worker.js");
+  const serverTs = path14.join(BACKEND_DIR, "src", "server.ts");
+  const workerTs = path14.join(BACKEND_DIR, "src", "worker.ts");
+  const server = existsSync5(serverJs) ? spawnLogged("server", process10.execPath, [serverJs], { cwd: BACKEND_DIR, env }) : spawnLogged("server", "npx", ["tsx", serverTs], { cwd: BACKEND_DIR, env });
+  const worker = existsSync5(workerJs) ? spawnLogged("worker", process10.execPath, [workerJs], { cwd: BACKEND_DIR, env }) : spawnLogged("worker", "npx", ["tsx", workerTs], { cwd: BACKEND_DIR, env });
   console.log(`Rorca running at http://${options.host}:${options.port}`);
   const shutdown2 = (signal) => {
     server.kill(signal);
@@ -22758,7 +23231,7 @@ async function startServer(options) {
     shutdown2("SIGTERM");
     process10.exit(0);
   });
-  await new Promise((resolve2, reject) => {
+  await new Promise((resolve3, reject) => {
     server.once("error", reject);
     worker.once("error", reject);
     server.once("exit", (code) => {
@@ -22766,7 +23239,7 @@ async function startServer(options) {
         reject(new Error(`Server exited with code ${code}`));
         return;
       }
-      resolve2();
+      resolve3();
     });
   });
 }
@@ -22800,8 +23273,8 @@ async function enableInitExtensions() {
   }
 }
 function writeInitFileIfMissing(root, relativePath, content) {
-  const filePath = path13.join(root, relativePath);
-  if (existsSync3(filePath)) {
+  const filePath = path14.join(root, relativePath);
+  if (existsSync5(filePath)) {
     console.log(`Already exists: ${relativePath}`);
     return;
   }
@@ -22809,8 +23282,8 @@ function writeInitFileIfMissing(root, relativePath, content) {
   console.log(`Created: ${relativePath}`);
 }
 function ensureInitDirectory(root, relativePath) {
-  const dirPath = path13.join(root, relativePath);
-  if (existsSync3(dirPath)) {
+  const dirPath = path14.join(root, relativePath);
+  if (existsSync5(dirPath)) {
     console.log(`Already exists: ${relativePath}/`);
     return;
   }
@@ -22818,7 +23291,7 @@ function ensureInitDirectory(root, relativePath) {
   console.log(`Created: ${relativePath}/`);
 }
 async function runInit(targetPath, options) {
-  const root = path13.resolve(process10.cwd(), targetPath);
+  const root = path14.resolve(process10.cwd(), targetPath);
   mkdirSync3(root, { recursive: true });
   if (options?.skipDocker) {
     console.log("Skipping Docker setup — ensure AGE + pgvector are enabled: CREATE EXTENSION IF NOT EXISTS age; CREATE EXTENSION IF NOT EXISTS vector;");
@@ -22893,7 +23366,7 @@ async function promptCancelDecision() {
   try {
     const answer = await Promise.race([
       rl.question("Cancel run? [y/N] "),
-      new Promise((resolve2) => setTimeout(() => resolve2(""), 3e3))
+      new Promise((resolve3) => setTimeout(() => resolve3(""), 3e3))
     ]);
     return answer.trim().toLowerCase() === "y" ? "cancel" : "detach";
   } finally {
@@ -23157,7 +23630,7 @@ function formatAgeSeconds(ageSeconds) {
   return `${Math.round(ageSeconds)}s ago`;
 }
 function getMigrationFiles() {
-  const migrationsDir = path13.join(BACKEND_DIR, "src", "db", "pg-migrations");
+  const migrationsDir = path14.join(BACKEND_DIR, "src", "db", "pg-migrations");
   return readdirSync3(migrationsDir).filter((file) => file.endsWith(".sql"));
 }
 function readMcpToken(tier = "public") {
@@ -23174,14 +23647,14 @@ function checkMcpToken(tier) {
   if (!status.modeOk) {
     return doctorWarn(id, label, `mode ${status.mode}, expected 600`, `Run: chmod 600 ${tokenPath}`);
   }
-  return doctorPass(id, label, `${tokenPath.replace(homedir3(), "~")} (mode 0600)`);
+  return doctorPass(id, label, `${tokenPath.replace(homedir5(), "~")} (mode 0600)`);
 }
 async function isTcpReachable(host, port, timeoutMs) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const socket = net.connect({ host, port });
     const finish = (result) => {
       socket.destroy();
-      resolve2(result);
+      resolve3(result);
     };
     socket.setTimeout(timeoutMs);
     socket.once("connect", () => finish(true));
@@ -23265,8 +23738,8 @@ function checkDbModeLocal() {
   return { mode, check: doctorPass("db-mode", "DB mode", detail) };
 }
 async function checkNativePg() {
-  const dataDir = path13.join(homedir3(), ".rorca", "postgres");
-  if (!existsSync3(dataDir)) {
+  const dataDir = path14.join(homedir5(), ".rorca", "postgres");
+  if (!existsSync5(dataDir)) {
     return doctorFail("native-pg", "Native PG", "~/.rorca/postgres missing", "Run: rorca start");
   }
   const ready = await isTcpReachable("127.0.0.1", NATIVE_PG_PORT, 1500);
@@ -23397,11 +23870,11 @@ async function checkMcpBridge() {
 }
 function checkWorkspaceFiles() {
   const required = [
-    path13.join(process10.cwd(), ".rorca", "config.json"),
-    path13.join(process10.cwd(), "MEMORY.md"),
-    path13.join(process10.cwd(), "AGENTS.md")
+    path14.join(process10.cwd(), ".rorca", "config.json"),
+    path14.join(process10.cwd(), "MEMORY.md"),
+    path14.join(process10.cwd(), "AGENTS.md")
   ];
-  const missing = required.filter((target) => !existsSync3(target)).map((target) => path13.relative(process10.cwd(), target) || path13.basename(target));
+  const missing = required.filter((target) => !existsSync5(target)).map((target) => path14.relative(process10.cwd(), target) || path14.basename(target));
   if (missing.length === 0) {
     return doctorPass("workspace-files", "Workspace files", "all present");
   }
@@ -23630,9 +24103,9 @@ async function runPiAuthCommand(action, provider) {
   return 0;
 }
 function getBundledPiExtensionPath() {
-  const extensionDir = path13.join(ROOT_DIR, "packages", "rorca-pi-extension");
-  const manifestPath = path13.join(extensionDir, "package.json");
-  if (existsSync3(manifestPath)) {
+  const extensionDir = path14.join(ROOT_DIR, "packages", "rorca-pi-extension");
+  const manifestPath = path14.join(extensionDir, "package.json");
+  if (existsSync5(manifestPath)) {
     return extensionDir;
   }
   throw new Error("Bundled Rorca Pi extension package not found. Reinstall or rebuild Rorca and try again.");
@@ -23705,7 +24178,7 @@ async function runForge(brief, options) {
   return 0;
 }
 async function runTui() {
-  const entry = path13.join(BACKEND_DIR, "bin", "forge.ts");
+  const entry = path14.join(BACKEND_DIR, "bin", "forge.ts");
   const result = await runCommand("npx", ["tsx", entry], {
     cwd: ROOT_DIR,
     stdio: "inherit"

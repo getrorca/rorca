@@ -172,7 +172,7 @@ describe('GET /api/graph/stats (AGE unavailable)', () => {
       vertexCount: 0,
       edgeCount: 0,
     });
-    expect(res.body.graphName).toBe('rorca');
+    expect(res.body.graphName).toBe('rorca_v2');
     expect(res.body.lastPopulatedAt).toBeNull();
   });
 

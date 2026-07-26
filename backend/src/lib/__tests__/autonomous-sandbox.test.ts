@@ -52,12 +52,18 @@ test('production environment is reconstructed from an allowlist with no inherite
     AWS_SECRET_ACCESS_KEY: 'cloud-secret',
     RORCA_INTERNAL_SERVICE_TOKEN: 'internal-secret',
     RORCA_OPERATOR_CAPABILITY_SHA256: 'operator-secret',
+    PI_OFFLINE: '1',
+    OPENCODE_DISABLE_AUTOUPDATE: 'true',
+    OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true',
   })).toMatchObject({
     PATH: '/usr/local/bin:/usr/bin:/bin',
     LANG: 'C.UTF-8',
     HOME: '/home/rorca-agent',
     GIT_CONFIG_GLOBAL: '/dev/null',
     GH_CONFIG_DIR: '/home/rorca-agent/.config/gh',
+    PI_OFFLINE: '1',
+    OPENCODE_DISABLE_AUTOUPDATE: 'true',
+    OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true',
   });
   const generic = sanitizeAutonomousSandboxEnvForTests({
     ANTHROPIC_API_KEY: 'must-not-reach-hooks',

@@ -28,6 +28,7 @@ import { createHash } from 'crypto';
 import type { PoolClient } from 'pg';
 import { pool, query } from '../db/index';
 import { checkAge } from './age-guard';
+import { buildRorcaCypherSql } from './graph-contract';
 import { get, invalidatePattern, set } from './context-cache';
 import {
   buildFileNodeKey,
@@ -218,7 +219,7 @@ async function cypherQuery<T = Record<string, unknown>>(
   returnColumns: CypherColumn[],
 ): Promise<T[]> {
   const columnDef = returnColumns.map(c => `${c.name} ${c.type}`).join(', ');
-  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
+  const sql = buildRorcaCypherSql(cypher, columnDef);
 
   const client = await pool.connect();
   try {

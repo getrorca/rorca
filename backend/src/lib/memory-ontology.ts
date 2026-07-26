@@ -7,6 +7,7 @@
 
 import { pool } from '../db/index';
 import { checkAge } from './age-guard';
+import { buildRorcaCypherSql } from './graph-contract';
 import { buildMemoryNodeKey, parseAgtype } from './knowledge-graph';
 import { logger } from './logger';
 
@@ -105,7 +106,7 @@ function compareRelations(a: MemoryOntologyRelation, b: MemoryOntologyRelation):
 
 async function cypherQuery<T>(cypher: string, returnColumns: CypherColumn[]): Promise<T[]> {
   const columnDef = returnColumns.map(column => `${column.name} ${column.type}`).join(', ');
-  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
+  const sql = buildRorcaCypherSql(cypher, columnDef);
   const client = await pool.connect();
   try {
     await client.query("LOAD 'age'");

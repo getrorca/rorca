@@ -131,7 +131,8 @@ export async function ensureAutonomousModelEgress(env: NodeJS.ProcessEnv = proce
   return candidate;
 }
 
-export async function closeAutonomousModelEgressForTests(): Promise<void> {
+/** Close the process-owned broker and remove its Unix socket. */
+export async function closeAutonomousModelEgress(): Promise<void> {
   const current = server;
   const currentPath = socketPath;
   server = null;
@@ -140,3 +141,6 @@ export async function closeAutonomousModelEgressForTests(): Promise<void> {
   if (current) await new Promise<void>(resolve => current.close(() => resolve()));
   if (currentPath) fs.rmSync(path.dirname(currentPath), { recursive: true, force: true });
 }
+
+/** Backward-compatible test alias. */
+export const closeAutonomousModelEgressForTests = closeAutonomousModelEgress;

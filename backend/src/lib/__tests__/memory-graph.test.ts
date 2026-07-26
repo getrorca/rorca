@@ -48,7 +48,7 @@ function ag(value: unknown): string {
 function cypherSqlCalls(): string[] {
   return mockClientQuery.mock.calls
     .map(([sql]) => String(sql))
-    .filter(sql => sql.includes("cypher('rorca'"));
+    .filter(sql => sql.includes("cypher('rorca_v2'"));
 }
 
 describe('memory-graph helper', () => {
