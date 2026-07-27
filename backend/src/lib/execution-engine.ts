@@ -47,6 +47,14 @@ import { StringDecoder } from 'string_decoder';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
+import { SkillRegistry, type SkillEligibilityContext } from './skill-registry';
+import { matchingDefaultsFromSpec, skillEligibilityForStory } from './skill-matching-policy';
+import {
+  formatSkillsSection,
+  resolveMatchedSkills,
+  type ResolvedSkill,
+  type SkillResolution,
+} from './skill-execution';
 import { isPtyTerminalMode, normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import { assertWavePolicyEnvelopeIntegrity, type WavePolicyEnvelope } from './wave-production-policy';
 import {
@@ -1569,74 +1577,17 @@ async function buildPiSessionOptions(
 
 // ─── SK-003: Skill Loading & Injection ──────────────────────────────────────
 
-interface ResolvedSkill {
-  name: string;
-  relevance: number;
-  content: string;
-  tokens: number;
-}
-
-/**
- * Load skill files from .rorca/skills/ matching the story's suggestedSkills.
- * Returns skills sorted by relevance (highest first), with token budget enforcement.
- *
- * For Claude agent: skips skills that also exist in .claude/skills/ (natively auto-discovered).
- * Skills are sorted by relevance (highest first) with token budget enforcement.
- */
-function loadMatchedSkills(
-  cwd: string,
-  suggestedSkills: Array<{ name: string; relevance: number; reason: string }>,
-  agentType: AgentType,
-  tokenBudget: number,
-): ResolvedSkill[] {
-  const skillsDir = path.join(cwd, '.rorca', 'skills');
-  if (!fs.existsSync(skillsDir)) return [];
-
-  // Sort by relevance descending (highest first)
-  const sorted = [...suggestedSkills].sort((a, b) => b.relevance - a.relevance);
-
-  const resolved: ResolvedSkill[] = [];
-  let usedTokens = 0;
-
-  for (const skill of sorted) {
-    // Claude agent: skip skills that exist in .claude/skills/ (auto-discovered natively)
-    if (agentType === 'claude') {
-      const claudeSkillPath = path.join(cwd, '.claude', 'skills', `${skill.name}.md`);
-      if (fs.existsSync(claudeSkillPath)) continue;
-    }
-
-    // Try loading from .rorca/skills/<name>.md
-    const skillPath = path.join(skillsDir, `${skill.name}.md`);
-    let content = '';
-    try {
-      content = fs.readFileSync(skillPath, 'utf8').trim();
-    } catch {
-      // Skill file not found — skip silently
-      continue;
-    }
-
-    if (!content) continue;
-
-    const tokens = Math.ceil(content.length / 4); // Same heuristic as context-router estimateTokens
-    if (usedTokens + tokens > tokenBudget) {
-      // Budget exceeded — stop adding skills
-      break;
-    }
-
-    usedTokens += tokens;
-    resolved.push({ name: skill.name, relevance: skill.relevance, content, tokens });
-  }
-
-  return resolved;
-}
-
-/** Format resolved skills into a prompt section. */
-function formatSkillsSection(skills: ResolvedSkill[]): string {
-  if (skills.length === 0) return '';
-  const parts = skills.map(s =>
-    `## Skill: ${s.name} (relevance: ${s.relevance})\n${s.content}`
-  );
-  return '\n' + parts.join('\n\n') + '\n';
+export function executionSkillEligibility(
+  story: UserStory,
+  mode: 'impl' | 'qa' | 'journey',
+  expectedArtifacts: string[],
+  spec?: Record<string, unknown>,
+): SkillEligibilityContext {
+  const defaults = matchingDefaultsFromSpec({ ...spec, mode: spec?.mode ?? mode });
+  return skillEligibilityForStory(story, {
+    ...defaults,
+    artifacts: [...(defaults.artifacts ?? []), ...expectedArtifacts],
+  });
 }
 
 /** SW-004: Extract plausible file paths from story description + acceptance criteria. */
@@ -6419,20 +6370,6 @@ async function executeStory(
     logger.warn(`  [agents] Role matching failed: ${err.message}`);
   }
 
-  // SK-003: Load matched skills from .rorca/skills/ based on story.suggestedSkills
-  const SKILL_TOKEN_BUDGET = 4000; // ~16KB of skill content max
-  let resolvedSkills: ResolvedSkill[] = [];
-  let skillsSection = '';
-  if (effectiveAgent !== 'pi' && story.suggestedSkills && story.suggestedSkills.length > 0) {
-    resolvedSkills = loadMatchedSkills(effectiveCwd, story.suggestedSkills, effectiveAgent, SKILL_TOKEN_BUDGET);
-    skillsSection = formatSkillsSection(resolvedSkills);
-    if (resolvedSkills.length > 0) {
-      const totalSkillTokens = resolvedSkills.reduce((sum, s) => sum + s.tokens, 0);
-      logger.info(`  [skills] Injected ${resolvedSkills.length} skill(s): ${resolvedSkills.map(s => `${s.name}(${s.relevance})`).join(', ')} (${totalSkillTokens} tokens)`);
-    }
-  }
-  let activeSkillNames = resolvedSkills.map(s => s.name);
-
   const inferredExecutionPacket = buildStoryExecutionPacket(effectiveCwd, story, mode);
   const executionPacket: StoryExecutionPacket = executionManifest
     ? {
@@ -6442,6 +6379,45 @@ async function executeStory(
       )),
     }
     : inferredExecutionPacket;
+
+  // Resolve selected guidance through the exact registry identity/entrypoint.
+  // Package support files remain progressive-disclosure only.
+  const SKILL_TOKEN_BUDGET = 4000;
+  let skillResolution: SkillResolution = {
+    skills: [], omissions: [], usedTokens: 0, tokenBudget: SKILL_TOKEN_BUDGET,
+  };
+  let resolvedSkills: ResolvedSkill[] = [];
+  let skillsSection = '';
+  if (effectiveAgent !== 'pi' && story.suggestedSkills && story.suggestedSkills.length > 0) {
+    const skillRegistry = new SkillRegistry();
+    try {
+      await skillRegistry.discover(effectiveCwd);
+    } catch (error) {
+      // DB-only discovery is optional during execution; exact filesystem
+      // identity remains available if the database is temporarily unavailable.
+      skillRegistry.discoverFilesystem(effectiveCwd);
+      logger.warn(`  [skills] DB catalog unavailable; using filesystem registry: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    for (const warning of skillRegistry.getWarnings().slice(0, 20)) {
+      logger.warn(`  [skills] ${warning.code ?? 'warning'}: ${warning.reason} (${warning.filePath})`);
+    }
+    skillResolution = resolveMatchedSkills(
+      skillRegistry,
+      story.suggestedSkills,
+      effectiveAgent,
+      SKILL_TOKEN_BUDGET,
+      executionSkillEligibility(story, mode, executionPacket.expectedArtifacts, spec as unknown as Record<string, unknown>),
+    );
+    resolvedSkills = skillResolution.skills;
+    skillsSection = formatSkillsSection(skillResolution);
+    if (resolvedSkills.length > 0) {
+      logger.info(`  [skills] Injected ${resolvedSkills.length} skill(s): ${resolvedSkills.map(s => `${s.name}(${s.relevance})`).join(', ')} (${skillResolution.usedTokens} tokens)`);
+    }
+    for (const omission of skillResolution.omissions) {
+      logger.warn(`  [skills] Omitted ${omission.name}: ${omission.code} — ${omission.reason}`);
+    }
+  }
+  let activeSkillNames = resolvedSkills.map(s => s.name);
 
   // PG-023: Unified retrieval for execution-time memory context + graph context + feedback binding
   const predictedPaths = executionPacket.candidateFiles;
@@ -6534,13 +6510,19 @@ async function executeStory(
     ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, executionPacket, spec, traceArtifactCwd)
     : undefined;
   const piSkillBundle = effectiveAgent === 'pi'
-    ? buildPiServerSkillFiles(effectiveCwd, config.runId, story.id)
+    ? buildPiServerSkillFiles(
+      effectiveCwd,
+      config.runId,
+      story.id,
+      story.suggestedSkills ?? [],
+      executionSkillEligibility(story, mode, executionPacket.expectedArtifacts, spec as unknown as Record<string, unknown>),
+    )
     : undefined;
   const piServerSkillFiles = piSkillBundle?.skillFiles ?? [];
   if (piSkillBundle) {
     activeSkillNames.push(
       'rorca-autonomous-runner',
-      ...piSkillBundle.workspaceSkillFiles.map(file => path.basename(file, path.extname(file))),
+      ...piSkillBundle.workspaceSkillNames,
     );
     activeSkillNames = [...new Set(activeSkillNames)];
   }

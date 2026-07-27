@@ -61,7 +61,15 @@ export interface ActiveRun {
   storyProgress: StoryProgress | null;
 }
 
-export interface SkillPreview {
+interface SkillSourceLocation {
+  identity?: string;
+  filePath?: string;
+  packageRoot?: string;
+  relativePath?: string;
+  format?: 'agent-skill-package' | 'legacy-flat' | 'database';
+}
+
+export interface SkillPreview extends SkillSourceLocation {
   name: string;
   contentPreview: string;
   description: string;
@@ -70,7 +78,7 @@ export interface SkillPreview {
   source: string;
 }
 
-export interface SkillFull {
+export interface SkillFull extends SkillSourceLocation {
   name: string;
   content: string;
   description: string;

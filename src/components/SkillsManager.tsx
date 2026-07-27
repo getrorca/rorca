@@ -33,11 +33,16 @@ import { renderMarkdown } from '../lib/renderMarkdown';
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 interface SkillFile {
+  /** Root-relative entrypoint: flat name.md or category/name/SKILL.md. */
   filename: string;
   name: string;
   description: string;
   sizeBytes: number;
   modifiedAt: string;
+  identity?: string;
+  relativePath?: string;
+  packageRoot?: string;
+  format?: 'legacy-flat' | 'agent-skill-package' | 'database';
 }
 
 interface SkillAssignment {
@@ -357,22 +362,24 @@ export default function SkillsManager({ workspaceId, showToast }: Props) {
                           {skill.name}
                         </span>
                       </div>
-                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); exportSkill(skill); }}
-                          className="p-0.5 rounded text-muted hover:text-accent transition-colors"
-                          title="Export"
-                        >
-                          <Download size={11} />
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); confirmDelete(skill); }}
-                          className="p-0.5 rounded text-muted hover:text-red-500 transition-colors"
-                          title="Delete"
-                        >
-                          <Trash2 size={11} />
-                        </button>
-                      </div>
+                      {skill.format !== 'agent-skill-package' && (
+                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); exportSkill(skill); }}
+                            className="p-0.5 rounded text-muted hover:text-accent transition-colors"
+                            title="Export"
+                          >
+                            <Download size={11} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); confirmDelete(skill); }}
+                            className="p-0.5 rounded text-muted hover:text-red-500 transition-colors"
+                            title="Delete"
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Metadata row */}
@@ -432,7 +439,7 @@ export default function SkillsManager({ workspaceId, showToast }: Props) {
                     <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" title="Unsaved changes" />
                   )}
                   <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium border bg-green-500/15 text-green-400 border-green-500/20">
-                    skill
+                    {selectedSkill.format === 'agent-skill-package' ? 'skill package' : 'skill'}
                   </span>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">

@@ -26,6 +26,7 @@ import { markWriting } from '../lib/file-watcher';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
+import { SkillRegistry } from '../lib/skill-registry';
 
 const router = Router();
 
@@ -146,28 +147,25 @@ router.get('/:id/context-files', requireWorkspaceMember(), async (req: Request, 
     }
   }
 
-  // 3. Skill files from .rorca/skills/
-  const skillsDir = path.join(wsPath, '.rorca', 'skills');
-  if (fs.existsSync(skillsDir)) {
-    try {
-      const skillFiles = fs.readdirSync(skillsDir).filter(f => f.endsWith('.md')).sort();
-      for (const f of skillFiles) {
-        const relPath = `.rorca/skills/${f}`;
-        if (seen.has(relPath)) continue;
-        const abs = path.join(skillsDir, f);
-        const stat = fs.statSync(abs);
-        files.push({
-          relativePath: relPath,
-          role: 'skill',
-          managed: 'manual',
-          exists: true,
-          sizeBytes: stat.size,
-          modifiedAt: stat.mtime.toISOString(),
-        });
-        seen.add(relPath);
-      }
-    } catch { /* ignore */ }
-  }
+  // 3. Exact skill entrypoints from .rorca/skills/. Support files stay hidden
+  // until an agent explicitly follows a reference from SKILL.md.
+  try {
+    const registry = new SkillRegistry().discoverFilesystem(wsPath);
+    for (const skill of registry.getAll().filter(item => item.source === 'rorca-skills' && item.filePath)) {
+      const relPath = `.rorca/skills/${skill.relativePath}`;
+      if (seen.has(relPath)) continue;
+      const stat = fs.statSync(skill.filePath);
+      files.push({
+        relativePath: relPath,
+        role: 'skill',
+        managed: 'manual',
+        exists: true,
+        sizeBytes: stat.size,
+        modifiedAt: stat.mtime.toISOString(),
+      });
+      seen.add(relPath);
+    }
+  } catch { /* skill registry diagnostics are exposed by the skills APIs */ }
 
   // 4. Global routing files that aren't already listed
   for (const globalFile of config.routing?.global ?? []) {

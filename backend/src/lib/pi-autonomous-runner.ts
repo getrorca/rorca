@@ -9,7 +9,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { ChildProcess } from 'child_process';
-import { SkillRegistry } from './skill-registry';
+import {
+  SkillRegistry,
+  isSkillEligible,
+  type SkillEligibilityContext,
+} from './skill-registry';
 import { detectCapability } from './reasoning-detector';
 
 export interface PiServerSkillFilesResult {
@@ -17,6 +21,7 @@ export interface PiServerSkillFilesResult {
   generatedSkillFile: string;
   workspaceSkillFile?: string;
   workspaceSkillFiles: string[];
+  workspaceSkillNames: string[];
 }
 
 export interface PiProgressLogSeed {
@@ -344,29 +349,51 @@ export function writePiAutonomousRunnerSkill(runId: number, storyId?: string, cw
 }
 
 export function resolveWorkspacePiSkillFile(cwd: string): string | undefined {
-  const candidates = [
-    path.join(cwd, '.rorca', 'skills', 'rorca.md'),
-    path.join(cwd, '.claude', 'skills', 'rorca.md'),
-  ];
-  return candidates.find(candidate => fs.existsSync(candidate));
+  const registry = new SkillRegistry().discoverFilesystem(cwd);
+  return registry.getSkill('rorca')?.filePath || undefined;
 }
 
-export function buildPiServerSkillFiles(cwd: string, runId: number, storyId?: string): PiServerSkillFilesResult {
+/**
+ * Build explicit Pi --skill entrypoints. When matchedSkillNames is supplied by
+ * execution, only those exact registry identities are exposed; omitted input
+ * preserves the legacy all-workspace-skills helper behavior for other callers.
+ */
+export function buildPiServerSkillFiles(
+  cwd: string,
+  runId: number,
+  storyId?: string,
+  matchedSkillNames?: unknown[],
+  eligibility?: SkillEligibilityContext,
+): PiServerSkillFilesResult {
   const generatedSkillFile = writePiAutonomousRunnerSkill(runId, storyId, cwd);
   const registry = new SkillRegistry().discoverFilesystem(cwd);
-  const workspaceSkillFiles = registry.getAll()
+  const selectedNames = matchedSkillNames
+    ? new Set(matchedSkillNames.map((value) => {
+      if (typeof value === 'string') return value;
+      if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { name?: unknown }).name === 'string') {
+        return (value as { name: string }).name;
+      }
+      return '';
+    }).map(name => name.trim().toLowerCase()).filter(Boolean))
+    : null;
+  const workspaceSkills = registry.getAll()
     .filter(skill => skill.source === 'rorca-skills' && skill.filePath.length > 0)
+    .filter(skill => !skill.metadata.disableModelInvocation)
+    .filter(skill => !eligibility || isSkillEligible(skill, eligibility))
     // The generated runner is authoritative; never inject a workspace copy of
     // the same named skill and accidentally load its guidance twice.
     .filter(skill => skill.metadata.name.toLowerCase() !== 'rorca-autonomous-runner')
-    .map(skill => skill.filePath);
-  const workspaceSkillFile = resolveWorkspacePiSkillFile(cwd);
+    .filter(skill => !selectedNames || selectedNames.has(skill.metadata.name.toLowerCase()));
+  const workspaceSkillFiles = workspaceSkills.map(skill => skill.filePath);
+  const workspaceSkillNames = workspaceSkills.map(skill => skill.metadata.name);
+  const workspaceSkillFile = registry.getSkill('rorca')?.filePath || undefined;
   const skillFiles = [...new Set([generatedSkillFile, ...workspaceSkillFiles])];
   return {
     skillFiles,
     generatedSkillFile,
     workspaceSkillFile,
     workspaceSkillFiles,
+    workspaceSkillNames,
   };
 }
 

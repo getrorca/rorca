@@ -33,6 +33,7 @@ import {
 } from '../lib/rorca-config';
 import { invalidateConfig } from '../lib/context-cache';
 import { populateConventionsFromConfig } from '../lib/knowledge-graph';
+import { SkillRegistry } from '../lib/skill-registry';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
@@ -180,9 +181,9 @@ router.get('/:id/context-routing', async (req: Request, res: Response) => {
  *   get:
  *     x-rorca-native-api: true
  *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
- *     summary: List available .rorca/skills/*.md files
+ *     summary: List available Rorca Agent Skill entrypoints
  *     operationId: listSkillFiles
- *     description: Lists all Markdown skill files in the workspace .rorca/skills/ directory with metadata.
+ *     description: Lists legacy root Markdown skills and recursive package SKILL.md entrypoints with canonical package metadata.
  *     tags: [Context Routing]
  *     parameters:
  *       - name: id
@@ -201,37 +202,30 @@ router.get('/:id/skills', async (req: Request, res: Response) => {
     return;
   }
 
-  const skillsDir = path.join(wsPath, '.rorca', 'skills');
-  if (!fs.existsSync(skillsDir)) {
-    res.json({ skills: [], hasRorcaDir: hasRorcaDir(wsPath) });
-    return;
-  }
-
   try {
-    const files = fs.readdirSync(skillsDir)
-      .filter(f => f.endsWith('.md'))
-      .sort();
+    const registry = new SkillRegistry().discoverFilesystem(wsPath);
+    const skills = registry.getAll()
+      .filter(skill => skill.source === 'rorca-skills' && skill.filePath)
+      .map(skill => {
+        const stat = fs.statSync(skill.filePath);
+        return {
+          // Backward compatible: flat skills still expose "name.md". Package
+          // skills expose their unique root-relative entrypoint path.
+          filename: skill.relativePath,
+          name: skill.metadata.name,
+          description: skill.metadata.description,
+          sizeBytes: stat.size,
+          modifiedAt: stat.mtime.toISOString(),
+          identity: skill.identity,
+          relativePath: `.rorca/skills/${skill.relativePath}`,
+          filePath: skill.filePath,
+          packageRoot: skill.packageRoot,
+          format: skill.format,
+          selectors: skill.metadata.selectors,
+        };
+      });
 
-    const skills = files.map(f => {
-      const filePath = path.join(skillsDir, f);
-      const stat = fs.statSync(filePath);
-      // Read first line for a description
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const firstLine = content.split('\n').find(l => l.trim().length > 0) || '';
-      const description = firstLine.startsWith('#')
-        ? firstLine.replace(/^#+\s*/, '')
-        : firstLine.slice(0, 80);
-
-      return {
-        filename: f,
-        name: f.replace(/\.md$/, ''),
-        description,
-        sizeBytes: stat.size,
-        modifiedAt: stat.mtime.toISOString(),
-      };
-    });
-
-    res.json({ skills, hasRorcaDir: true });
+    res.json({ skills, warnings: registry.getWarnings(), hasRorcaDir: hasRorcaDir(wsPath) });
   } catch {
     res.json({ skills: [], hasRorcaDir: hasRorcaDir(wsPath) });
   }

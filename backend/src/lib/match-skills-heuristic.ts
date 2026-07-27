@@ -6,6 +6,10 @@
  */
 
 import type { Skill } from './skill-registry';
+import {
+  eligibleSkillsForStory,
+  type MatchingEligibilityDefaults,
+} from './skill-matching-policy';
 
 export interface HeuristicSkillStory {
   id: string;
@@ -96,10 +100,11 @@ function relevanceForScore(score: number): number {
 export function heuristicMatchSkills(
   stories: HeuristicSkillStory[],
   skills: Skill[],
+  eligibilityDefaults: MatchingEligibilityDefaults = {},
 ): Array<{ storyId: string; suggestedSkills: HeuristicSuggestedSkill[] }> {
   return stories.map((story) => {
     const storyTokens = buildStoryTokens(story);
-    const ranked = skills
+    const ranked = eligibleSkillsForStory(story, skills, eligibilityDefaults)
       .map((skill) => {
         const { score, overlap } = scoreSkillForStory(storyTokens, skill);
         return { skill, score, overlap };

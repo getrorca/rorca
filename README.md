@@ -93,6 +93,8 @@ Skills are the reasoning layer.
 MCP and API calls are the reliable control surface.
 The backend is the source of truth for persistence, retrieval, telemetry, and execution orchestration.
 
+Rorca loads both portable directory packages (`<category>/<skill>/SKILL.md`) and legacy flat skills. See [Portable Agent Skill packages](docs/agent-skill-packages.md) for shared-canon installation, metadata selectors, precedence, and migration behavior.
+
 ### Bring your own subscription or key
 
 If you were looking for **BYOK**, the product-level docs usually frame that idea as **BYOA** (Bring Your Own Auth): the user brings the subscription or key that the selected provider CLI needs. See the `/docs/tools` page for the full auth model + provider matrix.
