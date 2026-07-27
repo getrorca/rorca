@@ -24,6 +24,12 @@ export const SpecReadinessReasonCode = {
   RunAnywayOverrideUsed: 'run_anyway_override_used',
   PlanCompilationNeeded: 'plan_compilation_needed',
   PlanCompilationFailed: 'plan_compilation_failed',
+  EngineeringCanonUnavailable: 'engineering_canon_unavailable',
+  MissingRequiredSkill: 'missing_required_skill',
+  MissingDomainAuthority: 'missing_domain_authority',
+  InsufficientEvidence: 'insufficient_evidence',
+  CanonCompatibilityConflict: 'canon_compatibility_conflict',
+  CanonTokenOmission: 'canon_token_omission',
 } as const;
 
 export const SpecWorkflowReasonCode = {

@@ -8,6 +8,7 @@
 import * as path from 'path';
 import {
   isSkillEligible,
+  isSkillSelectable,
   type Skill,
   type SkillEligibilityContext,
   type SkillRegistry,
@@ -39,6 +40,7 @@ export type SkillOmissionCode =
   | 'invalid-suggestion'
   | 'duplicate-suggestion'
   | 'unknown-skill'
+  | 'unpromoted-candidate'
   | 'ineligible'
   | 'model-invocation-disabled'
   | 'native-agent-skill'
@@ -129,6 +131,10 @@ export function resolveMatchedSkills(
     const skill = registry.getSkill(suggestion.name);
     if (!skill) {
       omissions.push({ name: suggestion.name, code: 'unknown-skill', reason: 'No readable registry entrypoint resolved for this name' });
+      continue;
+    }
+    if (!isSkillSelectable(skill)) {
+      omissions.push({ name: skill.metadata.name, code: 'unpromoted-candidate', reason: 'Candidate skill lacks active lifecycle status and genuine promotion evidence' });
       continue;
     }
     if (skill.metadata.disableModelInvocation) {

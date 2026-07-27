@@ -21415,6 +21415,7 @@ var SAFE_PRODUCTION_ENV_KEYS = /* @__PURE__ */ new Set([
   "FORCE_COLOR",
   "CI",
   "TZ",
+  "DEVELOPER_DIR",
   "GIT_AUTHOR_NAME",
   "GIT_AUTHOR_EMAIL",
   "GIT_COMMITTER_NAME",
@@ -21434,6 +21435,7 @@ var SAFE_PRODUCTION_ENV_KEYS = /* @__PURE__ */ new Set([
   "PI_OFFLINE",
   "PI_SKIP_VERSION_CHECK",
   "PI_TELEMETRY",
+  "RORCA_PI_MCP_TOKEN",
   "OPENCODE_DISABLE_AUTOUPDATE",
   "OPENCODE_DISABLE_DEFAULT_PLUGINS",
   "RORCA_AUTONOMOUS_COMMAND_GUARD",
@@ -21570,6 +21572,8 @@ function safeOrdinaryLocalPiEnv(input, profile, cwd, modelCredentials) {
   selected.XDG_CACHE_HOME = path11.join(home, ".cache");
   selected.npm_config_cache = path11.join(home, ".cache", "npm");
   selected.PI_BIN = profile.piBinPath;
+  const commandLineTools = "/Library/Developer/CommandLineTools";
+  if (fs6.existsSync(commandLineTools)) selected.DEVELOPER_DIR = commandLineTools;
   selected[ORDINARY_LOCAL_PI_PROFILE_ENV] = input[ORDINARY_LOCAL_PI_PROFILE_ENV];
   delete selected.HTTP_PROXY;
   delete selected.HTTPS_PROXY;

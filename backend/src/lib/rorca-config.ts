@@ -174,6 +174,19 @@ const GithubConfigSchema = z.object({
   prTemplate: z.string().optional(),
 });
 
+/** Optional neutral adapter. Paths are operator configuration, never manifest dependencies. */
+const EngineeringCanonConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  packageRoot: z.string().min(1).optional(),
+  /** Package-root-relative skill directory; path escape is rejected by the adapter. */
+  skillRoot: z.string().min(1).default('skills'),
+  tokenBudget: z.number().int().min(64).max(32000).default(8000),
+  reservedTokens: z.number().int().min(0).max(8000).default(1000),
+}).refine(value => value.reservedTokens < value.tokenBudget, {
+  message: 'reservedTokens must be less than tokenBudget',
+  path: ['reservedTokens'],
+});
+
 export const RorcaConfigSchema = z.object({
   $schema: z.string().optional(),
   version: z.number().int().min(1).default(1),
@@ -185,6 +198,7 @@ export const RorcaConfigSchema = z.object({
   personas: PersonasConfigSchema.default(() => PersonasConfigSchema.parse({})),
   embedding: EmbeddingSchema.default(() => EmbeddingSchema.parse({})),
   github: GithubConfigSchema.default(() => GithubConfigSchema.parse({})),
+  engineeringCanon: EngineeringCanonConfigSchema.default(() => EngineeringCanonConfigSchema.parse({})),
 });
 
 // ─── Exported Types ──────────────────────────────────────────────────────────
@@ -207,6 +221,7 @@ export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
 export type PersonasConfig = z.infer<typeof PersonasConfigSchema>;
 export type EmbeddingConfig = z.infer<typeof EmbeddingSchema>;
 export type GithubConfig = z.infer<typeof GithubConfigSchema>;
+export type EngineeringCanonConfig = z.infer<typeof EngineeringCanonConfigSchema>;
 
 // ─── Config Loading ──────────────────────────────────────────────────────────
 

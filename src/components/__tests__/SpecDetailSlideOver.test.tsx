@@ -910,6 +910,19 @@ describe('PSP-009: workflow checklist rendering', () => {
     blockingReasons: [],
     warnings: [{ code: 'no_installed_skills', message: 'Skill matching was skipped because no installed skills were available.', severity: 'warning' }],
     availableActions: ['install_skills'],
+    engineeringCanon: {
+      adapterStatus: 'available',
+      receipt: { status: 'missing_required_skill' },
+      selectedLayers: [{ id: 'engineering.overlay.universal', version: '1.0.0', layer: 'universal', hash: 'sha256:abc' }],
+      coveredCells: [{ requirementId: 'coverage.requirement.one', overlayId: 'engineering.overlay.universal', operation: 'review', resolution: 'covered' }],
+      uncoveredCells: [{ requirementId: 'coverage.requirement.two', gaps: ['missing_skill'] }],
+      omissions: [],
+      domainAuthority: { requestedDomains: ['healthcare'], approvedAuthorityIds: [] },
+      evidenceProvenance: { evidenceIds: ['evidence.approved.one'], genesisPackageIds: [], redacted: true },
+      compatibility: { compatible: true, versionSkew: [], conflicts: [] },
+      version: { canon: '1.0.0', taxonomy: '1.0.0', receiptHash: 'sha256:receipt' },
+      nextActions: [{ code: 'review_and_promote_required_skill', label: 'Review required candidate skills.', blocking: false }],
+    },
     reasonCodes: ['no_installed_skills'],
     safeActionHints: [],
   } as any;
@@ -929,6 +942,9 @@ describe('PSP-009: workflow checklist rendering', () => {
     expect(screen.getByTestId('workflow-policy-label')).toHaveTextContent('Policy · repair_only');
     expect(screen.getByTestId('workflow-summary-saved')).toHaveTextContent('Approved');
     expect(screen.getByTestId('workflow-summary-readiness')).toHaveTextContent('Degraded');
+    expect(screen.getByTestId('engineering-canon-coverage')).toHaveTextContent('Missing Required Skill');
+    expect(screen.getByTestId('engineering-canon-coverage')).toHaveTextContent('1 selected layers · 1 covered · 1 uncovered');
+    expect(screen.getByTestId('engineering-canon-coverage')).toHaveTextContent('restricted content redacted');
     expect(screen.getByTestId('workflow-stage-context')).toHaveTextContent('Context');
     expect(screen.getByTestId('workflow-stage-enrich')).toHaveTextContent('Enrich');
     expect(screen.getByTestId('workflow-stage-matchSkills')).toHaveTextContent('Match Skills');

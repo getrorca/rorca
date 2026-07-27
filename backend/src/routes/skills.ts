@@ -21,7 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { query, queryOne } from '../db/index';
-import { SkillRegistry, inferCategory } from '../lib/skill-registry';
+import { SkillRegistry, inferCategory, isSkillSelectable } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
@@ -186,15 +186,17 @@ router.get('/', async (req: Request, res: Response) => {
         name: s.metadata.name,
         description: s.metadata.description,
         source: s.source,
-        filePath: s.filePath,
+        filePath: s.source === 'engineering-canon' ? `@rorca/engineering-canon/skills/${s.relativePath}` : s.filePath,
         category: s.metadata.category || inferCategory(s.metadata.name, s.metadata.description),
         tags: s.metadata.tags || [],
         identity: s.identity,
-        packageRoot: s.packageRoot,
-        discoveryRoot: s.discoveryRoot,
+        packageRoot: s.source === 'engineering-canon' ? '@rorca/engineering-canon/skills' : s.packageRoot,
+        discoveryRoot: s.source === 'engineering-canon' ? '@rorca/engineering-canon/skills' : s.discoveryRoot,
         relativePath: s.relativePath,
         format: s.format,
         selectors: s.metadata.selectors,
+        governance: s.governance ?? { status: 'active', legacyCompatible: true },
+        selectable: isSkillSelectable(s),
       })),
       warnings: registry.getWarnings(),
       catalog: registry.getCatalogForPrompt(),
@@ -517,10 +519,12 @@ router.get('/:name/content', async (req: Request, res: Response) => {
         content,
         description: skill.metadata.description,
         identity: skill.identity,
-        filePath: skill.filePath,
-        packageRoot: skill.packageRoot,
+        filePath: skill.source === 'engineering-canon' ? `@rorca/engineering-canon/skills/${skill.relativePath}` : skill.filePath,
+        packageRoot: skill.source === 'engineering-canon' ? '@rorca/engineering-canon/skills' : skill.packageRoot,
         relativePath: skill.relativePath,
         format: skill.format,
+        governance: skill.governance ?? { status: 'active', legacyCompatible: true },
+        selectable: isSkillSelectable(skill),
         wordCount,
         estimatedTokens: Math.ceil(wordCount * 1.3),
       });

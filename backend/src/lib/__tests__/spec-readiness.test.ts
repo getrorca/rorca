@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { evaluateSpecReadiness, SpecReadinessReasonCode, type EvaluateSpecReadinessInput } from '../spec-readiness';
+import { applyEngineeringCanonDiagnostics, evaluateSpecReadiness, SpecReadinessReasonCode, type EvaluateSpecReadinessInput } from '../spec-readiness';
 
 const base = (overrides: Partial<EvaluateSpecReadinessInput> = {}): EvaluateSpecReadinessInput => ({
   workspaceId: 'ws-1',
@@ -132,6 +132,37 @@ describe('spec readiness evaluator', () => {
     expect(readiness.executionGate.status).toBe('allowed');
     expect(readiness.warnings.map((warning) => warning.code)).toContain(SpecReadinessReasonCode.PlanCompilationNeeded);
     expect(readiness.availableActions).toContain('compile_plan');
+  });
+
+  it('keeps the default-disabled optional canon neutral to legacy readiness', () => {
+    const readiness = evaluateSpecReadiness(base());
+    applyEngineeringCanonDiagnostics(readiness, {
+      adapterStatus: 'degraded', reasonCode: 'disabled', message: 'Engineering canon integration is disabled.', receipt: null,
+      selectedLayers: [], coveredCells: [], uncoveredCells: [], omissions: [], domainAuthority: { requestedDomains: [], approvedAuthorityIds: [] },
+      evidenceProvenance: { evidenceIds: [], genesisPackageIds: [], redacted: true }, compatibility: { compatible: false, versionSkew: [], conflicts: [] },
+      version: { canon: null, taxonomy: null, receiptHash: null }, nextActions: [],
+    });
+    expect(readiness.readinessState).toEqual({ status: 'ready', reason: 'strict' });
+    expect(readiness.warnings).toEqual([]);
+  });
+
+  it('maps canon gaps to explicit non-fabricating diagnostics without adding a blocking gate', () => {
+    const readiness = evaluateSpecReadiness(base());
+    applyEngineeringCanonDiagnostics(readiness, {
+      adapterStatus: 'available', receipt: { status: 'missing_domain_authority' }, selectedLayers: [], coveredCells: [],
+      uncoveredCells: [{ gaps: ['missing_skill', 'missing_domain_authority', 'insufficient_evidence', 'conflict', 'version_skew', 'token_omission'] }], omissions: [],
+      domainAuthority: { requestedDomains: ['healthcare'], approvedAuthorityIds: [] }, evidenceProvenance: { evidenceIds: [], genesisPackageIds: [], redacted: true },
+      compatibility: { compatible: false, versionSkew: ['1.x/2.x'], conflicts: ['binding conflict'] }, version: { canon: '1.0.0', taxonomy: '1.0.0', receiptHash: 'sha256:receipt' }, nextActions: [],
+    });
+    expect(readiness.readinessState.status).toBe('degraded');
+    expect(readiness.executionGate.status).toBe('allowed');
+    expect(readiness.blockingReasons).toEqual([]);
+    expect(readiness.warnings.map(item => item.code)).toEqual(expect.arrayContaining([
+      SpecReadinessReasonCode.MissingRequiredSkill, SpecReadinessReasonCode.MissingDomainAuthority,
+      SpecReadinessReasonCode.InsufficientEvidence, SpecReadinessReasonCode.CanonCompatibilityConflict,
+      SpecReadinessReasonCode.CanonTokenOmission,
+    ]));
+    expect(readiness.availableActions).toEqual(expect.arrayContaining(['review_required_skills', 'attach_domain_authority', 'attach_approved_evidence', 'resolve_canon_compatibility', 'adjust_canon_token_budget']));
   });
 
   it('allows degraded-but-runnable specs with backfilled context and no installed skills', () => {

@@ -22,6 +22,7 @@ import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { query, execute } from '../db/index';
 import { ValidationError } from './errors';
+import { engineeringCanonSkillRoot } from './engineering-canon';
 
 // ─── Limits and types ───────────────────────────────────────────────────────
 
@@ -66,8 +67,19 @@ export interface SkillMetadata {
   selectors?: SkillSelectors;
 }
 
+export interface SkillGovernance {
+  canonSkillId: string;
+  version: string;
+  status: 'draft' | 'candidate' | 'active' | 'deprecated' | 'superseded';
+  promotionReceiptId?: string;
+  /** Set only by an authoritative host verifier, never by skill frontmatter. */
+  promotionVerified?: boolean;
+}
+
 export interface Skill {
   metadata: SkillMetadata;
+  /** Canon package lifecycle metadata. Absent means backward-compatible legacy active. */
+  governance?: SkillGovernance;
   /** Stable registry identity. Story JSON remains name-compatible. */
   identity: string;
   /** Markdown body only; package support files are never appended. */
@@ -164,6 +176,23 @@ function asRecord(raw: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function parseSkillGovernance(standardMetadata: Record<string, unknown> | undefined): SkillGovernance | undefined {
+  const vendor = asRecord(standardMetadata?.['vendor']);
+  if (vendor?.['package'] !== '@rorca/engineering-canon') return undefined;
+  const id = vendor['canon_skill_id'];
+  const version = vendor['version'];
+  const status = vendor['lifecycle'];
+  if (typeof id !== 'string' || typeof version !== 'string'
+    || !['draft', 'candidate', 'active', 'deprecated', 'superseded'].includes(String(status))) return undefined;
+  const receipt = vendor['promotion_receipt_id'];
+  return {
+    canonSkillId: id,
+    version,
+    status: status as SkillGovernance['status'],
+    ...(typeof receipt === 'string' && receipt ? { promotionReceiptId: receipt } : {}),
+  };
+}
+
 function firstPresent(records: Array<Record<string, unknown> | undefined>, keys: string[]): { present: boolean; value?: unknown } {
   for (const record of records) {
     if (!record) continue;
@@ -226,7 +255,17 @@ function intersects(required: string[], actual: string[] | undefined): boolean {
 }
 
 /** Deterministic selector eligibility; unknown/missing constrained dimensions fail closed. */
+export function isSkillSelectable(skill: Skill): boolean {
+  const declaredVendor = asRecord(skill.metadata.standardMetadata?.['vendor']);
+  const declaredCanon = declaredVendor?.['package'] === '@rorca/engineering-canon';
+  if (!skill.governance) return skill.source !== 'engineering-canon' && !declaredCanon;
+  return skill.governance.status === 'active'
+    && Boolean(skill.governance.promotionReceiptId)
+    && skill.governance.promotionVerified === true;
+}
+
 export function isSkillEligible(skill: Skill, context: SkillEligibilityContext = {}): boolean {
+  if (!isSkillSelectable(skill)) return false;
   const selectors = skill.metadata.selectors;
   if (!selectors) return true;
   return intersects(selectors.phases, context.phases)
@@ -313,7 +352,7 @@ export class SkillRegistry {
     return this.skills.filter(skill => isSkillEligible(skill, context));
   }
 
-  getCatalogForPrompt(skills: Skill[] = this.skills): string {
+  getCatalogForPrompt(skills: Skill[] = this.skills.filter(isSkillSelectable)): string {
     return skills
       .map(skill => `${skill.metadata.name}: ${skill.metadata.description}${describeSelectorCatalog(skill)}`)
       .join('\n');
@@ -322,9 +361,11 @@ export class SkillRegistry {
   discoverFilesystem(workspacePath: string): SkillRegistry {
     this.reset();
 
+    const canonRoot = engineeringCanonSkillRoot(workspacePath);
     const roots: Array<SkillDiscoveryRoot & { priority: number }> = [
       { rootPath: path.join(workspacePath, '.rorca', 'skills'), source: 'rorca-skills', priority: 0 },
       { rootPath: path.join(workspacePath, '.claude', 'skills'), source: 'claude-skills', priority: 100 },
+      ...(canonRoot ? [{ rootPath: canonRoot, source: 'engineering-canon', priority: 150 }] : []),
       ...this.additionalRoots.map((root, index) => ({ ...root, priority: root.priority ?? 200 + index })),
     ];
 
@@ -606,9 +647,17 @@ export class SkillRegistry {
       filePath: candidate.filePath,
     });
     if (!parsed) return null;
+    // A configured canon root never inherits legacy-active semantics. Missing or
+    // malformed governance remains reviewable but is forced to candidate.
+    const governance = parsed.governance ?? (candidate.source === 'engineering-canon' ? {
+      canonSkillId: `engineering.skill.invalid-${parsed.metadata.name}`,
+      version: '0.0.0',
+      status: 'candidate' as const,
+    } : undefined);
 
     return {
       ...parsed,
+      ...(governance ? { governance } : {}),
       rawContent: content,
       identity: `${candidate.source}:${candidate.relativePath}`,
       filePath: candidate.filePath,
@@ -626,7 +675,7 @@ export class SkillRegistry {
     fallbackDescription: string;
     format: SkillPackageFormat;
     filePath: string;
-  }): Pick<Skill, 'metadata' | 'promptText'> | null {
+  }): Pick<Skill, 'metadata' | 'promptText' | 'governance'> | null {
     if (Buffer.byteLength(input.content, 'utf8') > MAX_SKILL_FILE_BYTES) {
       this.warnings.push({ filePath: input.filePath, code: 'oversized', reason: `Skill content exceeds ${MAX_SKILL_FILE_BYTES} bytes` });
       return null;
@@ -708,6 +757,7 @@ export class SkillRegistry {
       : inferCategory(name, description);
 
     return {
+      ...(parseSkillGovernance(standardMetadata) ? { governance: parseSkillGovernance(standardMetadata) } : {}),
       metadata: {
         name,
         description,

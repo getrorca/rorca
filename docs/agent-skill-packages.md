@@ -2,31 +2,27 @@
 
 Rorca supports standard directory Agent Skills and its legacy flat Markdown format at the same time.
 
-## Install a shared canon
+## Install and configure a shared canon
 
-A portable package entrypoint must be named `SKILL.md`:
+`@rorca/engineering-canon` is optional and deliberately is **not** a production dependency of Rorca. Install a published package in an operator-managed location, then configure that installed package root in the workspace's `.rorca/config.json`:
 
-```text
-.rorca/skills/
-  engineering-canon/
-    architecture/
-      architecture-review/
-        SKILL.md
-        references/...
-        assets/...
-        scripts/...
+```json
+{
+  "engineeringCanon": {
+    "enabled": true,
+    "packageRoot": "/operator/configured/install/node_modules/@rorca/engineering-canon",
+    "skillRoot": "skills",
+    "tokenBudget": 8000,
+    "reservedTokens": 1000
+  }
+}
 ```
 
-For an installed `@rorca/engineering-canon` package, copy its skill tree into the workspace:
+The adapter defaults to disabled so existing workspaces remain unchanged; enable it explicitly after installation. `RORCA_ENGINEERING_CANON_PACKAGE_ROOT` is an operational override when `packageRoot` is omitted. Never commit a machine-specific path. The adapter validates the exact package name, rejects symlink roots and path escape, imports only the package's public ESM resolver, and discovers only its configured skill tree. A normal package-manager install supplies transitive dependencies; Rorca manifests and lockfiles contain no unpublished `file:` dependency.
 
-```bash
-mkdir -p .rorca/skills/engineering-canon
-cp -R node_modules/@rorca/engineering-canon/skills/. .rorca/skills/engineering-canon/
-```
+Rorca still supports reviewed workspace copies under `.rorca/skills` for legacy deployments, but copied files have no package resolver/receipt identity and should be migrated to the configured adapter. Do not symlink `.rorca/skills`, `.claude/skills`, or a nested package. Rorca rejects symbolic-link roots, nested symlinks, and resolved paths that escape an allowed root.
 
-Copy the tree; do not symlink `.rorca/skills`, `.claude/skills`, or a nested package to another directory. Rorca rejects symbolic-link roots, nested symlinks, and resolved paths that escape the canonical allowed root. An operator can repeat the copy during package upgrades.
-
-Rorca discovers recursively nested `SKILL.md` files. It does **not** register other package Markdown, references, assets, or scripts as skills. At execution, only the matched entrypoint guidance is injected. The package root is included so a capable agent can open a referenced file on demand. Merely installing or discovering a script never executes it.
+Rorca discovers recursively nested `SKILL.md` files. It does **not** register other package Markdown, references, assets, fixtures, or scripts as skills. At execution, only the selected exact entrypoint body is injected. The package root is retained for explicit progressive disclosure, but support files are not loaded and scripts are never run merely because they exist.
 
 ## Frontmatter and optional eligibility
 
@@ -80,8 +76,30 @@ The winner is used and every shadowed duplicate produces a warning naming the wi
 
 Claude native discovery recognizes both `.claude/skills/<name>.md` and `.claude/skills/<name>/SKILL.md`. Inline injection is suppressed only when the deterministic winner itself is Claude-native; a differing lower-precedence Claude candidate never discards the Rorca winner. Pi receives exact matched entrypoints through its existing repeatable `--skill` option. OpenCode and Codex retain their existing Rorca prompt/native-context behavior; Rorca does not invent unsupported CLI flags.
 
+## Bounded coverage and trust boundaries
+
+Before matching/readiness and pipeline dispatch, Rorca constructs a strict task-scoped request from canonical spec/story/run metadata. It passes only known taxonomy values for lifecycle phase, artifact, risk, changed surfaces, technologies, domains, obligations, operation, evidence classes, active skills, approved domain authorities, approved N/A confirmations, approved Genesis package references, compatibility, and token budget. Unknown optional dimensions remain empty. If required phase/artifact/operation identity is unknown, Rorca reports `request_incomplete`; it never substitutes a claim of sufficiency.
+
+The package resolver owns deterministic overlay precedence, conflict/version checks, token accounting, and receipt hashing. Rorca exposes a bounded projection: status, selected layers and hashes, covered/uncovered cells, omissions, authority/evidence reference counts, compatibility, versions, receipt hash, and safe next actions. Raw restricted evidence is never passed or returned. Spec-authored `approved`/`redacted` booleans are ignored. Evidence, domain authorities, and N/A confirmations remain empty unless an authoritative store adapter is available; this release intentionally does not expose a structural caller input that could self-attest approval. Genesis evidence may enter only after a host verifies a published approved export package, with `approved_export_only` provenance and redacted chunk IDs. Until then, the resulting gap remains visible.
+
+The current package's 43 skills are all review candidates. Frontmatter cannot self-promote a canon skill: even `active` plus a receipt-shaped string remains unselectable until an authoritative host verifier marks that receipt verified. They remain discoverable with lifecycle metadata, but candidate/draft/deprecated/superseded skills and active canon skills without genuine promotion receipts are excluded from catalogs, matching, inline injection, Pi `--skill` arguments, and execution. Existing non-canon skills without lifecycle metadata remain backward-compatible active guidance. An LLM can rerank only the deterministic selectable set; it cannot close a coverage gap, invent a skill, promote a candidate, establish domain authority, or create evidence.
+
+Coverage diagnostics are advisory unless an existing governed lifecycle policy maps the underlying requirement to a blocking gate. Rorca does not add a parallel gate. `run_anyway` can bypass only the pre-existing operational readiness gate where already permitted; it cannot change a receipt, activate a skill, approve authority/evidence, or manufacture a confirmation.
+
+Stable diagnostics include `engineering_canon_unavailable`, `missing_required_skill`, `missing_domain_authority`, `insufficient_evidence`, `canon_compatibility_conflict`, and `canon_token_omission`. Safe actions point to configuration, human review/promotion, approved authority/evidence, compatibility repair, or a narrower/larger bounded token allocation.
+
+### Migration
+
+1. Install a published compatible canon package; do not add a local `file:` dependency.
+2. Configure `packageRoot` outside committed shared configuration (or use the environment override).
+3. Inspect `/api/workspaces/{id}/skills` and spec readiness. Confirm 43 candidates are visible and `selectable: false` until genuine promotion.
+4. Keep existing legacy active skills during migration; they continue to match and execute.
+5. Review deterministic receipts and resolve gaps. Do not copy candidate status into an active record.
+6. Remove old copied canon entrypoints only after specs/runs no longer reference them. Package support files always require explicit operator cleanup.
+
 ## Safe degradation
 
+- An absent, disabled, invalid, incompatible, or failed optional resolver returns explicit degraded coverage with `receipt: null` and `compatible: false`; it never reports sufficient.
 - Entry points larger than 256 KiB, malformed packages, empty guidance, unreadable files, nested symlinks, and path escapes are skipped with diagnostics.
 - Discovery is depth/entry bounded.
 - Prompt budgeting includes headers, exact entrypoint/package provenance, progressive-disclosure instructions, and bounded omission notes—not only the guidance body. It skips an item that does not fit, continues to later smaller guidance, logs every omission, and keeps the complete injected section within budget.

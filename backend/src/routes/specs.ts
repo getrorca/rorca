@@ -46,6 +46,7 @@ import { querySkillEffectiveness, querySkillPathAffinity, querySpecKnowledgeGrap
 import { describeRuntimeGraph, getRuntimeGraphCapability } from '../lib/graph-runtime';
 import { maybeRehydrateGitMemoryOnSpecGen } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
+import { resolveEngineeringCanonCoverage } from '../lib/engineering-canon';
 import { route as routeContext } from '../lib/context-router';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
 import { composeContext, type ComposeContextResult, type ComposerFeed } from '../lib/context-composer';
@@ -14663,6 +14664,10 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
  *                             name: { type: string }
  *                             relevance: { type: integer }
  *                             reason: { type: string }
+ *                 engineeringCanon:
+ *                   type: object
+ *                   description: Bounded redacted deterministic coverage receipt or explicit degraded state.
+ *                   additionalProperties: true
  *       400:
  *         description: Missing workspaceId
  *       404:
@@ -14901,7 +14906,19 @@ ${storyList}`;
       }
     }
 
-    // Write updated spec back to file
+    const canonMetadata = specContent.engineeringCanon && typeof specContent.engineeringCanon === 'object' && !Array.isArray(specContent.engineeringCanon)
+      ? specContent.engineeringCanon as Record<string, unknown>
+      : {};
+    const engineeringCanon = await resolveEngineeringCanonCoverage({
+      workspacePath: workspace.path as string,
+      workspaceId: String(workspaceId),
+      specId,
+      metadata: canonMetadata,
+      skills: catalogs.skills,
+    });
+    specContent.engineeringCanonCoverage = engineeringCanon;
+
+    // Write updated spec and bounded deterministic receipt back to the spec context.
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     // Create spec version for audit trail
@@ -14918,6 +14935,7 @@ ${storyList}`;
     res.json({
       matched: totalSkillsMatched,
       stories: responseStories,
+      engineeringCanon,
       ...((retrievalMeta || skillEffectivenessData.length > 0) ? {
         contextSummary: {
           ...(retrievalMeta ? {

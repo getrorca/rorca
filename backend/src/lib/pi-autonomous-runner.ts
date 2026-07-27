@@ -12,6 +12,7 @@ import type { ChildProcess } from 'child_process';
 import {
   SkillRegistry,
   isSkillEligible,
+  isSkillSelectable,
   type SkillEligibilityContext,
 } from './skill-registry';
 import { detectCapability } from './reasoning-detector';
@@ -377,7 +378,8 @@ export function buildPiServerSkillFiles(
     }).map(name => name.trim().toLowerCase()).filter(Boolean))
     : null;
   const workspaceSkills = registry.getAll()
-    .filter(skill => skill.source === 'rorca-skills' && skill.filePath.length > 0)
+    .filter(skill => (skill.source === 'rorca-skills' || skill.source === 'engineering-canon') && skill.filePath.length > 0)
+    .filter(isSkillSelectable)
     .filter(skill => !skill.metadata.disableModelInvocation)
     .filter(skill => !eligibility || isSkillEligible(skill, eligibility))
     // The generated runner is authoritative; never inject a workspace copy of

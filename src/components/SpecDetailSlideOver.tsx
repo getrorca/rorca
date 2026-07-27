@@ -2220,6 +2220,10 @@ export function WorkflowChecklistCard({
   const persistence = workflow?.persistence ?? readiness?.persistence;
   const summaryReason = readiness?.blockingReasons[0] ?? readiness?.warnings[0] ?? null;
   const installSkillsAllowed = workflowTopLevelActionAllowed(workflow, readiness, 'install_skills');
+  const canonCoverage = readiness?.engineeringCanon;
+  const canonStatus = canonCoverage?.receipt && typeof canonCoverage.receipt.status === 'string'
+    ? canonCoverage.receipt.status
+    : canonCoverage?.adapterStatus ?? 'unknown';
 
   const handleRetryStage = async (stageKey: WorkflowStageKey) => {
     if (!workspaceId || retryingStage || isRunActive || !workflowStageActionAllowed(workflow, stageKey, 'retry_stage')) return;
@@ -2287,6 +2291,29 @@ export function WorkflowChecklistCard({
             {summaryReason ? `${humanizeCode(summaryReason.code)} · ${summaryReason.message}` : 'No readiness blockers reported.'}
           </p>
         </div>
+
+        {canonCoverage && (
+          <div className="px-4 py-3 space-y-2" data-testid="engineering-canon-coverage">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10px] uppercase tracking-wider font-semibold text-muted">Bounded engineering coverage</span>
+              <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded border ${canonCoverage.adapterStatus === 'available' ? 'border-accent/30 bg-accent/10 text-accent' : 'border-amber-500/30 bg-amber-500/10 text-amber-400'}`}>
+                {humanizeCode(canonStatus)}
+              </span>
+              {canonCoverage.version.canon && <span className="text-[10px] text-muted">canon {canonCoverage.version.canon}</span>}
+            </div>
+            <p className="text-xs text-muted/80">
+              {canonCoverage.message ?? `${canonCoverage.selectedLayers.length} selected layers · ${canonCoverage.coveredCells.length} covered · ${canonCoverage.uncoveredCells.length} uncovered · ${canonCoverage.omissions.length} omissions.`}
+            </p>
+            {(canonCoverage.domainAuthority.requestedDomains.length > 0 || canonCoverage.evidenceProvenance.evidenceIds.length > 0) && (
+              <p className="text-[10px] text-muted/70">
+                Domains: {canonCoverage.domainAuthority.requestedDomains.join(', ') || 'none'} · approved evidence refs: {canonCoverage.evidenceProvenance.evidenceIds.length} · restricted content redacted
+              </p>
+            )}
+            {canonCoverage.nextActions.slice(0, 5).map(action => (
+              <p key={action.code} className="text-[10px] text-muted/80">Next · {action.label}</p>
+            ))}
+          </div>
+        )}
 
         <div className="px-4 py-3" data-testid="workflow-summary-gate">
           <div className="flex items-center gap-2 mb-1">

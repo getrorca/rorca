@@ -17,6 +17,7 @@ import type {
   SpecExecutionGate,
   SpecPersistenceLocation,
   SpecReadinessAction,
+  EngineeringCanonCoveragePayload,
   SpecReadinessPersistenceState,
   SpecReadinessReason,
   SpecReadinessStatePayload,
@@ -116,6 +117,7 @@ export interface SpecReadinessInspectionPayload {
   specId: string;
   workspaceId: string;
   persistence: SpecReadinessPersistenceState;
+  lifecyclePlan: Record<string, unknown>;
   workflow: SpecWorkflowRunSnapshot;
   stages: SpecWorkflowStageSnapshot[];
   readinessState: SpecReadinessStatePayload;
@@ -123,6 +125,7 @@ export interface SpecReadinessInspectionPayload {
   blockingReasons: SpecReadinessReason[];
   warnings: SpecReadinessReason[];
   availableActions: SpecReadinessAction[];
+  engineeringCanon?: EngineeringCanonCoveragePayload;
   reasonCodes: string[];
   safeActionHints: WorkflowActionHint[];
 }

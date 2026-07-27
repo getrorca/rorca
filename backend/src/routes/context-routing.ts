@@ -33,7 +33,7 @@ import {
 } from '../lib/rorca-config';
 import { invalidateConfig } from '../lib/context-cache';
 import { populateConventionsFromConfig } from '../lib/knowledge-graph';
-import { SkillRegistry } from '../lib/skill-registry';
+import { SkillRegistry, isSkillSelectable } from '../lib/skill-registry';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { routeWorkspaceContext } from '../lib/workspace-context-routing';
@@ -205,7 +205,7 @@ router.get('/:id/skills', async (req: Request, res: Response) => {
   try {
     const registry = new SkillRegistry().discoverFilesystem(wsPath);
     const skills = registry.getAll()
-      .filter(skill => skill.source === 'rorca-skills' && skill.filePath)
+      .filter(skill => (skill.source === 'rorca-skills' || skill.source === 'engineering-canon') && skill.filePath)
       .map(skill => {
         const stat = fs.statSync(skill.filePath);
         return {
@@ -217,11 +217,15 @@ router.get('/:id/skills', async (req: Request, res: Response) => {
           sizeBytes: stat.size,
           modifiedAt: stat.mtime.toISOString(),
           identity: skill.identity,
-          relativePath: `.rorca/skills/${skill.relativePath}`,
-          filePath: skill.filePath,
-          packageRoot: skill.packageRoot,
+          relativePath: skill.source === 'engineering-canon'
+            ? `@rorca/engineering-canon/skills/${skill.relativePath}`
+            : `.rorca/skills/${skill.relativePath}`,
+          filePath: skill.source === 'engineering-canon' ? `@rorca/engineering-canon/skills/${skill.relativePath}` : skill.filePath,
+          packageRoot: skill.source === 'engineering-canon' ? '@rorca/engineering-canon/skills' : skill.packageRoot,
           format: skill.format,
           selectors: skill.metadata.selectors,
+          governance: skill.governance ?? { status: 'active', legacyCompatible: true },
+          selectable: isSkillSelectable(skill),
         };
       });
 

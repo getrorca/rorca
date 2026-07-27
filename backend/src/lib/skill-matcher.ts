@@ -20,7 +20,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DEFAULT_MODEL } from './llm-client';
 import { completeMatchSkillsPrompt } from './match-skills-llm';
-import { SkillRegistry } from './skill-registry';
+import { SkillRegistry, isSkillSelectable } from './skill-registry';
+import { resolveEngineeringCanonCoverage, type EngineeringCanonCoverage } from './engineering-canon';
 import { heuristicMatchSkills } from './match-skills-heuristic';
 import {
   buildEligibleSkillCatalog,
@@ -71,6 +72,7 @@ export interface MatchSkillsResult {
   matched: number;
   storiesAffected: number;
   stories: Array<{ storyId: string; skills: SuggestedSkill[] }>;
+  engineeringCanon: EngineeringCanonCoverage;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -110,8 +112,19 @@ export async function matchSkills(
 
   // ── 1. Build skill catalog ──────────────────────────────────────────────
   const skillRegistry = await new SkillRegistry().discover(workspacePath);
-  const installedSkills = skillRegistry.getAll();
+  const discoveredSkills = skillRegistry.getAll();
+  const installedSkills = discoveredSkills.filter(isSkillSelectable);
   const skillNames = new Set(installedSkills.map(s => s.metadata.name.toLowerCase()));
+  const canonMetadata = spec.engineeringCanon && typeof spec.engineeringCanon === 'object' && !Array.isArray(spec.engineeringCanon)
+    ? spec.engineeringCanon as Record<string, unknown>
+    : {};
+  const engineeringCanon = await resolveEngineeringCanonCoverage({
+    workspacePath,
+    workspaceId: workspaceId ?? 'unknown-workspace',
+    specId: path.basename(specFilePath, '.json'),
+    metadata: canonMetadata,
+    skills: discoveredSkills,
+  });
   const eligibilityDefaults = matchingDefaultsFromSpec(spec);
   const eligibleSkillCatalog = buildEligibleSkillCatalog(stories, installedSkills, eligibilityDefaults);
 
@@ -239,6 +252,7 @@ ${storyList}`;
   }
 
   // ── 10. Write updated spec back to filesystem ──────────────────────────
+  spec.engineeringCanonCoverage = engineeringCanon;
   fs.writeFileSync(specFilePath, JSON.stringify(spec, null, 2), 'utf8');
   logger.info(`[SkillMatcher] Wrote updated spec to ${specFilePath} (${totalSkillsMatched} skills across ${storiesAffected} stories)`);
 
@@ -247,5 +261,6 @@ ${storyList}`;
     matched: totalSkillsMatched,
     storiesAffected,
     stories: responseStories,
+    engineeringCanon,
   };
 }

@@ -24,7 +24,14 @@ export type SpecReadinessAction =
   | 'repair_post_save'
   | 'install_skills'
   | 'backfill_context'
-  | 'retry_failed_stage';
+  | 'retry_failed_stage'
+  | 'compile_plan'
+  | 'configure_engineering_canon'
+  | 'review_required_skills'
+  | 'attach_domain_authority'
+  | 'attach_approved_evidence'
+  | 'resolve_canon_compatibility'
+  | 'adjust_canon_token_budget';
 
 export interface SpecReadinessContextCaptureState {
   status: 'provided' | 'backfilled' | 'missing' | 'unknown';
@@ -74,12 +81,30 @@ export interface SpecExecutionGate {
   reason?: string;
 }
 
+export interface EngineeringCanonCoveragePayload {
+  adapterStatus: 'available' | 'degraded';
+  reasonCode?: string;
+  message?: string;
+  receipt: Record<string, unknown> | null;
+  selectedLayers: Array<{ id: string; version: string; layer: string; hash: string }>;
+  coveredCells: Array<{ requirementId: string; overlayId: string; operation: string; resolution: 'covered' | 'not_applicable_confirmed' }>;
+  uncoveredCells: unknown[];
+  omissions: unknown[];
+  domainAuthority: { requestedDomains: string[]; approvedAuthorityIds: string[] };
+  evidenceProvenance: { evidenceIds: string[]; genesisPackageIds: string[]; redacted: true };
+  compatibility: { compatible: boolean; versionSkew: string[]; conflicts: string[] };
+  version: { canon: string | null; taxonomy: string | null; receiptHash: string | null };
+  nextActions: Array<{ code: string; label: string; blocking: false }>;
+}
+
 export interface SpecReadinessPayload {
   persistenceState: SpecReadinessPersistenceState;
+  lifecyclePlanState: Record<string, unknown>;
   postSaveState: SpecReadinessPostSaveState;
   readinessState: SpecReadinessStatePayload;
   executionGate: SpecExecutionGate;
   blockingReasons: import('./readinessReasonCodes').SpecReadinessReason[];
   warnings: import('./readinessReasonCodes').SpecReadinessReason[];
   availableActions: SpecReadinessAction[];
+  engineeringCanon?: EngineeringCanonCoveragePayload;
 }

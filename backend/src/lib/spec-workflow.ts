@@ -119,6 +119,7 @@ export interface SpecReadinessInspectionPayload {
   blockingReasons: SpecReadinessReason[];
   warnings: SpecReadinessReason[];
   availableActions: SpecReadinessPayload['availableActions'];
+  engineeringCanon?: SpecReadinessPayload['engineeringCanon'];
   reasonCodes: string[];
   safeActionHints: WorkflowActionHint[];
 }
@@ -469,6 +470,7 @@ export function buildSpecReadinessInspection(input: {
     blockingReasons: input.readiness.blockingReasons,
     warnings: input.readiness.warnings,
     availableActions: input.readiness.availableActions,
+    ...(input.readiness.engineeringCanon ? { engineeringCanon: input.readiness.engineeringCanon } : {}),
     reasonCodes: uniqueStrings([
       ...input.workflow.reasonCodes,
       ...input.readiness.blockingReasons.map((reason) => reason.code),

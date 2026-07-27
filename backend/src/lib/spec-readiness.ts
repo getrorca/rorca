@@ -11,6 +11,8 @@ import { query, queryOne, execute } from '../db/index';
 import { listStagesByRun, type PostSaveWorkflowRun, type PostSaveWorkflowStage, type PostSaveWorkflowRunStatus } from '../db/spec-post-save';
 import { SpecReadinessReasonCode, type SpecReadinessReason } from '../reason-codes';
 import { UnprocessableError } from './errors';
+import { SkillRegistry } from './skill-registry';
+import { resolveEngineeringCanonCoverage, type EngineeringCanonCoverage } from './engineering-canon';
 import {
   getSpecPlanCompilationState,
   type SpecPlanCompilationState,
@@ -31,7 +33,13 @@ export type SpecReadinessAction =
   | 'install_skills'
   | 'backfill_context'
   | 'retry_failed_stage'
-  | 'compile_plan';
+  | 'compile_plan'
+  | 'configure_engineering_canon'
+  | 'review_required_skills'
+  | 'attach_domain_authority'
+  | 'attach_approved_evidence'
+  | 'resolve_canon_compatibility'
+  | 'adjust_canon_token_budget';
 
 export interface SpecReadinessContextCaptureState {
   status: 'provided' | 'backfilled' | 'missing' | 'unknown';
@@ -89,6 +97,7 @@ export interface SpecReadinessPayload {
   blockingReasons: SpecReadinessReason[];
   warnings: SpecReadinessReason[];
   availableActions: SpecReadinessAction[];
+  engineeringCanon?: EngineeringCanonCoverage;
 }
 
 export interface LatestGenerationLogSnapshot {
@@ -397,6 +406,51 @@ function resolveSpecFile(workspacePath: string, specId: string, requestedSpecPat
   return { specPath: null, location: 'missing', exists: false };
 }
 
+export function applyEngineeringCanonDiagnostics(readiness: SpecReadinessPayload, coverage: EngineeringCanonCoverage): void {
+  const addWarning = (code: SpecReadinessReason['code'], message: string, details?: Record<string, unknown>): void => {
+    if (!readiness.warnings.some(item => item.code === code)) readiness.warnings.push(reason(code, message, 'warning', details));
+  };
+  if (coverage.adapterStatus === 'degraded' && coverage.reasonCode === 'disabled') {
+    return;
+  }
+  if (coverage.adapterStatus === 'degraded') {
+    addWarning(SpecReadinessReasonCode.EngineeringCanonUnavailable, coverage.message ?? 'Engineering canon coverage is degraded.', { reasonCode: coverage.reasonCode });
+    if (!readiness.availableActions.includes('configure_engineering_canon')) readiness.availableActions.push('configure_engineering_canon');
+  } else {
+    const receiptStatus = coverage.receipt && typeof coverage.receipt.status === 'string' ? coverage.receipt.status : null;
+    const gaps = new Set(coverage.uncoveredCells.flatMap(raw => {
+      const cell = asRecord(raw);
+      return Array.isArray(cell?.gaps) ? cell.gaps.filter((value): value is string => typeof value === 'string') : [];
+    }));
+    if (receiptStatus === 'missing_required_skill' || gaps.has('missing_skill')) {
+      addWarning(SpecReadinessReasonCode.MissingRequiredSkill, 'Bounded coverage is missing a promoted required skill.');
+      readiness.availableActions.push('review_required_skills');
+    }
+    if (receiptStatus === 'missing_domain_authority' || gaps.has('missing_domain_authority')) {
+      addWarning(SpecReadinessReasonCode.MissingDomainAuthority, 'Bounded coverage is missing approved domain authority.');
+      readiness.availableActions.push('attach_domain_authority');
+    }
+    if (receiptStatus === 'insufficient_evidence' || gaps.has('insufficient_evidence') || gaps.has('unknown')) {
+      addWarning(SpecReadinessReasonCode.InsufficientEvidence, 'Bounded coverage has insufficient approved evidence or unknown cells.');
+      readiness.availableActions.push('attach_approved_evidence');
+    }
+    if (gaps.has('conflict') || gaps.has('version_skew') || !coverage.compatibility.compatible) {
+      addWarning(SpecReadinessReasonCode.CanonCompatibilityConflict, 'Engineering canon compatibility conflicts or version skew require review.');
+      readiness.availableActions.push('resolve_canon_compatibility');
+    }
+    if (gaps.has('token_omission')) {
+      addWarning(SpecReadinessReasonCode.CanonTokenOmission, 'Required canon coverage was omitted under the bounded token budget.');
+      readiness.availableActions.push('adjust_canon_token_budget');
+    }
+  }
+  readiness.availableActions = [...new Set(readiness.availableActions)];
+  // Coverage diagnostics follow existing governed policy. They do not create a
+  // new blocking gate and readiness overrides cannot alter evidence/activation.
+  if (readiness.readinessState.status === 'ready' && readiness.warnings.length > 0) {
+    readiness.readinessState = { status: 'degraded', reason: 'degraded' };
+  }
+}
+
 export async function getSpecReadiness(input: {
   workspaceId: string;
   workspacePath: string;
@@ -496,7 +550,7 @@ export async function getSpecReadiness(input: {
     })
     : undefined;
 
-  return evaluateSpecReadiness({
+  const readiness = evaluateSpecReadiness({
     workspaceId: input.workspaceId,
     specId: input.specId,
     specPath: resolved.specPath,
@@ -514,6 +568,26 @@ export async function getSpecReadiness(input: {
     activePipelineConflicts: activePipelineConflicts.map((row) => ({ id: Number(row.id), status: row.status })),
     planCompilationState,
   });
+
+  let specContent: Record<string, unknown> = {};
+  if (resolved.specPath) {
+    try { specContent = JSON.parse(fs.readFileSync(path.join(input.workspacePath, resolved.specPath), 'utf8')) as Record<string, unknown>; } catch { /* readiness already reports missing/invalid storage elsewhere */ }
+  }
+  const canonMetadata = asRecord(specContent.engineeringCanon)
+    ?? asRecord(specContent.coverage)
+    ?? asRecord(contextSummaryJson?.engineeringCanon)
+    ?? {};
+  const registry = await new SkillRegistry().discover(input.workspacePath);
+  const coverage = await resolveEngineeringCanonCoverage({
+    workspacePath: input.workspacePath,
+    workspaceId: input.workspaceId,
+    specId: input.specId,
+    metadata: canonMetadata,
+    skills: registry.getAll(),
+  });
+  readiness.engineeringCanon = coverage;
+  applyEngineeringCanonDiagnostics(readiness, coverage);
+  return readiness;
 }
 
 export function assertSpecReadinessAllowsMutation(readiness: SpecReadinessPayload, override: boolean | undefined): void {
