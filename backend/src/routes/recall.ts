@@ -20,13 +20,11 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as fsPromises from 'fs/promises';
-import * as yaml from 'js-yaml';
 import { query as dbQuery, queryOne } from '../db/index';
 import { synthesizeDirectionStack } from '../lib/direction-stack';
 import { retrieveContext } from '../lib/memory-router';
 import { echolocate } from '../lib/workspace-echolocation';
-import { parseFrontmatter, inferCategory } from '../lib/skill-registry';
+import { SkillRegistry } from '../lib/skill-registry';
 import { ForbiddenError, ValidationError, NotFoundError } from '../lib/errors';
 import {
   RecallQuerySchema,
@@ -106,58 +104,6 @@ function truncateAtWord(text: string, maxLen: number): string {
   const lastSpace = truncated.lastIndexOf(' ');
   if (lastSpace <= 0) return truncated;
   return truncated.slice(0, lastSpace);
-}
-
-async function readSkillFiles(dirPath: string): Promise<Array<{ name: string; content: string }>> {
-  let entries: string[];
-  try {
-    entries = await fsPromises.readdir(dirPath);
-  } catch {
-    return [];
-  }
-  const mdFiles = entries.filter(f => f.endsWith('.md'));
-  const results = await Promise.all(
-    mdFiles.map(async (filename) => {
-      try {
-        const content = await fsPromises.readFile(path.join(dirPath, filename), 'utf-8');
-        return { name: path.basename(filename, '.md'), content };
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return results.filter((r): r is { name: string; content: string } => r !== null);
-}
-
-function fileToPreview(name: string, content: string, source: string): SkillPreview {
-  const parsed = parseFrontmatter(content);
-  let description = '';
-  let category: string | null = null;
-  let tags: string[] = [];
-  let bodyText = content;
-
-  if (parsed) {
-    try {
-      const raw = yaml.load(parsed.yaml) as Record<string, unknown> | null;
-      if (raw && typeof raw === 'object') {
-        if (typeof raw['description'] === 'string') description = raw['description'];
-        if (typeof raw['name'] === 'string') name = raw['name'];
-        if (typeof raw['category'] === 'string') category = raw['category'].trim();
-        if (Array.isArray(raw['tags'])) {
-          tags = raw['tags'].filter((t: unknown): t is string => typeof t === 'string');
-        } else if (typeof raw['tags'] === 'string') {
-          tags = raw['tags'].split(',').map((t: string) => t.trim()).filter(Boolean);
-        }
-      }
-    } catch {
-      // YAML parse failure — treat entire content as body
-    }
-    bodyText = parsed.body;
-  }
-
-  if (!category) category = inferCategory(name, description);
-
-  return { name, contentPreview: truncateAtWord(bodyText.trim(), 200), description, category, tags, source };
 }
 
 // ─── Section fetchers ───────────────────────────────────────────────────────
@@ -341,47 +287,20 @@ async function fetchRecentRuns(workspaceId: string): Promise<RunSummary[]> {
 }
 
 async function fetchSkills(workspacePath: string): Promise<SkillPreview[]> {
-  const skillsDir = path.join(workspacePath, '.rorca', 'skills');
-  const fsSkills = await readSkillFiles(skillsDir);
-
-  const seen = new Map<string, SkillPreview>();
-  for (const { name, content } of fsSkills) {
-    const preview = fileToPreview(name, content, 'rorca-skills');
-    seen.set(preview.name.toLowerCase(), preview);
-  }
-
-  const dbSkills = await dbQuery<{
-    name: string;
-    description: string;
-    source: string;
-    content: string;
-    category: string | null;
-    tags: string | null;
-  }>('SELECT name, description, source, content, category, tags FROM installed_skills');
-
-  for (const row of dbSkills) {
-    const key = row.name.toLowerCase();
-    if (seen.has(key)) continue;
-
-    let tags: string[] = [];
-    if (row.tags) {
-      try { tags = JSON.parse(row.tags); } catch { tags = []; }
-    }
-
-    const parsed = parseFrontmatter(row.content);
-    const bodyText = parsed ? parsed.body.trim() : row.content.trim();
-
-    seen.set(key, {
-      name: row.name,
-      contentPreview: truncateAtWord(bodyText, 200),
-      description: row.description,
-      category: row.category || inferCategory(row.name, row.description),
-      tags,
-      source: row.source || 'db',
-    });
-  }
-
-  return Array.from(seen.values());
+  const registry = await new SkillRegistry().discover(workspacePath);
+  return registry.getAll().map(skill => ({
+    name: skill.metadata.name,
+    contentPreview: truncateAtWord(skill.promptText, 200),
+    description: skill.metadata.description,
+    category: skill.metadata.category ?? null,
+    tags: skill.metadata.tags ?? [],
+    source: skill.source,
+    identity: skill.identity,
+    filePath: skill.filePath,
+    packageRoot: skill.packageRoot,
+    relativePath: skill.relativePath,
+    format: skill.format,
+  }));
 }
 
 async function fetchWorkspaceContext(workspaceId: string): Promise<{
@@ -730,69 +649,20 @@ async function fetchAllDirectionLayers(workspaceId: string): Promise<DirectionLa
 }
 
 async function fetchAllSkills(workspacePath: string): Promise<SkillFull[]> {
-  const skillsDir = path.join(workspacePath, '.rorca', 'skills');
-  const fsSkills = await readSkillFiles(skillsDir);
-
-  const seen = new Map<string, SkillFull>();
-  for (const { name, content } of fsSkills) {
-    const parsed = parseFrontmatter(content);
-    let description = '';
-    let category: string | null = null;
-    let tags: string[] = [];
-
-    if (parsed) {
-      try {
-        const raw = yaml.load(parsed.yaml) as Record<string, unknown> | null;
-        if (raw && typeof raw === 'object') {
-          if (typeof raw['description'] === 'string') description = raw['description'];
-          if (typeof raw['category'] === 'string') category = raw['category'].trim();
-          if (Array.isArray(raw['tags'])) {
-            tags = raw['tags'].filter((t: unknown): t is string => typeof t === 'string');
-          }
-        }
-      } catch { /* YAML parse failure */ }
-    }
-    if (!category) category = inferCategory(name, description);
-
-    seen.set(name.toLowerCase(), {
-      name,
-      content,
-      description,
-      category,
-      tags,
-      source: 'rorca-skills',
-    });
-  }
-
-  const dbSkills = await dbQuery<{
-    name: string;
-    description: string;
-    source: string;
-    content: string;
-    category: string | null;
-    tags: string | null;
-  }>('SELECT name, description, source, content, category, tags FROM installed_skills');
-
-  for (const row of dbSkills) {
-    const key = row.name.toLowerCase();
-    if (seen.has(key)) continue;
-
-    let tags: string[] = [];
-    if (row.tags) {
-      try { tags = JSON.parse(row.tags); } catch { tags = []; }
-    }
-
-    seen.set(key, {
-      name: row.name,
-      content: row.content,
-      description: row.description,
-      category: row.category || inferCategory(row.name, row.description),
-      tags,
-      source: row.source || 'db',
-    });
-  }
-
-  return Array.from(seen.values());
+  const registry = await new SkillRegistry().discover(workspacePath);
+  return registry.getAll().map(skill => ({
+    name: skill.metadata.name,
+    content: skill.promptText,
+    description: skill.metadata.description,
+    category: skill.metadata.category ?? null,
+    tags: skill.metadata.tags ?? [],
+    source: skill.source,
+    identity: skill.identity,
+    filePath: skill.filePath,
+    packageRoot: skill.packageRoot,
+    relativePath: skill.relativePath,
+    format: skill.format,
+  }));
 }
 
 async function fetchWorkspaceContextDump(workspaceId: string): Promise<{

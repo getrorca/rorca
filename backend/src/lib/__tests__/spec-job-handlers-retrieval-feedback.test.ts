@@ -47,11 +47,15 @@ jest.mock('../retrieval-outcome', () => ({
 }));
 
 jest.mock('../skill-registry', () => ({
+  isSkillEligible: jest.fn(() => true),
   SkillRegistry: jest.fn().mockImplementation(() => {
     const registry = {
       discover: jest.fn().mockResolvedValue(undefined as never),
       getCatalogForPrompt: jest.fn(() => 'react: React UI skill'),
-      getAll: jest.fn(() => [{ metadata: { name: 'react' } }]),
+      getAll: jest.fn(() => [{
+        metadata: { name: 'react', description: 'React UI skill', tags: [], selectors: { phases: [], artifacts: [], risks: [], priority: 'normal' } },
+        identity: 'test:react', promptText: 'React.', filePath: '', packageRoot: '', discoveryRoot: '', relativePath: '', format: 'database', source: 'test',
+      }]),
     };
     registry.discover.mockResolvedValue(registry);
     return registry;

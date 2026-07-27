@@ -38,6 +38,17 @@ interface InstalledSkill {
   filePath: string;
   category?: string;
   tags?: string[];
+  identity?: string;
+  packageRoot?: string;
+  discoveryRoot?: string;
+  relativePath?: string;
+  format?: 'legacy-flat' | 'agent-skill-package' | 'database';
+  selectors?: {
+    phases: string[];
+    artifacts: string[];
+    risks: string[];
+    priority: 'required' | 'normal';
+  };
 }
 
 interface GitHubSkillResult {

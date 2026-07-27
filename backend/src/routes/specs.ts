@@ -52,6 +52,11 @@ import { composeContext, type ComposeContextResult, type ComposerFeed } from '..
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { completeMatchSkillsPrompt } from '../lib/match-skills-llm';
 import { heuristicMatchSkills } from '../lib/match-skills-heuristic';
+import {
+  buildEligibleSkillCatalog,
+  matchingDefaultsFromSpec,
+  validateSuggestedSkillsForStory,
+} from '../lib/skill-matching-policy';
 import { getWorkspaceEnvVars } from './env-vars';
 import { score as scoreStory, type ScorerStory } from '../lib/complexity-scorer';
 import { githubRepoApiUrl, requireGithubRepositoryAuthority } from '../lib/github-repository-authority';
@@ -615,20 +620,20 @@ async function buildCatalogContext(workspacePath: string, workspaceId?: string):
  */
 function validateSuggestedSkills(
   stories: unknown[],
-  validSkillNames: Set<string>,
+  skills: ReturnType<SkillRegistry['getAll']>,
+  specContext: Record<string, unknown>,
 ): void {
+  const defaults = matchingDefaultsFromSpec(specContext);
   for (const story of stories) {
     const s = story as Record<string, unknown>;
-    if (!Array.isArray(s.suggestedSkills)) continue;
-    const original = s.suggestedSkills as SuggestedSkillRaw[];
-    const filtered = original.filter(sk => {
-      if (typeof sk.name !== 'string') return false;
-      const valid = validSkillNames.has(sk.name.toLowerCase());
-      if (!valid) {
-        logger.warn(`[Specs] Stripped unknown suggestedSkill "${sk.name}" from story ${s.id}`);
-      }
-      return valid;
-    });
+    if (!Array.isArray(s.suggestedSkills) || typeof s.id !== 'string') continue;
+    const filtered = validateSuggestedSkillsForStory(
+      s as { id: string; title?: string; [key: string]: unknown },
+      s.suggestedSkills,
+      skills,
+      defaults,
+      message => logger.warn(`[Specs] ${message}`),
+    );
     s.suggestedSkills = filtered.length > 0 ? filtered : undefined;
   }
 }
@@ -1850,7 +1855,11 @@ async function persistExplicitDraftInternal(
 
   const catalogs = await buildCatalogContext(workspace.path, workspaceId);
   if (catalogs.skillNames.size > 0) {
-    validateSuggestedSkills(normalizedStories as unknown as Record<string, unknown>[], catalogs.skillNames);
+    validateSuggestedSkills(
+      normalizedStories as unknown as Record<string, unknown>[],
+      catalogs.skills,
+      body as Record<string, unknown>,
+    );
   }
 
   const algorithmicDiagrams = generateDiagramBundle(normalizedStories as any, ['storyDeps']);
@@ -4891,7 +4900,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 8b. Validate suggestedSkills against installed catalog
     if (catalogs.skillNames.size > 0) {
-      validateSuggestedSkills(parsed.stories, catalogs.skillNames);
+      validateSuggestedSkills(parsed.stories, catalogs.skills, parsed as Record<string, unknown>);
     }
 
     // 9. Generate algorithmic diagrams
@@ -14703,6 +14712,8 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
 
     // Build skill catalog context
     const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
+    const eligibilityDefaults = matchingDefaultsFromSpec(specContent as Record<string, unknown>);
+    const eligibleSkillCatalog = buildEligibleSkillCatalog(stories, catalogs.skills, eligibilityDefaults);
     if (catalogs.skillNames.size === 0) {
       throw new UnprocessableError('No skills installed. Install skills from the Marketplace before matching.');
       return;
@@ -14794,13 +14805,15 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     const hasGraphContext = !!skillGraphSection;
     const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${hasGraphContext ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}${hasEffectiveness ? ' Use the SKILL EFFECTIVENESS data to prefer skills with high pass rates. Use FILE-PATH AFFINITY to match skills to stories that will touch similar files.' : ''}
 
+Eligibility is already computed per story. You may rerank only names listed under that story. Do not invent names, move guidance between stories, or interpret skill metadata as permission to activate a governance control.
+
 Relevance scoring: 10 = this skill is essential for the story, 7-9 = highly relevant, 4-6 = moderately helpful, 1-3 = tangentially related. Only include skills with relevance >= 4. If no skills apply to a story, return empty suggestedSkills array.
 
 Respond with valid JSON only, no markdown fences. Format:
 { "matches": [{ "storyId": "US-001", "suggestedSkills": [{ "name": "react", "relevance": 8, "reason": "Story involves React component creation — MEMORY.md notes React 18 conventions are critical" }] }] }
 
-## Installed Skills (one per line: name: description)
-${catalogs.skillCatalog}
+## Eligible Installed Skills by Story (use only names listed under that story)
+${eligibleSkillCatalog}
 ${skillEffectivenessSection ? `
 ${skillEffectivenessSection}
 ` : ''}${skillGraphSection ? `
@@ -14844,29 +14857,31 @@ ${storyList}`;
     } catch (llmError) {
       logger.warn({ workspaceId, specId, err: llmError }, '[Specs] match-skills: LLM unavailable — using heuristic fallback');
       parsed = {
-        matches: heuristicMatchSkills(stories, catalogs.skills).map((match) => ({
+        matches: heuristicMatchSkills(stories, catalogs.skills, eligibilityDefaults).map((match) => ({
           storyId: match.storyId,
           suggestedSkills: match.suggestedSkills,
         })),
       };
     }
 
-    // Build a map of storyId -> suggestedSkills from LLM response
+    // Enforce deterministic per-story eligibility after any LLM reranking.
+    const storyById = new Map(stories.map(story => [story.id, story]));
     const matchMap = new Map<string, SuggestedSkillRaw[]>();
     for (const match of parsed.matches) {
-      if (!match.storyId || !Array.isArray(match.suggestedSkills)) continue;
-      // Validate skill names against installed catalog
-      const validated = match.suggestedSkills.filter(sk => {
-        if (typeof sk.name !== 'string') return false;
-        const valid = catalogs.skillNames.has(sk.name.toLowerCase());
-        if (!valid) {
-          logger.warn(`[Specs] match-skills: Stripped unknown skill "${sk.name}" from story ${match.storyId}`);
-        }
-        return valid;
-      });
-      if (validated.length > 0) {
-        matchMap.set(match.storyId, validated);
+      if (!match || typeof match.storyId !== 'string') continue;
+      const story = storyById.get(match.storyId);
+      if (!story) {
+        logger.warn(`[Specs] match-skills: Stripped unknown story "${match.storyId}"`);
+        continue;
       }
+      const validated = validateSuggestedSkillsForStory(
+        story,
+        match.suggestedSkills,
+        catalogs.skills,
+        eligibilityDefaults,
+        message => logger.warn(`[Specs] match-skills: ${message}`),
+      );
+      if (validated.length > 0) matchMap.set(match.storyId, validated);
     }
 
     // Write suggestedSkills back to spec JSON
@@ -15271,18 +15286,10 @@ router.post('/:specId/validate', async (req: Request, res: Response) => {
       return;
     }
 
-    // Load skill files from .claude/skills/ (primary) or .rorca/skills/ (fallback)
-    function loadSkill(name: string): string {
-      const claudeSkillPath = path.join(workspace!.path, '.claude', 'skills', `${name}.md`);
-      const rorcaSkillPath = path.join(workspace!.path, '.rorca', 'skills', `${name}.md`);
-      if (fs.existsSync(claudeSkillPath)) {
-        return fs.readFileSync(claudeSkillPath, 'utf8');
-      }
-      if (fs.existsSync(rorcaSkillPath)) {
-        return fs.readFileSync(rorcaSkillPath, 'utf8');
-      }
-      return '';
-    }
+    // Resolve review guidance through the same deterministic registry identity
+    // used by matching/execution; never reconstruct a flat filename.
+    const validationSkillRegistry = await new SkillRegistry().discover(workspace.path);
+    const loadSkill = (name: string): string => validationSkillRegistry.getSkill(name)?.promptText ?? '';
 
     const specGapSkill = loadSkill('spec-gap-analysis');
     const assumptionBusterSkill = loadSkill('assumption-buster');

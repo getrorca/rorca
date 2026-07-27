@@ -53,9 +53,11 @@ describe('pi-autonomous-runner', () => {
     const result = buildPiServerSkillFiles(wsDir, 42);
 
     expect(result.generatedSkillFile).toContain('rorca-pi-autonomous-runner-42.md');
-    expect(result.workspaceSkillFile).toBe(workspaceSkill);
-    expect(result.workspaceSkillFiles).toEqual([workspaceSkill]);
-    expect(result.skillFiles).toEqual([result.generatedSkillFile, workspaceSkill]);
+    const canonicalWorkspaceSkill = fs.realpathSync(workspaceSkill);
+    expect(result.workspaceSkillFile).toBe(canonicalWorkspaceSkill);
+    expect(result.workspaceSkillFiles).toEqual([canonicalWorkspaceSkill]);
+    expect(result.workspaceSkillNames).toEqual(['rorca']);
+    expect(result.skillFiles).toEqual([result.generatedSkillFile, canonicalWorkspaceSkill]);
     expect(fs.existsSync(result.generatedSkillFile)).toBe(true);
 
     fs.rmSync(wsDir, { recursive: true, force: true });
@@ -73,11 +75,31 @@ describe('pi-autonomous-runner', () => {
 
     expect(result.generatedSkillFile).toContain('rorca-pi-autonomous-runner-42-US_001.md');
     expect(result.skillFiles.filter(file => file === result.generatedSkillFile)).toHaveLength(1);
-    expect(result.skillFiles).toContain(path.join(skillsDir, 'backend.md'));
-    expect(result.skillFiles).not.toContain(path.join(skillsDir, 'runner-copy.md'));
+    expect(result.skillFiles).toContain(fs.realpathSync(path.join(skillsDir, 'backend.md')));
+    expect(result.skillFiles).not.toContain(fs.realpathSync(path.join(skillsDir, 'runner-copy.md')));
 
     fs.rmSync(wsDir, { recursive: true, force: true });
     fs.rmSync(result.generatedSkillFile, { force: true });
+  });
+
+  test('buildPiServerSkillFiles passes only matched exact package entrypoints and never support files', () => {
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pi-package-skills-'));
+    const selectedRoot = path.join(wsDir, '.rorca', 'skills', 'canon', 'selected');
+    const omittedRoot = path.join(wsDir, '.rorca', 'skills', 'canon', 'omitted');
+    fs.mkdirSync(path.join(selectedRoot, 'references'), { recursive: true });
+    fs.mkdirSync(omittedRoot, { recursive: true });
+    fs.writeFileSync(path.join(selectedRoot, 'SKILL.md'), '---\nname: selected\ndescription: selected guidance\n---\nSelected.\n');
+    fs.writeFileSync(path.join(selectedRoot, 'references', 'DETAIL.md'), 'Support only.\n');
+    fs.writeFileSync(path.join(omittedRoot, 'SKILL.md'), '---\nname: omitted\ndescription: omitted guidance\n---\nOmitted.\n');
+
+    const result = buildPiServerSkillFiles(wsDir, 43, 'US-002', ['selected', 'unknown']);
+
+    expect(result.workspaceSkillNames).toEqual(['selected']);
+    expect(result.workspaceSkillFiles).toEqual([fs.realpathSync(path.join(selectedRoot, 'SKILL.md'))]);
+    expect(result.skillFiles).not.toContain(path.join(selectedRoot, 'references', 'DETAIL.md'));
+    expect(result.skillFiles).not.toContain(path.join(omittedRoot, 'SKILL.md'));
+
+    fs.rmSync(wsDir, { recursive: true, force: true });
   });
 
   test('cleanupPiRunTempArtifacts removes private structured prompt files after cancellation', async () => {

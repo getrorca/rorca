@@ -112,6 +112,18 @@ async function emitSkillWalEvent(eventType: string, workspaceId: string | null, 
  *                         type: string
  *                       filePath:
  *                         type: string
+ *                       identity:
+ *                         type: string
+ *                       packageRoot:
+ *                         type: string
+ *                       relativePath:
+ *                         type: string
+ *                       format:
+ *                         type: string
+ *                         enum: [agent-skill-package, legacy-flat, database]
+ *                       selectors:
+ *                         type: object
+ *                         description: Advisory deterministic phase/artifact/risk eligibility metadata.
  *                 warnings:
  *                   type: array
  *                   items:
@@ -155,6 +167,11 @@ router.get('/', async (req: Request, res: Response) => {
             filePath: '',
             category: s.category || inferCategory(s.name, s.description),
             tags: parsedTags,
+            identity: `db:${s.name.toLowerCase()}`,
+            packageRoot: '',
+            discoveryRoot: '',
+            relativePath: '',
+            format: 'database',
           };
         }),
         warnings: [],
@@ -172,6 +189,12 @@ router.get('/', async (req: Request, res: Response) => {
         filePath: s.filePath,
         category: s.metadata.category || inferCategory(s.metadata.name, s.metadata.description),
         tags: s.metadata.tags || [],
+        identity: s.identity,
+        packageRoot: s.packageRoot,
+        discoveryRoot: s.discoveryRoot,
+        relativePath: s.relativePath,
+        format: s.format,
+        selectors: s.metadata.selectors,
       })),
       warnings: registry.getWarnings(),
       catalog: registry.getCatalogForPrompt(),
@@ -485,16 +508,19 @@ router.get('/:name/content', async (req: Request, res: Response) => {
     const skill = registry.getSkill(name);
 
     if (skill) {
-      // Read file content if filePath exists, otherwise use promptText
-      let content = skill.promptText;
-      if (skill.filePath && fs.existsSync(skill.filePath)) {
-        content = fs.readFileSync(skill.filePath, 'utf-8');
-      }
+      // Registry content was read from the exact canonical entrypoint under an
+      // allowed root. Never reconstruct or re-follow a mutable path here.
+      const content = skill.promptText;
       const wordCount = content.split(/\s+/).filter(Boolean).length;
       res.json({
         name: skill.metadata.name,
         content,
         description: skill.metadata.description,
+        identity: skill.identity,
+        filePath: skill.filePath,
+        packageRoot: skill.packageRoot,
+        relativePath: skill.relativePath,
+        format: skill.format,
         wordCount,
         estimatedTokens: Math.ceil(wordCount * 1.3),
       });
@@ -553,20 +579,19 @@ router.delete('/:name', async (req: Request, res: Response) => {
   try {
     const name = req.params.name as string;
     const registry = new SkillRegistry();
-    const removedFromDb = await registry.remove(name);
-
-    // Also delete from filesystem — skills may exist on disk without a DB entry
-    // (e.g. manually placed files or core skills like rorca.md)
-    let removedFromFs = false;
     const wsId = await resolveWorkspaceId(req);
     const workspace = wsId ? await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [wsId]) : null;
-    const fsPaths = [
-      workspace ? path.join(workspace.path, '.rorca', 'skills', `${name}.md`) : null,
-      workspace ? path.join(workspace.path, '.claude', 'skills', `${name}.md`) : null,
-    ].filter(Boolean) as string[];
+    if (workspace) registry.discoverFilesystem(workspace.path);
+    const fsPaths = registry.getCandidates(name)
+      .filter(skill => skill.filePath && (skill.source === 'rorca-skills' || skill.source === 'claude-skills'))
+      .map(skill => skill.filePath);
+    const removedFromDb = await registry.remove(name);
 
-    for (const p of fsPaths) {
-      try { fs.unlinkSync(p); removedFromFs = true; } catch { /* not present */ }
+    // Remove only exact validated entrypoints. Package references/assets/scripts
+    // are deliberately left intact for explicit operator cleanup.
+    let removedFromFs = false;
+    for (const filePath of new Set(fsPaths)) {
+      try { fs.unlinkSync(filePath); removedFromFs = true; } catch { /* absent or concurrently removed */ }
     }
 
     if (!removedFromDb && !removedFromFs) {
