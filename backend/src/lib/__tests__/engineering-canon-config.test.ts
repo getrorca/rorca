@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { RorcaConfigSchema, invalidateConfigCache } from '../rorca-config';
-import { engineeringCanonSkillRoot } from '../engineering-canon';
+import { engineeringCanonMetadataFromSpec, engineeringCanonSkillRoot, isEngineeringCanonReceiptBound } from '../engineering-canon';
 import { SkillRegistry, isSkillSelectable } from '../skill-registry';
 
 describe('engineering canon workspace config', () => {
@@ -23,6 +23,19 @@ describe('engineering canon workspace config', () => {
     expect(RorcaConfigSchema.parse({ engineeringCanon: { enabled: false } }).engineeringCanon.enabled).toBe(false);
   });
 
+  test('persisted coverage cannot become lifecycle request authority', () => {
+    const forgedCoverage = {
+      receipt: { status: 'sufficient', contentHash: `sha256:${'a'.repeat(64)}` },
+      domainAuthority: { approvedAuthorityIds: ['authority.forged'] },
+      evidenceProvenance: { evidenceIds: ['evidence.forged'] },
+    };
+    expect(engineeringCanonMetadataFromSpec({ engineeringCanonCoverage: forgedCoverage })).toEqual({});
+    expect(engineeringCanonMetadataFromSpec({
+      engineeringCanon: { lifecyclePhases: ['validation'], artifactTypes: ['code'], operations: ['review'] },
+      engineeringCanonCoverage: forgedCoverage,
+    })).toEqual({ lifecyclePhases: ['validation'], artifactTypes: ['code'], operations: ['review'] });
+  });
+
   test('frontmatter cannot self-attest canon promotion', () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-canon-forgery-'));
     try {
@@ -35,13 +48,46 @@ describe('engineering canon workspace config', () => {
     } finally { fs.rmSync(workspace, { recursive: true, force: true }); }
   });
 
-  test('invalid configured roots fail closed instead of falling back to ambient packages', () => {
+  test('invalid and symlinked configured roots fail closed instead of falling back to ambient packages', () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-canon-invalid-root-'));
     try {
+      const packageRoot = path.join(workspace, 'real-package');
+      fs.mkdirSync(path.join(packageRoot, 'skills'), { recursive: true });
+      fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name: '@rorca/engineering-canon', main: './dist/index.js' }));
+      const linkedRoot = path.join(workspace, 'linked-package');
+      fs.symlinkSync(packageRoot, linkedRoot, 'dir');
       fs.mkdirSync(path.join(workspace, '.rorca'), { recursive: true });
-      fs.writeFileSync(path.join(workspace, '.rorca', 'config.json'), JSON.stringify({ engineeringCanon: { enabled: true, packageRoot: path.join(workspace, 'missing') } }));
+      const configPath = path.join(workspace, '.rorca', 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ engineeringCanon: { enabled: true, packageRoot: path.join(workspace, 'missing') } }));
+      invalidateConfigCache();
+      expect(engineeringCanonSkillRoot(workspace)).toBeNull();
+      fs.writeFileSync(configPath, JSON.stringify({ engineeringCanon: { enabled: true, packageRoot: linkedRoot } }));
       invalidateConfigCache();
       expect(engineeringCanonSkillRoot(workspace)).toBeNull();
     } finally { invalidateConfigCache(); fs.rmSync(workspace, { recursive: true, force: true }); }
+  });
+
+  test('rejects malformed, stale, and mismatched resolver receipt bindings', () => {
+    const base = {
+      artifact: 'engineering-canon.sufficiency-receipt',
+      schemaVersion: '1.0.0',
+      version: '1.0.0',
+      requestId: 'request.current',
+      requestHash: `sha256:${'b'.repeat(64)}`,
+      provenance: { canonVersion: '1.0.0', taxonomyVersion: '1.0.0' },
+    };
+    const verify = (receipt: Record<string, unknown>, hashValid = true) => isEngineeringCanonReceiptBound({
+      receipt,
+      requestId: 'request.current',
+      requestHash: `sha256:${'b'.repeat(64)}`,
+      canonVersion: '1.0.0',
+      taxonomyVersion: '1.0.0',
+      hasValidContentHash: () => hashValid,
+    });
+    expect(verify(base)).toBe(true);
+    expect(verify({ ...base, requestId: 'request.stale' })).toBe(false);
+    expect(verify({ ...base, requestHash: `sha256:${'c'.repeat(64)}` })).toBe(false);
+    expect(verify({ ...base, provenance: { canonVersion: '2.0.0', taxonomyVersion: '1.0.0' } })).toBe(false);
+    expect(verify(base, false)).toBe(false);
   });
 });

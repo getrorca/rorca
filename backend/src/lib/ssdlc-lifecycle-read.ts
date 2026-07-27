@@ -38,6 +38,8 @@ import { getSpecPlanCompilationState, type SpecPlanCompilationState } from './ss
 import { inspectApprovedSpecPasses } from './ssdlc-pass-reconciler';
 import { getNormalizedEvidenceById } from './ssdlc-evidence';
 import { isHardDenyGate } from './ssdlc-decisions';
+import { engineeringCanonMetadataFromSpec, resolveEngineeringCanonCoverage } from './engineering-canon';
+import { SkillRegistry } from './skill-registry';
 
 export const LIFECYCLE_PORTFOLIO_MAX_SPECS = 500;
 export const LIFECYCLE_EVALUATION_EVIDENCE_LIMIT = 500;
@@ -1167,52 +1169,32 @@ function traceability(plan: LifecyclePlan, evaluation: LifecycleEvaluation, evid
   };
 }
 
-function readPersistedCanonCoverage(workspacePath: string, specId: string): Record<string, unknown> | null {
+async function resolveLifecycleCanonCoverage(workspaceId: string, workspacePath: string, specId: string) {
+  let metadata: Record<string, unknown> = {};
   for (const location of ['approved', 'pending']) {
     try {
       const spec = JSON.parse(fs.readFileSync(path.join(workspacePath, 'forge', 'specs', location, `${specId}.json`), 'utf8')) as Record<string, unknown>;
-      const raw = spec.engineeringCanonCoverage;
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-      const coverage = raw as Record<string, unknown>;
-      const receipt = coverage.receipt && typeof coverage.receipt === 'object' && !Array.isArray(coverage.receipt) ? coverage.receipt as Record<string, unknown> : null;
-      const boundedArray = (value: unknown) => Array.isArray(value) ? value.slice(0, 100) : [];
-      const boundedStrings = (value: unknown) => boundedArray(value).filter((item): item is string => typeof item === 'string').map(item => item.slice(0, 300));
-      const pickRecords = (value: unknown, keys: string[]) => boundedArray(value).filter(item => item && typeof item === 'object' && !Array.isArray(item)).map(item => {
-        const source = item as Record<string, unknown>;
-        return Object.fromEntries(keys.filter(key => typeof source[key] === 'string' || typeof source[key] === 'boolean').map(key => [key, typeof source[key] === 'string' ? String(source[key]).slice(0, 500) : source[key]]));
-      });
-      const authority = coverage.domainAuthority && typeof coverage.domainAuthority === 'object' ? coverage.domainAuthority as Record<string, unknown> : {};
-      const evidence = coverage.evidenceProvenance && typeof coverage.evidenceProvenance === 'object' ? coverage.evidenceProvenance as Record<string, unknown> : {};
-      const compatibility = coverage.compatibility && typeof coverage.compatibility === 'object' ? coverage.compatibility as Record<string, unknown> : {};
-      const version = coverage.version && typeof coverage.version === 'object' ? coverage.version as Record<string, unknown> : {};
-      return {
-        adapterStatus: coverage.adapterStatus === 'available' ? 'available' : 'degraded',
-        status: typeof receipt?.status === 'string' ? receipt.status : null,
-        receiptHash: typeof receipt?.contentHash === 'string' ? receipt.contentHash : null,
-        selectedLayers: pickRecords(coverage.selectedLayers, ['id', 'version', 'layer', 'hash']),
-        coveredCells: pickRecords(coverage.coveredCells, ['requirementId', 'overlayId', 'operation', 'resolution']),
-        uncoveredCells: boundedArray(coverage.uncoveredCells).filter(item => item && typeof item === 'object' && !Array.isArray(item)).map(item => {
-          const cell = item as Record<string, unknown>;
-          return {
-            ...Object.fromEntries(['requirementId', 'overlayId', 'operation', 'disposition'].filter(key => typeof cell[key] === 'string').map(key => [key, String(cell[key]).slice(0, 300)])),
-            gaps: boundedStrings(cell.gaps).slice(0, 10),
-          };
-        }),
-        omissions: pickRecords(coverage.omissions, ['id', 'required']),
-        domainAuthority: { requestedDomains: boundedStrings(authority.requestedDomains), approvedAuthorityIds: boundedStrings(authority.approvedAuthorityIds) },
-        evidenceProvenance: { evidenceIds: boundedStrings(evidence.evidenceIds), genesisPackageIds: boundedStrings(evidence.genesisPackageIds), redacted: true },
-        compatibility: { compatible: compatibility.compatible === true, versionSkew: boundedStrings(compatibility.versionSkew), conflicts: boundedStrings(compatibility.conflicts) },
-        version: { canon: typeof version.canon === 'string' ? version.canon.slice(0, 40) : null, taxonomy: typeof version.taxonomy === 'string' ? version.taxonomy.slice(0, 40) : null, receiptHash: typeof version.receiptHash === 'string' ? version.receiptHash.slice(0, 80) : null },
-        nextActions: pickRecords(coverage.nextActions, ['code', 'blocking']).slice(0, 10),
-      };
+      metadata = engineeringCanonMetadataFromSpec(spec);
+      break;
     } catch { /* try the other canonical persistence location */ }
   }
-  return null;
+
+  // Never project the persisted engineeringCanonCoverage field: it is writable
+  // spec data and therefore cannot attest receipt identity, evidence, authority,
+  // promotion, or N/A. Re-resolve and validate against the current bounded input.
+  const registry = await new SkillRegistry().discover(workspacePath);
+  return resolveEngineeringCanonCoverage({
+    workspacePath,
+    workspaceId,
+    specId,
+    metadata,
+    skills: registry.getAll(),
+  });
 }
 
 export async function getLifecycleSpec(input: LifecycleSpecInput) {
   const loaded = await loadOne(input);
-  const engineeringCanonCoverage = readPersistedCanonCoverage(loaded.ws.path, loaded.candidate.spec_slug);
+  const engineeringCanonCoverage = await resolveLifecycleCanonCoverage(loaded.ws.id, loaded.ws.path, loaded.candidate.spec_slug);
   if (!loaded.bundle) {
     const missing = missingPlanItem(loaded.candidate);
     return {

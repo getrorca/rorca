@@ -145,6 +145,34 @@ async function loadCanon(workspacePath: string): Promise<{ module: CanonModule; 
   } catch { return null; }
 }
 
+/** Read only bounded request metadata; persisted coverage is output, never authority. */
+export function engineeringCanonMetadataFromSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  const raw = spec.engineeringCanon;
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
+}
+
+export function isEngineeringCanonReceiptBound(input: {
+  receipt: Record<string, unknown>;
+  requestId: unknown;
+  requestHash: string;
+  canonVersion: string;
+  taxonomyVersion: string;
+  hasValidContentHash: (value: unknown) => boolean;
+}): boolean {
+  const provenance = input.receipt.provenance && typeof input.receipt.provenance === 'object' && !Array.isArray(input.receipt.provenance)
+    ? input.receipt.provenance as Record<string, unknown>
+    : {};
+  return input.receipt.requestId === input.requestId
+    && input.receipt.requestHash === input.requestHash
+    && input.receipt.schemaVersion === SUPPORTED_CANON_SCHEMA_VERSION
+    && input.receipt.version === SUPPORTED_RECEIPT_VERSION
+    && input.hasValidContentHash(input.receipt)
+    && provenance.canonVersion === input.canonVersion
+    && provenance.taxonomyVersion === input.taxonomyVersion;
+}
+
 function idFor(workspaceId: string, specId: string, storyId?: string, runId?: number): string {
   const hash = crypto.createHash('sha256').update(JSON.stringify({ workspaceId, specId, storyId: storyId ?? null, runId: runId ?? null })).digest('hex').slice(0, 24);
   return `request.rorca.${hash}`;
@@ -220,14 +248,14 @@ export async function resolveEngineeringCanonCoverage(input: {
     const rawReceipt = loaded.module.resolveSufficiency(parsedRequest);
     if (Buffer.byteLength(JSON.stringify(rawReceipt), 'utf8') > 1024 * 1024) throw new Error('resolver receipt exceeds 1 MiB limit');
     const receipt = loaded.module.SufficiencyReceiptSchema.parse(rawReceipt);
-    const provenance = receipt.provenance && typeof receipt.provenance === 'object' && !Array.isArray(receipt.provenance) ? receipt.provenance as Record<string, unknown> : {};
-    if (receipt.requestId !== parsedRequest.id || receipt.requestHash !== expectedRequestHash
-      || receipt.schemaVersion !== SUPPORTED_CANON_SCHEMA_VERSION || receipt.version !== SUPPORTED_RECEIPT_VERSION
-      || !loaded.module.hasValidContentHash(receipt)
-      || provenance.canonVersion !== loaded.module.CANON_SCHEMA_VERSION
-      || provenance.taxonomyVersion !== loaded.module.COVERAGE_TAXONOMY_VERSION) {
-      throw new Error('resolver receipt identity, hash, or provenance does not match the bounded request');
-    }
+    if (!isEngineeringCanonReceiptBound({
+      receipt,
+      requestId: parsedRequest.id,
+      requestHash: expectedRequestHash,
+      canonVersion: loaded.module.CANON_SCHEMA_VERSION,
+      taxonomyVersion: loaded.module.COVERAGE_TAXONOMY_VERSION,
+      hasValidContentHash: loaded.module.hasValidContentHash,
+    })) throw new Error('resolver receipt identity, hash, or provenance does not match the bounded request');
     return surfaceReceipt(receipt, request.domains, genesisEvidence, request.domainAuthorities, request.operations, loaded.module.STARTER_OVERLAY_MANIFESTS ?? []);
   } catch (error) {
     return degraded('resolver_failed', `Engineering canon resolver rejected the bounded request: ${error instanceof Error ? error.message.slice(0, 240) : 'unknown error'}`);
