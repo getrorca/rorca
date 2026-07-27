@@ -652,7 +652,7 @@ async function fetchAllSkills(workspacePath: string): Promise<SkillFull[]> {
   const registry = await new SkillRegistry().discover(workspacePath);
   return registry.getAll().map(skill => ({
     name: skill.metadata.name,
-    content: skill.promptText,
+    content: skill.rawContent ?? skill.promptText,
     description: skill.metadata.description,
     category: skill.metadata.category ?? null,
     tags: skill.metadata.tags ?? [],

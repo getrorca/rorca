@@ -91,6 +91,25 @@ describe('execution-engine prompt delivery hardening', () => {
     expect(writes).toEqual([BRACKETED_PASTE_START, prompt, BRACKETED_PASTE_END, '\r']);
   });
 
+  test('execution reuses every eligibility field and tag accepted during matching', () => {
+    const { executionSkillEligibility } = require('../execution-engine') as typeof import('../execution-engine');
+    const eligibility = executionSkillEligibility({
+      id: 'US-001',
+      title: 'Architecture review',
+      description: 'Review the design.',
+      acceptanceCriteria: [],
+      ssdlcPhase: 'architecture',
+      lifecyclePhase: 'validation',
+      expectedArtifacts: ['sdd'],
+      risks: ['high'],
+      tags: ['phase:qa', 'artifact:adr', 'risk:critical'],
+    } as any, 'impl', ['validation-log'], { artifacts: ['spec-artifact'], risks: ['medium'] });
+
+    expect(eligibility.phases).toEqual(expect.arrayContaining(['architecture', 'validation', 'qa']));
+    expect(eligibility.artifacts).toEqual(expect.arrayContaining(['spec-artifact', 'validation-log', 'sdd', 'adr']));
+    expect(eligibility.risks).toEqual(expect.arrayContaining(['medium', 'high', 'critical']));
+  });
+
   test('recognizes the Pi CLI no-prompt message as prompt delivery failure', () => {
     const { isPromptDeliveryFailureOutput } = require('../execution-engine') as typeof import('../execution-engine');
 

@@ -92,7 +92,9 @@ describe('pi-autonomous-runner', () => {
     fs.writeFileSync(path.join(selectedRoot, 'references', 'DETAIL.md'), 'Support only.\n');
     fs.writeFileSync(path.join(omittedRoot, 'SKILL.md'), '---\nname: omitted\ndescription: omitted guidance\n---\nOmitted.\n');
 
-    const result = buildPiServerSkillFiles(wsDir, 43, 'US-002', ['selected', 'unknown']);
+    const result = buildPiServerSkillFiles(wsDir, 43, 'US-002', [
+      'selected', { name: 'selected' }, 'unknown', null, undefined, { relevance: 9 }, 42,
+    ]);
 
     expect(result.workspaceSkillNames).toEqual(['selected']);
     expect(result.workspaceSkillFiles).toEqual([fs.realpathSync(path.join(selectedRoot, 'SKILL.md'))]);

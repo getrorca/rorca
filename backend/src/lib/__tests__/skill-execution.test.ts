@@ -89,13 +89,16 @@ describe('registry-identity skill execution', () => {
     const resolution = resolveMatchedSkills(registry, [
       { name: 'huge', relevance: 10 },
       { name: 'small', relevance: 7 },
-    ], 'codex', 10);
+    ], 'codex', 100);
 
     expect(resolution.skills.map(skill => skill.name)).toEqual(['small']);
     expect(resolution.omissions).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'huge', code: 'over-budget' }),
     ]));
-    expect(formatSkillsSection(resolution)).toContain('huge: over-budget');
+    const section = formatSkillsSection(resolution);
+    expect(section).toContain('small');
+    expect(Math.ceil(section.length / 4)).toBeLessThanOrEqual(resolution.tokenBudget);
+    expect(resolution.usedTokens).toBe(Math.ceil(section.length / 4));
   });
 
   test('reserves budget for already-selected required guidance while preserving relevance prompt order', () => {
@@ -108,23 +111,24 @@ describe('registry-identity skill execution', () => {
       { name: 'optional', relevance: 10 },
       { name: 'required', relevance: 8 },
       { name: 'tiny-required', relevance: 7 },
-    ], 'opencode', 8);
+    ], 'opencode', 170);
 
     expect(resolution.skills.map(skill => skill.name)).toEqual(['required', 'tiny-required']);
     expect(resolution.omissions).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'optional', code: 'over-budget' }),
     ]));
+    expect(Math.ceil(formatSkillsSection(resolution).length / 4)).toBeLessThanOrEqual(resolution.tokenBudget);
   });
 
-  test.each(['legacy', 'standard'] as const)('suppresses %s Claude-native duplicates without adding CLI flags', (form) => {
-    writePackage('canon', 'native-review', 'RORCA INLINE COPY');
+  test.each(['legacy', 'standard'] as const)('keeps the higher-precedence Rorca winner when a differing %s Claude skill is shadowed', (form) => {
+    writePackage('canon', 'native-review', 'RORCA INLINE WINNER');
     const claudeRoot = path.join(workspace, '.claude', 'skills');
     if (form === 'legacy') {
       fs.mkdirSync(claudeRoot, { recursive: true });
-      fs.writeFileSync(path.join(claudeRoot, 'native-review.md'), markdown('native-review', 'CLAUDE NATIVE'));
+      fs.writeFileSync(path.join(claudeRoot, 'native-review.md'), markdown('native-review', 'CLAUDE SHADOWED'));
     } else {
       fs.mkdirSync(path.join(claudeRoot, 'native-review'), { recursive: true });
-      fs.writeFileSync(path.join(claudeRoot, 'native-review', 'SKILL.md'), markdown('native-review', 'CLAUDE NATIVE'));
+      fs.writeFileSync(path.join(claudeRoot, 'native-review', 'SKILL.md'), markdown('native-review', 'CLAUDE SHADOWED'));
     }
 
     const registry = new SkillRegistry().discoverFilesystem(workspace);
@@ -132,10 +136,38 @@ describe('registry-identity skill execution', () => {
       { name: 'native-review', relevance: 9 },
     ], 'claude', 1_000);
 
+    expect(resolution.skills).toHaveLength(1);
+    expect(resolution.skills[0]).toMatchObject({ source: 'rorca-skills', content: 'RORCA INLINE WINNER' });
+    expect(resolution.omissions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'native-agent-skill' }),
+    ]));
+  });
+
+  test('suppresses inline injection when the deterministic winner itself is Claude-native', () => {
+    const claudePackage = path.join(workspace, '.claude', 'skills', 'native-only');
+    fs.mkdirSync(claudePackage, { recursive: true });
+    fs.writeFileSync(path.join(claudePackage, 'SKILL.md'), markdown('native-only', 'CLAUDE NATIVE'));
+    const registry = new SkillRegistry().discoverFilesystem(workspace);
+    const resolution = resolveMatchedSkills(registry, [{ name: 'native-only', relevance: 9 }], 'claude', 1_000);
     expect(resolution.skills).toEqual([]);
     expect(resolution.omissions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: 'native-review', code: 'native-agent-skill' }),
+      expect.objectContaining({ name: 'native-only', code: 'native-agent-skill' }),
     ]));
+  });
+
+  test('bounds provenance and many omission diagnostics inside the declared token budget', () => {
+    writePackage('canon', 'small', 'small');
+    const registry = new SkillRegistry().discoverFilesystem(workspace);
+    const suggestions = [
+      { name: 'small', relevance: 10 },
+      ...Array.from({ length: 100 }, (_, index) => ({ name: `missing-${index}`, relevance: 9 - index / 100 })),
+    ];
+    const resolution = resolveMatchedSkills(registry, suggestions, 'codex', 100);
+    const section = formatSkillsSection(resolution);
+    expect(resolution.omissions).toHaveLength(100);
+    expect(resolution.skills.map(skill => skill.name)).toEqual(['small']);
+    expect(Math.ceil(section.length / 4)).toBeLessThanOrEqual(100);
+    expect(resolution.usedTokens).toBe(Math.ceil(section.length / 4));
   });
 
   test('reports unknown, duplicate, disabled, and selector-ineligible guidance honestly', () => {

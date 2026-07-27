@@ -362,13 +362,19 @@ export function buildPiServerSkillFiles(
   cwd: string,
   runId: number,
   storyId?: string,
-  matchedSkillNames?: string[],
+  matchedSkillNames?: unknown[],
   eligibility?: SkillEligibilityContext,
 ): PiServerSkillFilesResult {
   const generatedSkillFile = writePiAutonomousRunnerSkill(runId, storyId, cwd);
   const registry = new SkillRegistry().discoverFilesystem(cwd);
   const selectedNames = matchedSkillNames
-    ? new Set(matchedSkillNames.map(name => name.trim().toLowerCase()).filter(Boolean))
+    ? new Set(matchedSkillNames.map((value) => {
+      if (typeof value === 'string') return value;
+      if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { name?: unknown }).name === 'string') {
+        return (value as { name: string }).name;
+      }
+      return '';
+    }).map(name => name.trim().toLowerCase()).filter(Boolean))
     : null;
   const workspaceSkills = registry.getAll()
     .filter(skill => skill.source === 'rorca-skills' && skill.filePath.length > 0)

@@ -72,6 +72,8 @@ export interface Skill {
   identity: string;
   /** Markdown body only; package support files are never appended. */
   promptText: string;
+  /** Exact entrypoint content, including frontmatter; never includes support files. */
+  rawContent?: string;
   /** Canonical absolute path to the exact entrypoint (empty for DB-only skills). */
   filePath: string;
   /** Canonical package directory, or the containing root for a legacy flat file. */
@@ -162,14 +164,19 @@ function asRecord(raw: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function firstDefined(records: Array<Record<string, unknown> | undefined>, keys: string[]): unknown {
+function firstPresent(records: Array<Record<string, unknown> | undefined>, keys: string[]): { present: boolean; value?: unknown } {
   for (const record of records) {
     if (!record) continue;
     for (const key of keys) {
-      if (record[key] !== undefined) return record[key];
+      if (Object.prototype.hasOwnProperty.call(record, key)) return { present: true, value: record[key] };
     }
   }
-  return undefined;
+  return { present: false };
+}
+
+function isValidSelectorList(raw: unknown): boolean {
+  return typeof raw === 'string'
+    || (Array.isArray(raw) && raw.every(value => typeof value === 'string'));
 }
 
 /**
@@ -177,24 +184,39 @@ function firstDefined(records: Array<Record<string, unknown> | undefined>, keys:
  * Both `metadata.rorca` and flat `metadata["rorca.*"]`/plain aliases are
  * accepted so packages can remain portable across Agent Skill consumers.
  */
-export function parseSkillSelectors(rawMetadata: unknown): SkillSelectors {
+function parseSkillSelectorsDetailed(rawMetadata: unknown): { selectors: SkillSelectors; invalid: boolean } {
   const standard = asRecord(rawMetadata);
   const rorca = asRecord(standard?.['rorca']);
   const records = [rorca, standard];
-  const phases = parseStringList(firstDefined(records, ['phases', 'phase', 'rorca.phases', 'rorca.phase']));
-  const artifacts = parseStringList(firstDefined(records, [
+  const phaseValue = firstPresent(records, ['phases', 'phase', 'rorca.phases', 'rorca.phase']);
+  const artifactValue = firstPresent(records, [
     'artifacts', 'artifact', 'artifact-types', 'artifactTypes',
     'rorca.artifacts', 'rorca.artifact-types',
-  ]));
-  const risks = parseStringList(firstDefined(records, [
+  ]);
+  const riskValue = firstPresent(records, [
     'risks', 'risk', 'risk-levels', 'riskLevels',
     'rorca.risks', 'rorca.risk-levels',
-  ]));
-  const priorityValue = firstDefined(records, ['priority', 'injection-priority', 'required', 'rorca.priority']);
-  const priority = priorityValue === true || String(priorityValue ?? '').toLowerCase() === 'required'
-    ? 'required'
-    : 'normal';
-  return { phases, artifacts, risks, priority };
+  ]);
+  const priorityValue = firstPresent(records, ['priority', 'injection-priority', 'required', 'rorca.priority']);
+  const normalizedPriority = typeof priorityValue.value === 'string' ? priorityValue.value.trim().toLowerCase() : priorityValue.value;
+  const validPriority = !priorityValue.present || normalizedPriority === true || normalizedPriority === false
+    || normalizedPriority === 'required' || normalizedPriority === 'normal';
+  const invalid = [phaseValue, artifactValue, riskValue].some(entry => entry.present && !isValidSelectorList(entry.value))
+    || !validPriority;
+  const priority = normalizedPriority === true || normalizedPriority === 'required' ? 'required' : 'normal';
+  return {
+    selectors: {
+      phases: parseStringList(phaseValue.value),
+      artifacts: parseStringList(artifactValue.value),
+      risks: parseStringList(riskValue.value),
+      priority,
+    },
+    invalid,
+  };
+}
+
+export function parseSkillSelectors(rawMetadata: unknown): SkillSelectors {
+  return parseSkillSelectorsDetailed(rawMetadata).selectors;
 }
 
 function intersects(required: string[], actual: string[] | undefined): boolean {
@@ -234,6 +256,10 @@ export function inferCategory(name: string, description: string): SkillCategory 
 
 function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join('/');
+}
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isInsideRoot(rootPath: string, candidatePath: string): boolean {
@@ -306,8 +332,8 @@ export class SkillRegistry {
     candidates.sort((left, right) => (
       left.rootPriority - right.rootPriority
       || (left.format === right.format ? 0 : left.format === 'agent-skill-package' ? -1 : 1)
-      || left.relativePath.localeCompare(right.relativePath)
-      || left.filePath.localeCompare(right.filePath)
+      || compareCodeUnits(left.relativePath, right.relativePath)
+      || compareCodeUnits(left.filePath, right.filePath)
     ));
 
     for (const candidate of candidates) {
@@ -330,7 +356,7 @@ export class SkillRegistry {
       tags: string | null;
     }>('SELECT name, description, source, content, category, tags FROM installed_skills');
 
-    for (const row of dbSkills.sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const row of dbSkills.sort((a, b) => compareCodeUnits(a.name, b.name))) {
       const parsed = this.parseSkillContent({
         content: row.content,
         fallbackName: row.name,
@@ -345,6 +371,7 @@ export class SkillRegistry {
       }
       const skill: Skill = {
         ...parsed,
+        rawContent: row.content,
         metadata: {
           ...parsed.metadata,
           description: parsed.metadata.description || row.description,
@@ -396,6 +423,7 @@ export class SkillRegistry {
 
     const skill: Skill = {
       ...parsed,
+      rawContent: content,
       metadata: { ...parsed.metadata, category, tags },
       identity: `db:${name.toLowerCase()}`,
       filePath: '',
@@ -444,6 +472,10 @@ export class SkillRegistry {
 
     let canonicalRoot: string;
     try {
+      if (fs.lstatSync(root.rootPath).isSymbolicLink()) {
+        this.warnings.push({ filePath: root.rootPath, code: 'unsafe-symlink', reason: 'Skipped symbolic-link skill root' });
+        return [];
+      }
       canonicalRoot = fs.realpathSync(root.rootPath);
       if (!fs.statSync(canonicalRoot).isDirectory()) return [];
     } catch (error) {
@@ -465,7 +497,7 @@ export class SkillRegistry {
       }
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+        entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => compareCodeUnits(a.name, b.name));
       } catch (error) {
         this.warnings.push({
           filePath: dir,
@@ -577,6 +609,7 @@ export class SkillRegistry {
 
     return {
       ...parsed,
+      rawContent: content,
       identity: `${candidate.source}:${candidate.relativePath}`,
       filePath: candidate.filePath,
       packageRoot: candidate.packageRoot,
@@ -659,7 +692,17 @@ export class SkillRegistry {
     }
 
     const standardMetadata = asRecord(raw['metadata']);
-    const selectors = parseSkillSelectors(standardMetadata);
+    const selectorResult = parseSkillSelectorsDetailed(standardMetadata);
+    if (selectorResult.invalid) {
+      this.warnings.push({
+        filePath: input.filePath,
+        code: 'invalid-metadata',
+        skillName: name,
+        reason: 'Rorca selector metadata must use string or string-array values and a normal/required priority',
+      });
+      return null;
+    }
+    const selectors = selectorResult.selectors;
     const category = typeof raw['category'] === 'string' && raw['category'].trim()
       ? raw['category'].trim()
       : inferCategory(name, description);

@@ -54,6 +54,8 @@ export interface SkillOmission {
 export interface SkillResolution {
   skills: ResolvedSkill[];
   omissions: SkillOmission[];
+  /** Complete bounded prompt section, including provenance and omission notes. */
+  formattedText?: string;
   usedTokens: number;
   tokenBudget: number;
 }
@@ -67,12 +69,12 @@ function normalizedName(name: string): string {
 }
 
 function toResolved(skill: Skill, suggestion: SuggestedSkillReference, order: number): ResolvedSkill {
-  return {
+  const resolved: ResolvedSkill = {
     name: skill.metadata.name,
     identity: skill.identity,
     relevance: suggestion.relevance,
     content: skill.promptText,
-    tokens: estimateTokens(skill.promptText),
+    tokens: 0,
     filePath: skill.filePath,
     packageRoot: skill.packageRoot,
     relativePath: skill.relativePath,
@@ -80,6 +82,8 @@ function toResolved(skill: Skill, suggestion: SuggestedSkillReference, order: nu
     required: skill.metadata.selectors?.priority === 'required',
     order,
   };
+  resolved.tokens = estimateTokens(formatResolvedSkill(resolved));
+  return resolved;
 }
 
 /**
@@ -135,7 +139,7 @@ export function resolveMatchedSkills(
       omissions.push({ name: skill.metadata.name, code: 'ineligible', reason: 'Skill metadata selectors do not match this execution context' });
       continue;
     }
-    if (agentType === 'claude' && registry.hasSkillFromSource(skill.metadata.name, 'claude-skills')) {
+    if (agentType === 'claude' && skill.source === 'claude-skills') {
       omissions.push({
         name: skill.metadata.name,
         code: 'native-agent-skill',
@@ -152,18 +156,21 @@ export function resolveMatchedSkills(
 
   const boundedBudget = Math.max(0, Math.floor(tokenBudget));
   const selected = new Set<ResolvedSkill>();
-  let usedTokens = 0;
   const choose = (candidate: ResolvedSkill): void => {
-    if (candidate.tokens > boundedBudget - usedTokens) {
+    const trial = candidates.filter(item => selected.has(item) || item === candidate);
+    const trialTokens = estimateTokens(renderSections(trial.map(formatResolvedSkill)));
+    if (trialTokens > boundedBudget) {
+      const currentTokens = selected.size === 0
+        ? 0
+        : estimateTokens(renderSections(candidates.filter(item => selected.has(item)).map(formatResolvedSkill)));
       omissions.push({
         name: candidate.name,
         code: 'over-budget',
-        reason: `Estimated ${candidate.tokens} tokens exceed ${boundedBudget - usedTokens} remaining of ${boundedBudget}`,
+        reason: `Estimated ${candidate.tokens} section tokens exceed ${Math.max(0, boundedBudget - currentTokens)} remaining of ${boundedBudget}`,
       });
       return;
     }
     selected.add(candidate);
-    usedTokens += candidate.tokens;
   };
 
   // Reserve budget for selected required guidance before optional guidance. This
@@ -171,10 +178,13 @@ export function resolveMatchedSkills(
   for (const candidate of candidates.filter(candidate => candidate.required)) choose(candidate);
   for (const candidate of candidates.filter(candidate => !candidate.required)) choose(candidate);
 
+  const skills = candidates.filter(candidate => selected.has(candidate));
+  const formattedText = buildBoundedSkillsSection(skills, omissions, boundedBudget);
   return {
-    skills: candidates.filter(candidate => selected.has(candidate)),
+    skills,
     omissions,
-    usedTokens,
+    formattedText,
+    usedTokens: formattedText ? estimateTokens(formattedText) : 0,
     tokenBudget: boundedBudget,
   };
 }
@@ -183,38 +193,58 @@ function safeInline(value: string): string {
   return value.replace(/[\r\n`]+/g, ' ').trim().slice(0, 160);
 }
 
-/** Format exact entrypoint guidance plus progressive-disclosure provenance. */
-export function formatSkillsSection(resolution: SkillResolution): string {
-  const sections = resolution.skills.map(skill => {
-    const sourcePrefix = skill.source === 'rorca-skills'
-      ? '.rorca/skills'
-      : skill.source === 'claude-skills'
-        ? '.claude/skills'
-        : '';
-    const entryPath = sourcePrefix && skill.relativePath
-      ? `${sourcePrefix}/${skill.relativePath}`
-      : skill.filePath;
-    const relativePackage = path.posix.dirname(skill.relativePath);
-    const packagePath = skill.packageRoot
-      ? sourcePrefix
-        ? relativePackage === '.' ? sourcePrefix : `${sourcePrefix}/${relativePackage}`
-        : skill.packageRoot
+function formatResolvedSkill(skill: ResolvedSkill): string {
+  const sourcePrefix = skill.source === 'rorca-skills'
+    ? '.rorca/skills'
+    : skill.source === 'claude-skills'
+      ? '.claude/skills'
       : '';
-    const provenance = [
-      entryPath ? `Entrypoint: ${entryPath}` : '',
-      packagePath ? `Package root: ${packagePath}` : '',
-      packagePath && skill.relativePath.endsWith('/SKILL.md')
-        ? 'Progressive disclosure: load referenced files from this package root only when needed. Do not load all references/assets or execute scripts merely because they exist.'
-        : '',
-    ].filter(Boolean).join('\n');
-    return `## Skill: ${skill.name} (relevance: ${skill.relevance})\n${provenance}${provenance ? '\n' : ''}${skill.content}`;
-  });
+  const entryPath = sourcePrefix && skill.relativePath
+    ? `${sourcePrefix}/${skill.relativePath}`
+    : skill.filePath;
+  const relativePackage = path.posix.dirname(skill.relativePath);
+  const packagePath = skill.packageRoot
+    ? sourcePrefix
+      ? relativePackage === '.' ? sourcePrefix : `${sourcePrefix}/${relativePackage}`
+      : skill.packageRoot
+    : '';
+  const provenance = [
+    entryPath ? `Entrypoint: ${entryPath}` : '',
+    packagePath ? `Package root: ${packagePath}` : '',
+    packagePath && skill.relativePath.endsWith('/SKILL.md')
+      ? 'Progressive disclosure: load referenced files from this package root only when needed. Do not load all references/assets or execute scripts merely because they exist.'
+      : '',
+  ].filter(Boolean).join('\n');
+  return `## Skill: ${skill.name} (relevance: ${skill.relevance})\n${provenance}${provenance ? '\n' : ''}${skill.content}`;
+}
 
-  if (resolution.omissions.length > 0) {
-    sections.push([
-      '## Skill loading notes',
-      ...resolution.omissions.map(omission => `- ${safeInline(omission.name)}: ${omission.code} — ${safeInline(omission.reason)}`),
-    ].join('\n'));
-  }
+function renderSections(sections: string[]): string {
   return sections.length > 0 ? `\n${sections.join('\n\n')}\n` : '';
+}
+
+function buildBoundedSkillsSection(skills: ResolvedSkill[], omissions: SkillOmission[], tokenBudget: number): string {
+  if (tokenBudget <= 0) return '';
+  const sections = skills.map(formatResolvedSkill);
+  if (omissions.length === 0) return renderSections(sections);
+
+  const noteLines: string[] = [];
+  for (const omission of omissions) {
+    const line = `- ${safeInline(omission.name)}: ${omission.code} — ${safeInline(omission.reason)}`;
+    const noteSection = ['## Skill loading notes', ...noteLines, line].join('\n');
+    if (estimateTokens(renderSections([...sections, noteSection])) > tokenBudget) break;
+    noteLines.push(line);
+  }
+  const remaining = omissions.length - noteLines.length;
+  if (remaining > 0) {
+    const summary = `- ${remaining} additional omission${remaining === 1 ? '' : 's'} recorded in the execution log.`;
+    const noteSection = ['## Skill loading notes', ...noteLines, summary].join('\n');
+    if (estimateTokens(renderSections([...sections, noteSection])) <= tokenBudget) noteLines.push(summary);
+  }
+  if (noteLines.length > 0) sections.push(['## Skill loading notes', ...noteLines].join('\n'));
+  return renderSections(sections);
+}
+
+/** Format the exact, fully budgeted entrypoint guidance and diagnostics. */
+export function formatSkillsSection(resolution: SkillResolution): string {
+  return resolution.formattedText ?? buildBoundedSkillsSection(resolution.skills, resolution.omissions, resolution.tokenBudget);
 }

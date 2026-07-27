@@ -48,6 +48,7 @@ import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { SkillRegistry, type SkillEligibilityContext } from './skill-registry';
+import { matchingDefaultsFromSpec, skillEligibilityForStory } from './skill-matching-policy';
 import {
   formatSkillsSection,
   resolveMatchedSkills,
@@ -1576,36 +1577,17 @@ async function buildPiSessionOptions(
 
 // ─── SK-003: Skill Loading & Injection ──────────────────────────────────────
 
-function executionSkillEligibility(
+export function executionSkillEligibility(
   story: UserStory,
   mode: 'impl' | 'qa' | 'journey',
   expectedArtifacts: string[],
   spec?: Record<string, unknown>,
 ): SkillEligibilityContext {
-  const record = story as UserStory & {
-    phase?: unknown;
-    phases?: unknown;
-    risk?: unknown;
-    riskLevel?: unknown;
-    artifacts?: unknown;
-    artifactTypes?: unknown;
-  };
-  const list = (value: unknown): string[] => Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string')
-    : typeof value === 'string' ? [value] : [];
-  const defaultPhase = mode === 'impl' ? 'implementation_review' : 'validation_review';
-  const storyPhases = [...list(record.phase), ...list(record.phases)];
-  const specPhases = [...list(spec?.phase), ...list(spec?.phases)];
-  const storyRisks = [...list(record.risk), ...list(record.riskLevel)];
-  const specRisks = [...list(spec?.risk), ...list(spec?.riskLevel)];
-  return {
-    phases: storyPhases.length > 0 ? storyPhases : specPhases.length > 0 ? specPhases : [defaultPhase],
-    artifacts: [
-      ...list(spec?.artifacts), ...list(spec?.artifactTypes),
-      ...list(record.artifacts), ...list(record.artifactTypes), ...expectedArtifacts,
-    ],
-    risks: storyRisks.length > 0 ? storyRisks : specRisks,
-  };
+  const defaults = matchingDefaultsFromSpec({ ...spec, mode: spec?.mode ?? mode });
+  return skillEligibilityForStory(story, {
+    ...defaults,
+    artifacts: [...(defaults.artifacts ?? []), ...expectedArtifacts],
+  });
 }
 
 /** SW-004: Extract plausible file paths from story description + acceptance criteria. */
@@ -6532,7 +6514,7 @@ async function executeStory(
       effectiveCwd,
       config.runId,
       story.id,
-      story.suggestedSkills?.map(skill => skill.name) ?? [],
+      story.suggestedSkills ?? [],
       executionSkillEligibility(story, mode, executionPacket.expectedArtifacts, spec as unknown as Record<string, unknown>),
     )
     : undefined;

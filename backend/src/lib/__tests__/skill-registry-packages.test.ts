@@ -59,6 +59,7 @@ describe('SkillRegistry portable Agent Skill packages', () => {
       source: 'rorca-skills',
       promptText: 'Apply architecture-review.',
     });
+    expect(skills[0].rawContent).toBe(packageMarkdown('architecture-review'));
     expect(registry.getSkill('DETAILS')).toBeUndefined();
     expect(registry.getAll().map(skill => skill.promptText).join('\n')).not.toContain('SUPPORT FILE');
   });
@@ -110,6 +111,26 @@ describe('SkillRegistry portable Agent Skill packages', () => {
     const registry = new SkillRegistry().discoverFilesystem(workspace);
     expect(registry.hasSkillFromSource('legacy', 'claude-skills')).toBe(true);
     expect(registry.hasSkillFromSource('standard', 'claude-skills')).toBe(true);
+  });
+
+  test.each(['.rorca', '.claude'])('rejects a symbolic-link %s skill root before traversing external content', (directory) => {
+    const external = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-external-root-'));
+    const externalPackage = path.join(external, 'escaped');
+    fs.mkdirSync(externalPackage, { recursive: true });
+    fs.writeFileSync(path.join(externalPackage, 'SKILL.md'), packageMarkdown('escaped-root'));
+    const parent = path.join(workspace, directory);
+    fs.mkdirSync(parent, { recursive: true });
+    fs.symlinkSync(external, path.join(parent, 'skills'));
+
+    try {
+      const registry = new SkillRegistry().discoverFilesystem(workspace);
+      expect(registry.getSkill('escaped-root')).toBeUndefined();
+      expect(registry.getWarnings()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'unsafe-symlink', filePath: path.join(parent, 'skills') }),
+      ]));
+    } finally {
+      fs.rmSync(external, { recursive: true, force: true });
+    }
   });
 
   test('rejects nested symlinks even when they point to an external valid package', () => {
@@ -203,6 +224,39 @@ describe('SkillRegistry portable Agent Skill packages', () => {
     expect(skill?.metadata.standardMetadata).toMatchObject({
       rorca: expect.objectContaining({ enforcement: 'block' }),
     });
+  });
+
+  test.each([
+    '    phases: 42',
+    '    artifact-types: { kind: sdd }',
+    '    risk-levels: [high, 42]',
+    '    priority: sometimes',
+  ])('rejects malformed selector metadata instead of broadening eligibility: %s', (selectorLine) => {
+    const packageRoot = path.join(workspace, '.rorca', 'skills', 'canon', 'malformed-selector');
+    fs.mkdirSync(packageRoot, { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, 'SKILL.md'), packageMarkdown(
+      'malformed-selector',
+      'Must fail closed.',
+      ['metadata:', '  rorca:', selectorLine].join('\n'),
+    ));
+
+    const registry = new SkillRegistry().discoverFilesystem(workspace);
+    expect(registry.getSkill('malformed-selector')).toBeUndefined();
+    expect(registry.getWarnings()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'invalid-metadata', skillName: 'malformed-selector' }),
+    ]));
+  });
+
+  test('uses locale-independent code-unit ordering for collision winners', () => {
+    const root = path.join(workspace, '.rorca', 'skills');
+    for (const category of ['Z-category', 'a-category']) {
+      const packageRoot = path.join(root, category, 'same');
+      fs.mkdirSync(packageRoot, { recursive: true });
+      fs.writeFileSync(path.join(packageRoot, 'SKILL.md'), packageMarkdown('same', category, '', category));
+    }
+    const registry = new SkillRegistry().discoverFilesystem(workspace);
+    expect(registry.getSkill('same')?.promptText).toBe('Z-category');
+    expect(registry.getSkill('same')?.relativePath).toBe('Z-category/same/SKILL.md');
   });
 
   test('accepts portable flat metadata aliases', () => {

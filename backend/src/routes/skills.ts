@@ -510,7 +510,7 @@ router.get('/:name/content', async (req: Request, res: Response) => {
     if (skill) {
       // Registry content was read from the exact canonical entrypoint under an
       // allowed root. Never reconstruct or re-follow a mutable path here.
-      const content = skill.promptText;
+      const content = skill.rawContent ?? skill.promptText;
       const wordCount = content.split(/\s+/).filter(Boolean).length;
       res.json({
         name: skill.metadata.name,

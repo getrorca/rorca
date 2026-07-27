@@ -24,7 +24,7 @@ mkdir -p .rorca/skills/engineering-canon
 cp -R node_modules/@rorca/engineering-canon/skills/. .rorca/skills/engineering-canon/
 ```
 
-Copy the tree; do not use a nested symlink to a directory outside the allowed skill root. Rorca rejects nested symlinks and resolved paths that escape `.rorca/skills` or `.claude/skills`. An operator can repeat the copy during package upgrades.
+Copy the tree; do not symlink `.rorca/skills`, `.claude/skills`, or a nested package to another directory. Rorca rejects symbolic-link roots, nested symlinks, and resolved paths that escape the canonical allowed root. An operator can repeat the copy during package upgrades.
 
 Rorca discovers recursively nested `SKILL.md` files. It does **not** register other package Markdown, references, assets, or scripts as skills. At execution, only the matched entrypoint guidance is injected. The package root is included so a capable agent can open a referenced file on demand. Merely installing or discovering a script never executes it.
 
@@ -54,7 +54,9 @@ Selector rules are deterministic:
 - story fields and `phase:*`, `artifact:*`, and `risk:*` tags provide explicit context;
 - normal implementation matching defaults to `implementation_review`; QA/journey matching defaults to `validation_review`;
 - an LLM may rerank only the eligible names shown for that story;
-- unknown, malformed, disabled, or ineligible names are stripped after ranking.
+- unknown, malformed, disabled, or ineligible names are stripped after ranking;
+- malformed selector values reject the entrypoint instead of broadening it into an unconstrained skill;
+- matching and execution share the same phase/artifact/risk fields and tag interpretation.
 
 `priority: required` reserves injection budget **only after the skill was selected**. It does not auto-select guidance or create a policy gate. Rorca preserves arbitrary metadata for portability but ignores enforcement/governance claims; application-owned governance remains authoritative.
 
@@ -76,11 +78,11 @@ Resolution is deterministic:
 
 The winner is used and every shadowed duplicate produces a warning naming the winner. Skill names remain the stable spec/API reference; execution resolves that name back through the registry identity and exact canonical entrypoint rather than constructing a filename.
 
-Claude duplicate suppression recognizes both `.claude/skills/<name>.md` and `.claude/skills/<name>/SKILL.md`. Pi receives exact matched entrypoints through its existing repeatable `--skill` option. OpenCode and Codex retain their existing Rorca prompt/native-context behavior; Rorca does not invent unsupported CLI flags.
+Claude native discovery recognizes both `.claude/skills/<name>.md` and `.claude/skills/<name>/SKILL.md`. Inline injection is suppressed only when the deterministic winner itself is Claude-native; a differing lower-precedence Claude candidate never discards the Rorca winner. Pi receives exact matched entrypoints through its existing repeatable `--skill` option. OpenCode and Codex retain their existing Rorca prompt/native-context behavior; Rorca does not invent unsupported CLI flags.
 
 ## Safe degradation
 
 - Entry points larger than 256 KiB, malformed packages, empty guidance, unreadable files, nested symlinks, and path escapes are skipped with diagnostics.
 - Discovery is depth/entry bounded.
-- Prompt budgeting skips an item that does not fit and continues to later smaller guidance; omissions are logged and included in prompt loading notes.
+- Prompt budgeting includes headers, exact entrypoint/package provenance, progressive-disclosure instructions, and bounded omission notes—not only the guidance body. It skips an item that does not fit, continues to later smaller guidance, logs every omission, and keeps the complete injected section within budget.
 - Removing a package skill through the general skills API removes only validated entrypoints. Package support files require explicit operator cleanup.
