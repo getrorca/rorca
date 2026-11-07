@@ -21,6 +21,10 @@ dist
 default-personas/
 go-to-market/
 MEMORY.md
+# Exception: the tracked test fixture under test/fixtures/ is required by
+# backend/src/routes/__tests__/context-pipeline-e2e.test.ts. Without this
+# negation a fresh clone silently loses it and those tests fail.
+!test/fixtures/**/.rorca/MEMORY.md
 
 # Local agent tooling state and scratch trees — never published.
 # Untracked (files kept on disk) as part of open-source publication hygiene.
