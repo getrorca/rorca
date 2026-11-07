@@ -10,6 +10,13 @@ services:
       POSTGRES_DB: ${RORCA_POSTGRES_DATABASE:-rorca}
     volumes:
       - rorca_pgdata:/var/lib/postgresql/data
+    # Publish on loopback so a backend running on the host (`npm run dev`) can
+    # reach the bundled database. Without this the container is only reachable
+    # from other compose services, which silently breaks the documented
+    # "db:up then dev" workflow. Override the port with RORCA_DOCKER_PORT when
+    # something else already owns 5432.
+    ports:
+      - "127.0.0.1:${RORCA_DOCKER_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
