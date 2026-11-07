@@ -3,6 +3,14 @@ name: Public API Contract
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -26,7 +34,25 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgres://rorca:rorca@127.0.0.1:5432/rorca
+      # Ephemeral runner only: these throwaway principals are created on the
+      # service container and discarded with it. No repository secret is needed,
+      # so pull requests from forks run the same check.
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: '5432'
+      POSTGRES_DB: rorca
+      POSTGRES_BOOTSTRAP_USER: rorca
+      POSTGRES_BOOTSTRAP_PASSWORD: rorca
+      RORCA_MIGRATION_DATABASE_USER: rorca_migrator
+      RORCA_MIGRATION_DATABASE_PASSWORD: ci_migrator_pw
+      RORCA_RUNTIME_DATABASE_USER: rorca_runtime
+      RORCA_RUNTIME_DATABASE_PASSWORD: ci_runtime_pw
+      RORCA_CANONICAL_WRITER_DATABASE_USER: rorca_canonical_writer
+      RORCA_CANONICAL_WRITER_DATABASE_PASSWORD: ci_writer_pw
+      DATABASE_URL: postgres://rorca_runtime:ci_runtime_pw@127.0.0.1:5432/rorca
+      RORCA_RUNTIME_DATABASE_URL: postgres://rorca_runtime:ci_runtime_pw@127.0.0.1:5432/rorca
+      RORCA_MIGRATION_DATABASE_URL: postgres://rorca_migrator:ci_migrator_pw@127.0.0.1:5432/rorca
+      RORCA_CANONICAL_WRITER_DATABASE_URL: postgres://rorca_canonical_writer:ci_writer_pw@127.0.0.1:5432/rorca
+      RORCA_DB_MODE: byop
       RORCA_DISABLE_BACKGROUND_RUNTIME: "true"
       RORCA_SERVE_MCP: "false"
       GITHUB_PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
@@ -48,8 +74,28 @@ jobs:
       - run: cd backend && npm ci
       - run: npm run build
       - run: git fetch origin "${{ github.base_ref }}" --depth=1
+
+      # The startup readiness barrier refuses to run without a distinct,
+      # existing, non-privileged runtime principal. Provision the
+      # split-principal roles exactly as a self-hoster would.
+      - name: Provision split-principal roles
+        run: bash docker/postgres/bootstrap-roles.sh
+
       - name: Start backend
         run: npm run dev:server:contract > /tmp/rorca-contract-server.log 2>&1 &
+
+      - name: Wait for backend readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3030/api/health > /tmp/rorca-health.json 2>/dev/null; then
+              cat /tmp/rorca-health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'backend did not become healthy within 120s'
+          exit 1
+
       - run: npm run check:contract
         env:
           RORCA_CONTRACT_BASE_URL: http://127.0.0.1:3030

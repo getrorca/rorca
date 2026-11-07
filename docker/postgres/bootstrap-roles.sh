@@ -72,6 +72,28 @@ JOIN pg_roles member ON member.oid=memberships.member
 WHERE granted.rolname IN (:'migration_user',:'runtime_user',:'writer_user','authenticated','anon')
   AND member.rolname IN (:'migration_user',:'runtime_user',:'writer_user','authenticated','anon') \gexec
 
+-- The canonical migrations require pgvector, and the migration owner is
+-- deliberately a non-superuser so it cannot install extensions itself. Create
+-- the extensions here while the offline bootstrap principal is still available;
+-- otherwise first-run migrations die with
+-- 'permission denied to create extension "vector"'.
+SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name='vector') AS vector_available \gset
+\if :vector_available
+CREATE EXTENSION IF NOT EXISTS vector;
+SELECT format('GRANT USAGE ON SCHEMA %I TO %I', namespace.nspname, :'migration_user')
+FROM pg_extension extension
+JOIN pg_namespace namespace ON namespace.oid=extension.extnamespace
+WHERE extension.extname='vector' \gexec
+\endif
+SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name='pgcrypto') AS pgcrypto_available \gset
+\if :pgcrypto_available
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+SELECT format('GRANT USAGE ON SCHEMA %I TO %I', namespace.nspname, :'migration_user')
+FROM pg_extension extension
+JOIN pg_namespace namespace ON namespace.oid=extension.extnamespace
+WHERE extension.extname='pgcrypto' \gexec
+\endif
+
 -- Existing volumes do not rerun docker-entrypoint initialization. Install AGE
 -- here while the offline bootstrap principal is still available so attaching a
 -- recovered volume to the AGE image cannot silently strand local Rorca in Lite.
