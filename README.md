@@ -277,6 +277,12 @@ the backend starts.
   `npm run verify:byop -- --url-file <file>` to prove the target before you rely
   on it. See [Database modes & graph capability](#database-modes--graph-capability).
 
+> **pgvector is required.** The migrations install the `vector` extension and
+> expect it to be available. The bundled Docker image ships it; on a
+> bring-your-own Postgres, enable it once as a superuser
+> (`CREATE EXTENSION vector;`) or `npm run db:migrate` stops with
+> `permission denied to create extension "vector"`.
+
 ### Run the app
 
 ```bash
