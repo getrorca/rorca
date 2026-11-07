@@ -47,6 +47,12 @@ useDefault = true
     '''backend/src/lib/__tests__/context\-safety\.test\.ts''',
     '''backend/src/lib/__tests__/execution\-authority\-redaction\.node\.test\.ts''',
     '''backend/src/lib/__tests__/execution\-engine\-pi\-rpc\.test\.ts''',
+    # Fabricated credentials and idempotency keys asserted by tests. gitleaks'
+    # generic-api-key and stripe rules match their shape, not a real secret.
+    '''backend/src/lib/__tests__/stripe\-credential\-canary\.node\.test\.ts''',
+    '''backend/src/lib/__tests__/run\-activity\-store\.integration\.test\.ts''',
+    '''backend/src/routes/__tests__/delivery\-governance\.test\.ts''',
+    '''backend/src/routes/__tests__/lifecycle\-decisions\.test\.ts''',
     '''backend/src/lib/__tests__/integration\-vault\-app\-secrets\.test\.ts''',
     '''backend/src/lib/__tests__/interactive\-pty\-agent\-adapter\.test\.ts''',
     '''backend/src/lib/__tests__/pre\-staging\-qualification\.test\.ts''',

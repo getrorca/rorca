@@ -183,7 +183,7 @@ Invalid token:
 ```bash
 curl -sS -H 'Origin: http://localhost:3030' \
   -H 'Accept: application/json, text/event-stream' \
-  -H 'Authorization: Bearer forged.invalid.token' \
+  -H 'Authorization: Bearer <redacted-example>' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":5,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1.0"}}}' \
   http://127.0.0.1:3140/mcp
