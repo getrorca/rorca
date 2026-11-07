@@ -1,0 +1,438 @@
+{
+  "schemaVersion": "rorca.wave1-forge-mcp-parity.v1",
+  "bodyLimit": "1mb",
+  "bodyLimitBytes": 1048576,
+  "tools": [
+    {
+      "name": "rorca_specs_generation_context",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "description": "Workspace to build the context bundle for"
+          },
+          "brief": {
+            "type": "string",
+            "description": "Plain-English description of the feature to draft"
+          },
+          "specBrief": {
+            "type": "string",
+            "description": "Alias for brief"
+          },
+          "title": {
+            "type": "string",
+            "description": "Optional spec title/slug seed"
+          },
+          "specName": {
+            "type": "string",
+            "description": "Alias for title"
+          },
+          "domain": {
+            "type": "string"
+          },
+          "diagramTypes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "storyAnnotations": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "templateId": {
+            "type": "string"
+          },
+          "storyCount": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Target number of user stories for the caller-side draft"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model override used for prompt sizing/context metadata"
+          },
+          "agentOverride": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "opencode",
+              "codex",
+              "pi"
+            ]
+          },
+          "storyPrefix": {
+            "type": "string"
+          },
+          "thinkingEnabled": {
+            "type": "boolean"
+          },
+          "thinkingBudget": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "reasoning": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "workspaceId",
+          "brief"
+        ]
+      }
+    },
+    {
+      "name": "rorca_create_spec",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "description": "Human-readable spec title"
+          },
+          "slug": {
+            "type": "string",
+            "description": "Optional explicit slug override; defaults to slugified title"
+          },
+          "brief": {
+            "type": "string",
+            "description": "Optional original brief for provenance/memory synthesis"
+          },
+          "specBrief": {
+            "type": "string",
+            "description": "Alias for brief"
+          },
+          "storyPrefix": {
+            "type": "string",
+            "description": "Prefix used when the backend must assign missing story IDs"
+          },
+          "stories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "description": "Explicit drafted stories (userStories alias is also accepted)"
+          },
+          "userStories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "exportKit": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {},
+            "description": "Optional authored PRD/SDD/PLAN input. If omitted, Rorca deterministically projects a complete kit from the canonical stories."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "Replace an existing pending/approved spec with the same slug after snapshotting it"
+          },
+          "source": {
+            "type": "string",
+            "description": "Provenance tag stored in the spec JSON (defaults to explicit-draft)"
+          },
+          "contextUsed": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "meta": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              "genesis": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "additionalProperties": {},
+            "description": "Optional synthesized context text + metadata captured by a skill-first caller."
+          },
+          "contextSummary": {
+            "type": "object",
+            "properties": {
+              "genesis": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "additionalProperties": {},
+            "description": "Optional canonical context summary used by the Spec Detail Context tab (direction layers, retrieval metrics, token estimates, etc.)."
+          },
+          "postSave": {
+            "type": "string",
+            "description": "Legacy-compatible post-save policy input. New callers should prefer policyPresetId or postSavePolicy and provide only one of these policy fields."
+          },
+          "policyPresetId": {
+            "type": "string",
+            "enum": [
+              "fast_import",
+              "best_effort",
+              "skill_first_strict",
+              "enterprise_governed",
+              "repair_only"
+            ],
+            "description": "Preferred preset-based policy selector for canonical create-spec callers."
+          },
+          "postSavePolicy": {
+            "type": "string",
+            "description": "Preferred canonical alias for postSave when the caller wants an explicit policy object or preset string."
+          },
+          "authoringPreflight": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {},
+            "description": "Accepted deterministic authoring plan, complete preflight draft set/hash, attempt provenance, caller surface, and optional explicit-human confirmation receipt. Omit only for a legacy review draft, which persists as needs_authoring_preflight and cannot become approval-ready."
+          },
+          "genesisSource": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "genesis_package",
+                  "genesis_evidence"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "principalId": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "selectedChunkIds": {
+                "maxItems": 500,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              }
+            },
+            "additionalProperties": false,
+            "description": "Optional verified Genesis provenance to bind at persist. Resolved through the Genesis authority bridge; forged, redacted, or unapproved provenance rejects the whole persist with a typed error and stores no spec_sources row."
+          }
+        },
+        "required": [
+          "workspaceId",
+          "title",
+          "stories"
+        ]
+      }
+    },
+    {
+      "name": "rorca_persist_spec",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "description": "Human-readable spec title"
+          },
+          "slug": {
+            "type": "string",
+            "description": "Optional explicit slug override; defaults to slugified title"
+          },
+          "brief": {
+            "type": "string",
+            "description": "Optional original brief for provenance/memory synthesis"
+          },
+          "specBrief": {
+            "type": "string",
+            "description": "Alias for brief"
+          },
+          "storyPrefix": {
+            "type": "string",
+            "description": "Prefix used when the backend must assign missing story IDs"
+          },
+          "stories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "description": "Explicit drafted stories (userStories alias is also accepted)"
+          },
+          "userStories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "exportKit": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {},
+            "description": "Optional authored PRD/SDD/PLAN input. If omitted, Rorca deterministically projects a complete kit from the canonical stories."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "Replace an existing pending/approved spec with the same slug after snapshotting it"
+          },
+          "source": {
+            "type": "string",
+            "description": "Provenance tag stored in the spec JSON (defaults to explicit-draft)"
+          },
+          "contextUsed": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "meta": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              "genesis": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "additionalProperties": {},
+            "description": "Optional synthesized context text + metadata captured by a skill-first caller."
+          },
+          "contextSummary": {
+            "type": "object",
+            "properties": {
+              "genesis": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "additionalProperties": {},
+            "description": "Optional canonical context summary used by the Spec Detail Context tab (direction layers, retrieval metrics, token estimates, etc.)."
+          },
+          "postSave": {
+            "type": "string",
+            "description": "Legacy-compatible post-save policy input. New callers should prefer policyPresetId or postSavePolicy and provide only one of these policy fields."
+          },
+          "policyPresetId": {
+            "type": "string",
+            "enum": [
+              "fast_import",
+              "best_effort",
+              "skill_first_strict",
+              "enterprise_governed",
+              "repair_only"
+            ],
+            "description": "Preferred preset-based policy selector for canonical create-spec callers."
+          },
+          "postSavePolicy": {
+            "type": "string",
+            "description": "Preferred canonical alias for postSave when the caller wants an explicit policy object or preset string."
+          },
+          "authoringPreflight": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {},
+            "description": "Accepted deterministic authoring plan, complete preflight draft set/hash, attempt provenance, caller surface, and optional explicit-human confirmation receipt. Omit only for a legacy review draft, which persists as needs_authoring_preflight and cannot become approval-ready."
+          },
+          "genesisSource": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "genesis_package",
+                  "genesis_evidence"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "principalId": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "selectedChunkIds": {
+                "maxItems": 500,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              }
+            },
+            "additionalProperties": false,
+            "description": "Optional verified Genesis provenance to bind at persist. Resolved through the Genesis authority bridge; forged, redacted, or unapproved provenance rejects the whole persist with a typed error and stores no spec_sources row."
+          }
+        },
+        "required": [
+          "workspaceId",
+          "title",
+          "stories"
+        ]
+      }
+    }
+  ],
+  "noAction": {
+    "malformedCreateForwardedCalls": 0,
+    "oversizedStatus": 413
+  }
+}

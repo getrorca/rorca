@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "bounty.presentation.v1",
+  "client": "hermes",
+  "roles": ["read", "preview", "present", "exact-human-relay"],
+  "restContractEndpoint": "/api/contracts/bounty-presentation",
+  "mcpTool": "rorca_contracts_bounty_presentation",
+  "piSchemaMode": "mcp-exact-schema-clone",
+  "statePresentation": {
+    "missionId": "11111111-1111-4111-8111-111111111111",
+    "state": "held",
+    "epoch": 4,
+    "workTotal": 3,
+    "workActive": 0
+  },
+  "blockers": [
+    {
+      "reasonCode": "BOUNTY_FEATURE_DISABLED",
+      "message": "Bounty effects are disabled by operator policy"
+    }
+  ],
+  "approvalTarget": {
+    "version": "bounty.approval.v1",
+    "action": "mission.launch",
+    "targetHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expiresAt": "2026-08-03T20:00:00.000Z"
+  },
+  "relayedHumanEvent": {
+    "schemaVersion": "provider-human-event.v1",
+    "issuerId": "hermes-slack",
+    "keyId": "ed25519-1",
+    "provider": "slack",
+    "providerTenantId": "T-RORCA",
+    "actorId": "U-HUMAN-APPROVER",
+    "conversationId": "C-BOUNTY",
+    "threadId": "THREAD-1",
+    "messageId": "MESSAGE-1",
+    "occurredAt": "2026-08-03T19:55:00.000Z",
+    "normalizedCommandHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ingressIdempotencyKey": "hermes-human-message-1",
+    "signature": "base64url-ed25519-signature-is-relayed-without-rewriting"
+  },
+  "controllerReceipt": {
+    "receiptId": "22222222-2222-4222-8222-222222222222",
+    "missionId": "11111111-1111-4111-8111-111111111111",
+    "state": "active",
+    "epoch": 5,
+    "targetEffectsSent": false,
+    "replayed": false
+  },
+  "directAccess": [],
+  "forbiddenCapabilities": [
+    "database",
+    "queue",
+    "target-adapter",
+    "credential",
+    "generic-url",
+    "browser-command",
+    "broker-request",
+    "raw-credential",
+    "callback",
+    "local-command",
+    "schedule",
+    "submission"
+  ]
+}

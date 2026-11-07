@@ -1,0 +1,17 @@
+=== identity ===
+rorca_w2final202607291945_test|w2final202607291945owner|16.13 (Homebrew)|t|f|f|f|f|f
+=== extensions ===
+age:1.5.0
+pgcrypto:1.3
+plpgsql:1.0
+vector:0.8.0
+=== migrations/readiness ===
+252|20260729134000
+1.0.0|sha256:b06bd5bdd4d999879d14a548b29c91ddd09cc702c280d6fa651cccc0baeeddb2|20260729134000|ready
+=== catalog ===
+14
+41
+58
+0
+=== governed test rows ===
+39|3|1|2

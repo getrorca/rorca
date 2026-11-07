@@ -1,0 +1,14 @@
+{"type":"node","path":"src/index.ts","role":"entrypoint","language":"typescript","contentHash":"a1b2c3d4"}
+{"type":"node","path":"src/lib/apiFetch.ts","role":"source","language":"typescript","contentHash":"e5f6g7h8"}
+{"type":"node","path":"src/lib/errors.ts","role":"source","language":"typescript","contentHash":"i9j0k1l2"}
+{"type":"node","path":"src/components/Shell.tsx","role":"source","language":"typescript","contentHash":"m3n4o5p6"}
+{"type":"node","path":"src/components/Sidebar.tsx","role":"source","language":"typescript","contentHash":"q7r8s9t0"}
+{"type":"node","path":"src/styles/tokens.css","role":"source","language":"css","contentHash":"u1v2w3x4"}
+{"type":"node","path":"vite.config.ts","role":"config","language":"typescript","contentHash":"y5z6a7b8"}
+{"type":"edge","from":"src/index.ts","to":"src/lib/apiFetch.ts","relation":"imports","weight":1}
+{"type":"edge","from":"src/index.ts","to":"src/components/Shell.tsx","relation":"imports","weight":1}
+{"type":"edge","from":"src/index.ts","to":"src/components/Sidebar.tsx","relation":"imports","weight":1}
+{"type":"edge","from":"src/components/Shell.tsx","to":"src/lib/apiFetch.ts","relation":"imports","weight":1}
+{"type":"edge","from":"src/components/Sidebar.tsx","to":"src/lib/errors.ts","relation":"imports","weight":1}
+{"type":"edge","from":"src/components/Shell.tsx","to":"src/styles/tokens.css","relation":"imports","weight":1}
+{"type":"edge","from":"src/lib/errors.ts","to":"src/lib/apiFetch.ts","relation":"imports","weight":1}

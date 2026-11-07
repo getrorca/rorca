@@ -1,0 +1,248 @@
+{
+  "schemaVersion": "rorca.ssdlc-contract-registry-receipt.v1",
+  "registryVersion": "1",
+  "contractCount": 14,
+  "assertionCount": 27,
+  "contracts": [
+    {
+      "contract": "SourceBundleV1",
+      "version": "rorca.source-bundle.v1",
+      "provider": "HMG-001",
+      "artifactPath": "backend/src/lib/source-contracts.ts#SourceBundleV1Schema",
+      "consumers": [
+        "HMG adapters/compiler",
+        "spec persistence",
+        "AAV assurance compiler"
+      ]
+    },
+    {
+      "contract": "IntentEnvelopeV1",
+      "version": "rorca.intent-envelope.v1",
+      "provider": "HMG-001",
+      "artifactPath": "backend/src/lib/source-contracts.ts#IntentEnvelopeV1Schema",
+      "consumers": [
+        "Hermes intake",
+        "mission draft bridge"
+      ]
+    },
+    {
+      "contract": "EntityRefV1",
+      "version": "rorca.entity-ref.v1",
+      "provider": "Mission contracts",
+      "artifactPath": "backend/src/lib/mission-contracts.ts#EntityRefV1Schema",
+      "consumers": [
+        "all SSDLC participants"
+      ]
+    },
+    {
+      "contract": "RevisionRefV1",
+      "version": "rorca.revision-ref.v1",
+      "provider": "Mission contracts",
+      "artifactPath": "backend/src/lib/mission-contracts.ts#RevisionRefV1Schema",
+      "consumers": [
+        "all SSDLC participants"
+      ]
+    },
+    {
+      "contract": "ControlRecord",
+      "version": "rorca.ssdlc-control-record.v1",
+      "provider": "US-001",
+      "artifactPath": "backend/src/ssdlc/schema/control-schema.json",
+      "consumers": [
+        "US-003 resolver",
+        "US-004 gate compiler",
+        "AAV compiler/kernel"
+      ]
+    },
+    {
+      "contract": "controls.json",
+      "version": "1",
+      "provider": "US-008",
+      "artifactPath": "backend/src/ssdlc/catalog/controls.json",
+      "consumers": [
+        "AAV control lookup",
+        "assurance profile compiler"
+      ]
+    },
+    {
+      "contract": "StageProjection",
+      "version": "rorca.stage-projection.v1",
+      "provider": "US-004",
+      "artifactPath": "backend/src/ssdlc/gates/gate-compiler.ts#compileGates",
+      "consumers": [
+        "US-005 evaluator",
+        "AAV execution",
+        "lifecycle projections"
+      ]
+    },
+    {
+      "contract": "AssuranceProfile",
+      "version": "rorca.assurance-profile.v1",
+      "provider": "AAV-001/004/005",
+      "artifactPath": "backend/src/ssdlc/assurance-profile.ts#AssuranceProfileV1Schema",
+      "consumers": [
+        "AAV-002/006",
+        "lifecycle execution"
+      ]
+    },
+    {
+      "contract": "LifecycleEvidence",
+      "version": "rorca.lifecycle-evidence.v1",
+      "provider": "AAV-006 lifecycle adapter",
+      "artifactPath": "backend/src/lib/ssdlc-evidence.ts#createCanonicalEvidence",
+      "consumers": [
+        "AAV assurance kernel/evidence adapter",
+        "US-005 evaluator"
+      ]
+    },
+    {
+      "contract": "HermesEvidence",
+      "version": "hermes.evidence.v1",
+      "provider": "Hermes evidence ingress",
+      "artifactPath": "backend/src/lib/ssdlc-evidence.ts#parseHermesEvidenceEnvelope",
+      "consumers": [
+        "AAV evidence adapter",
+        "US-005 evaluator"
+      ]
+    },
+    {
+      "contract": "OrchestrationEvent",
+      "version": "rorca.orchestration-event.v1",
+      "provider": "AAV-007",
+      "artifactPath": "backend/src/lib/omp-orchestration-events.ts#OrchestrationEventV1Schema",
+      "consumers": [
+        "AAV Run View",
+        "AAV-011 subscription"
+      ]
+    },
+    {
+      "contract": "GatewayEvent",
+      "version": "rorca.gateway-event.v1",
+      "provider": "HMG-010",
+      "artifactPath": "backend/src/lib/gateway-events.ts#GatewayEventV1Schema",
+      "consumers": [
+        "Hermes supervisor",
+        "AAV-011 subscription"
+      ]
+    },
+    {
+      "contract": "StructuredFinding",
+      "version": "rorca.structured-finding.v1",
+      "provider": "US-006",
+      "artifactPath": "backend/src/ssdlc/skills/findings.ts#StructuredFindingSchema",
+      "consumers": [
+        "AAV phase-review agents"
+      ]
+    },
+    {
+      "contract": "LearnCandidate",
+      "version": "rorca.learn-candidate.v1",
+      "provider": "US-007",
+      "artifactPath": "backend/src/ssdlc/learn/learn-loop.ts#consumeProductionOutcome",
+      "consumers": [
+        "AAV-022 adapter"
+      ]
+    }
+  ],
+  "digest": "sha256:242e37d5c2dd784bb948f8e4dae5f22a73f9d35ad3722c74028556e0d4948160",
+  "qualifications": {
+    "executorRecoveryMatrix": {
+      "schemaVersion": "rorca.executor-recovery-matrix.v1",
+      "storyId": "INT-003",
+      "registryReceipt": {
+        "storyId": "INT-001",
+        "digest": "sha256:242e37d5c2dd784bb948f8e4dae5f22a73f9d35ad3722c74028556e0d4948160"
+      },
+      "run": {
+        "schemaVersion": "rorca.entity-ref.v1",
+        "workspaceId": "workspace_int003",
+        "kind": "run",
+        "id": "20260316000634",
+        "revision": {
+          "kind": "artifact_digest",
+          "value": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481"
+        },
+        "label": "INT-003 compatibility run"
+      },
+      "spec": {
+        "schemaVersion": "rorca.entity-ref.v1",
+        "workspaceId": "workspace_int003",
+        "kind": "spec",
+        "id": "source-verified-hermes-rorca-omp-ssdlc-delivery-program",
+        "revision": {
+          "kind": "artifact_digest",
+          "value": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481"
+        },
+        "label": "Source-Verified Hermes Rorca OMP SSDLC Delivery Program"
+      },
+      "revision": {
+        "kind": "artifact_digest",
+        "value": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481"
+      },
+      "matrixRows": [
+        "omp-sequential",
+        "omp-wave-parallel"
+      ],
+      "executorAgnosticIdentity": {
+        "manifestHash": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481",
+        "resultIdentity": "story-result:20260316000634:INT-003:1",
+        "walReleaseIntentHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "heterogeneousWave": [
+        {
+          "storyId": "INT-003-OMP",
+          "executor": "omp",
+          "worktreeId": "worktree:int003:omp"
+        },
+        {
+          "storyId": "INT-003-PI",
+          "executor": "pi",
+          "worktreeId": "worktree:int003:pi"
+        },
+        {
+          "storyId": "INT-003-CLAUDE",
+          "executor": "claude",
+          "worktreeId": "worktree:int003:claude"
+        }
+      ],
+      "piFallback": {
+        "qualification": "MIG-003",
+        "originalExecutor": "pi",
+        "retryExecutor": "pi"
+      },
+      "providerFallbackEvidence": {
+        "schemaVersion": "rorca.provider-fallback-evidence.v1",
+        "policyName": "int-003-qualified-alternates",
+        "executor": "omp",
+        "originalReason": "usage_limit",
+        "originalMessage": "qualified primary usage limit",
+        "selectedModel": "openai/alternate",
+        "priorModel": "anthropic/primary",
+        "alternateOrdinal": 1,
+        "attempt": {
+          "runId": "20260316000634",
+          "storyId": "INT-003",
+          "attemptId": "attempt:20260316000634:1",
+          "generation": 1
+        },
+        "fallbackAttemptId": "attempt:20260316000634:1:provider-fallback:1",
+        "recordedAt": "2026-03-16T00:06:34.000Z"
+      },
+      "recovery": [
+        {
+          "executor": "omp",
+          "eventCount": 2,
+          "terminalEventCount": 1,
+          "closed": true
+        },
+        {
+          "executor": "pi",
+          "eventCount": 2,
+          "terminalEventCount": 1,
+          "closed": true
+        }
+      ],
+      "digest": "sha256:a7ef837ed10794f82fffb8aaebbf33c71956e2cd906abfd41e96ecdf4341bd20"
+    }
+  }
+}

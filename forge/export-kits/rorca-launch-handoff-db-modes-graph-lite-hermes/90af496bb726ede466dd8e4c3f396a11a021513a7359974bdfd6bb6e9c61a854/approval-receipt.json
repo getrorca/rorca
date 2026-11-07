@@ -1,0 +1,8 @@
+{
+  "actorId": "rorca-legacy-approved-spec-migration",
+  "approvalReceiptId": null,
+  "manifestHash": "sha256:90af496bb726ede466dd8e4c3f396a11a021513a7359974bdfd6bb6e9c61a854",
+  "schemaVersion": "rorca.export-kit-seal.v1",
+  "sealHash": "sha256:aa6f3660352e6ff643937f217392ee2fcc2c6dcd5ee3fd27a2a92ac4a4c03a1d",
+  "specMaterialHash": "sha256:bc9f67f035872bbd34832550a21f9df372d77267227391a2d950bd38deb59cd6"
+}

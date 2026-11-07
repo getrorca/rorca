@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "rorca.wave2-final-validation.v1",
+  "implementationSourceSha": "ffb7644315b3fb5908d659be0c998ef7478ea2a5",
+  "authority": {
+    "storyPassesChanged": false,
+    "approvalReady": false,
+    "executionAuthority": "none",
+    "providerOperation": false,
+    "protectedRunAccess": false,
+    "ror24Dispatch": false,
+    "merge": false,
+    "deployment": false,
+    "memoryAuthority": false
+  },
+  "contracts": {
+    "version": "1.0.0",
+    "sourceDigest": "sha256:b06bd5bdd4d999879d14a548b29c91ddd09cc702c280d6fa651cccc0baeeddb2",
+    "generatedArtifactsStable": true,
+    "swaggerExactParity": true,
+    "tierLintPassed": true,
+    "mutationRoutesMcpExcluded": true
+  },
+  "postgresql": {
+    "database": "rorca_w2final202607291945_test",
+    "owner": "w2final202607291945owner",
+    "postgres": "16.13",
+    "vector": "0.8.0",
+    "age": "1.5.0",
+    "pgcrypto": "1.3",
+    "ownerSuperuser": false,
+    "ownerCreateDb": false,
+    "ownerCreateRole": false,
+    "ownerReplication": false,
+    "ownerBypassRls": false,
+    "migrationCount": 252,
+    "migrationHead": "20260729134000",
+    "readiness": "ready",
+    "rlsTableCount": 41,
+    "wave2TriggerCount": 58,
+    "pgbossSchemaCount": 0,
+    "dbIntegration": { "suites": 1, "tests": 10, "passed": 10, "failed": 0 },
+    "unitContract": { "suites": 6, "tests": 74, "passed": 74, "failed": 0 }
+  },
+  "affectedValidation": {
+    "rootTypecheck": "passed",
+    "rootBuild": "passed",
+    "backendLint": "passed_with_43_preexisting_warnings_and_0_errors",
+    "frontendLint": "passed_with_56_preexisting_warnings_and_0_errors",
+    "frontendVitestRerun": { "filesPassed": 91, "testsPassed": 1046, "failed": 0, "logSha256": "f8d68a92e7a320ebe984567609d1546984297c947acf599f8626f53e81dad706" },
+    "piExtension": { "filesPassed": 19, "testsPassed": 151, "failed": 0 },
+    "licenseHeaders": "passed_1448_files",
+    "licenseBoundaries": "single_apache_2_skipped_by_policy",
+    "gitleaksImplementationRange": { "range": "dab2a136a..ffb764431", "findings": 0, "logSha256": "f7d68dd73b5e6655a8584c8978921bf2d87b23d43c00eb10ac28014080a9dc1f" },
+    "gitDiffCheck": "passed"
+  },
+  "nonBlockingBaselineDisclosure": {
+    "backendMonolithicSuite": {
+      "suitesPassed": 431,
+      "suitesFailed": 39,
+      "testsPassed": 5081,
+      "testsFailed": 190,
+      "testsSkipped": 6,
+      "logSha256": "e78af4423f30ed5600bb54fc72a2dfac33f139ed098c4f220009496f0c18f9b8",
+      "classification": "not_a_wave2_pass_claim",
+      "notes": "The repository-wide shared-database lane is not hermetic under this ad-hoc external certification topology: failures include missing/grant-incomplete anon/authenticated roles, direct-pool search_path assumptions, cross-suite retained rows, and unrelated existing execution-environment/release fixture state. Wave 2 DB and unit/contract lanes passed on a fresh dedicated owner. This disclosure is retained for independent review rather than hidden or relabeled."
+    },
+    "fullHistoryGitleaks": {
+      "findings": 4,
+      "classification": "preexisting_outside_implementation_range",
+      "locations": [".env.local at historical commit 99018930193e", "src/panels/settings/AccountSettingsTab.tsx at three historical commits"],
+      "implementationRangeFindings": 0
+    }
+  },
+  "cleanup": {
+    "serviceAlive": false,
+    "listenerCount": 0,
+    "stateExists": false,
+    "socketExists": false,
+    "credentialMaterialExists": false,
+    "prunePerformed": false
+  }
+}

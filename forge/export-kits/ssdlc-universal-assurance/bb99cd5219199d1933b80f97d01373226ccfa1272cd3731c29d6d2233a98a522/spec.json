@@ -1,0 +1,212 @@
+{
+  "id": "ssdlc-universal-assurance",
+  "mermaidDiagram": "graph LR\n  US-001[\"US-001\"]\n  US-002[\"US-002\"]\n  US-003[\"US-003\"]\n  US-004[\"US-004\"]\n  US-005[\"US-005\"]\n  US-006[\"US-006\"]\n  US-007[\"US-007\"]\n  US-008[\"US-008\"]\n  US-009[\"US-009\"]\n  US-010[\"US-010\"]\n  US-011[\"US-011\"]\n  US-012[\"US-012\"]\n  US-001 --> US-002\n  US-001 --> US-003\n  US-003 --> US-004\n  US-001 --> US-005\n  US-005 --> US-006\n  US-007 --> US-008\n  US-008 --> US-010\n  US-010 --> US-011\n  US-002 --> US-012\n  US-004 --> US-012\n  US-006 --> US-012\n  US-008 --> US-012\n  US-009 --> US-012\n  US-010 --> US-012\n  US-011 --> US-012",
+  "slug": "ssdlc-universal-assurance",
+  "source": "explicit-draft",
+  "title": "Universal Assurance: 7-Stage SSDLC, Genesis Binding, and Phase Advisor",
+  "userStories": [
+    {
+      "acceptanceCriteria": [
+        "MISSION_STAGES exports exactly ['planning','requirements','design','development','testing','deployment','maintenance'] in order",
+        "MISSION_STAGE_BY_PHASE maps every one of the 11 phases to a stage with no omissions",
+        "maintenance readiness reports status non-blocking (learn semantics preserved)",
+        "full-interoperability-qualification asserts the 7-stage projection and passes",
+        "control-schema, gate-compiler, assurance-profile, full-interop, and mission contract suites all green"
+      ],
+      "complexity": 3,
+      "dependsOn": [],
+      "description": "Replace the six Mission stage ids (intent/plan/build/verify/release/learn) with the seven conventional SDLC stages across the SSDLC contracts. The 11 canonical phases stay. MISSION_STAGE_BY_PHASE remaps: planning->intake, requirements->requirements, design->architecture, development->implementation, testing->validation+security+qa, deployment->staging+merge+production, maintenance->learn. maintenance stays non-blocking. Touch: backend/src/ssdlc/schema/control-schema.ts, backend/src/ssdlc/gates/gate-compiler.ts, backend/src/ssdlc/assurance-profile.ts, backend/src/ssdlc/full-interoperability-qualification.ts, lib/mission-contracts.ts + shared/contracts (bump read projection revision).",
+      "id": "US-001",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Seven conventional stage projection (backend contracts)"
+    },
+    {
+      "acceptanceCriteria": [
+        "LIFECYCLE_STAGES contains 7 entries in conventional order with correct phaseIds",
+        "Matrix renders the 7 stage headers spanning their phase columns",
+        "Matrix tests updated and green; frontend suite green; tsc clean"
+      ],
+      "complexity": 2,
+      "dependsOn": [
+        "US-001"
+      ],
+      "description": "Update src/types/lifecycle.ts LIFECYCLE_STAGES to the seven conventional stages with display labels (Planning, Requirements analysis, Design, Development, Testing, Deployment, Maintenance) and lifecycleStageOf fallback to maintenance. LifecycleMatrix already renders the stage header row data-driven; verify and update tests in src/panels/__tests__/LifecycleMatrix.test.tsx (header order, 19 columnheaders, 52 rows).",
+      "id": "US-002",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Seven-stage projection in the lifecycle matrix UI"
+    },
+    {
+      "acceptanceCriteria": [
+        "general-sdlc-7 profile exports the 7-stage mapping with a stable content hash",
+        "Compiled plan response includes profile with stages and profileHash",
+        "Changing the profile mapping changes the profileHash and invalidates stale plans",
+        "Existing lifecycle plan tests updated and green"
+      ],
+      "complexity": 3,
+      "dependsOn": [
+        "US-001"
+      ],
+      "description": "Add backend/src/ssdlc/profiles/general-sdlc-7.ts as the single source of the stage projection: profileId, version, stages (id/label/phaseIds), blockingStages, contentHash. Make the plan compiler emit profile {profileId, profileVersion, profileHash, stages} alongside the phases in the compiled plan, and surface it in the lifecycle plan API (GET /api/lifecycle/specs/:specId).",
+      "id": "US-003",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "LifecycleProfileV1 and plan compiler profile emission"
+    },
+    {
+      "acceptanceCriteria": [
+        "Matrix uses plan profile stages when present in the plan response",
+        "Fallback to bundled constant when plan is absent or profile missing",
+        "Matrix tests cover both paths and pass"
+      ],
+      "complexity": 2,
+      "dependsOn": [
+        "US-003"
+      ],
+      "description": "LifecycleMatrix renders stage headers from the compiled plan profile when the plan response carries profile.stages, falling back to the bundled LIFECYCLE_STAGES constant when absent. No stage semantics hardcoded beyond the fallback.",
+      "id": "US-004",
+      "priority": 2,
+      "timeoutMinutes": 240,
+      "title": "API-driven stage rendering in the matrix"
+    },
+    {
+      "acceptanceCriteria": [
+        "Frontmatter with scope/appliesToStages/enforcement parses and persists",
+        "Unknown stage id in appliesToStages rejects the entrypoint with a validation warning",
+        "Catalog prompt lists the new fields",
+        "Baseline pack ships 4 universal skills with general-sdlc-7",
+        "Skill registry tests updated and green"
+      ],
+      "complexity": 3,
+      "dependsOn": [
+        "US-001"
+      ],
+      "description": "Extend skill frontmatter parsing in backend/src/lib/skill-registry.ts with scope (universal|specialist), appliesToStages (array of the 7 stage ids), enforcement (advisory|required). Reject entrypoints with unknown stage ids instead of broadening. Include the new fields in the catalog prompt. Ship the baseline universal pack with general-sdlc-7: evidence-discipline, reversible-changes, no-placeholder-delivery, traceability. Update docs/agent-skill-packages.md.",
+      "id": "US-005",
+      "priority": 2,
+      "timeoutMinutes": 240,
+      "title": "Skill metadata scope/appliesToStages/enforcement and baseline pack"
+    },
+    {
+      "acceptanceCriteria": [
+        "A universal skill matching the run stage is always selected for claude/opencode/codex runs",
+        "Pi/OMP runs receive universal skill text via the direction stack context",
+        "Specialist skills never auto-inject into Pi/OMP without an explicit match",
+        "Skill matcher tests updated and green"
+      ],
+      "complexity": 3,
+      "dependsOn": [
+        "US-005"
+      ],
+      "description": "backend/src/lib/skill-matcher.ts: universal-scope skills are always selected within the token budget (filtered by appliesToStages); specialist skills stay LLM-reranked over the deterministic eligible set. Universal skills must reach Pi and OMP runs through the direction-stack context path (pi-autonomous-runner directionText) since the matched-skills section is skipped for pi/omp. enforcement: required reserves budget only after selection; it never creates a gate.",
+      "id": "US-006",
+      "priority": 2,
+      "timeoutMinutes": 240,
+      "title": "Deterministic universal skill selection with Pi/OMP parity"
+    },
+    {
+      "acceptanceCriteria": [
+        "Bridge resolves a genesis_package projection through resolveGenesisSource with a principal identity",
+        "Restricted chunk content never leaves the adapter (redaction marker only)",
+        "spec_sources migration applies cleanly; rows are immutable after insert",
+        "Genesis source adapter tests green"
+      ],
+      "complexity": 4,
+      "dependsOn": [],
+      "description": "Implement the production GenesisAuthorityBridge (backend/src/lib/source-adapters/genesis.ts interface) wired to the Genesis bridge endpoint, and add a pg-migration for spec_sources (spec_id, source_kind, source_id, package_hash, content_hash, citation_summary, evidence_chunk_ids, citations jsonb, review_status, sensitivity, bound_at, bound_by) with immutable rows. Restricted chunks must stay redacted through resolveGenesisSource.",
+      "id": "US-007",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Production Genesis authority bridge and spec_sources table"
+    },
+    {
+      "acceptanceCriteria": [
+        "Persist with a valid package id stores a verified spec_sources row and returns boundSources",
+        "Forged or unapproved provenance is rejected with a typed error and no row",
+        "Binding endpoint binds idempotently and surfaces in GET spec",
+        "Readiness engineeringCanonCoverage.evidenceProvenance.genesisPackageIds populates from real bindings"
+      ],
+      "complexity": 4,
+      "dependsOn": [
+        "US-007"
+      ],
+      "description": "Extend PersistSpecDraftSchema with optional genesisSource {kind, id, principalId, selectedChunkIds}. On persist, resolve through the bridge, store only verified provenance in spec_sources, and reject forged/redacted/unapproved provenance (no row). GET spec returns boundSources. Add POST /api/specs/:specId/genesis-sources for binding after persist (idempotent). Canon sufficiency request includes bound package ids (genesisPackageIds).",
+      "id": "US-008",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Verified Genesis binding at spec persist and binding API"
+    },
+    {
+      "acceptanceCriteria": [
+        "Completed runs emit a findings record persisted with the run",
+        "Findings surface in memory synthesis (L2/L3/MEMORY.md) on the next run",
+        "No automatic Genesis promotion: findings are capture candidates requiring explicit action",
+        "Run closeout tests green"
+      ],
+      "complexity": 3,
+      "dependsOn": [],
+      "description": "On run completion derive a structured findings record (decisions made, deviations from spec, discovered risks, new conventions) alongside the existing story-result evidence derivation. Findings update workspace L2/L3 context and MEMORY.md through the existing memory synthesis path, and become explicit Genesis capture candidates via the explicit-action adapter only (no silent promotion).",
+      "id": "US-009",
+      "priority": 2,
+      "timeoutMinutes": 240,
+      "title": "Run findings feed-forward (Rorca operational authority)"
+    },
+    {
+      "acceptanceCriteria": [
+        "Readiness response includes coverageByPhase for all 11 phases",
+        "Phase view renders covered/uncovered cells and missing skills with citations",
+        "Degraded coverage path renders 'coverage unavailable' without errors",
+        "Readiness and frontend tests green"
+      ],
+      "complexity": 3,
+      "dependsOn": [
+        "US-008"
+      ],
+      "description": "Spec readiness gains coverageByPhase (phaseId -> covered/uncovered requirement cells, missing skills, nextActions) derived from engineering canon coverage cells. The lifecycle phase drill-down renders the coverage section: what the phase requires, what is covered, what is missing, bound Genesis packages. Absent canon degrades gracefully.",
+      "id": "US-010",
+      "priority": 2,
+      "timeoutMinutes": 240,
+      "title": "Per-phase compiled coverage in the lifecycle UI"
+    },
+    {
+      "acceptanceCriteria": [
+        "Advice endpoint returns cited suggestions for a phase with advisory:true",
+        "Suggestions are never persisted as lifecycle evidence",
+        "Phase view renders the advisory panel with citations and Advisory label",
+        "Endpoint and frontend tests green"
+      ],
+      "complexity": 3,
+      "dependsOn": [
+        "US-010"
+      ],
+      "description": "Add POST /api/lifecycle/specs/:specId/advice accepting {phaseId, storyId?}. Input: spec typed facts + bound Genesis sources + compiled coverage for the phase; output via chatComplete: {suggestions: [{text, cites: [requirementId|controlId|sourceId]}]}. Advisory only: never persisted as evidence, never evaluated by gates, every suggestion cited. UI: advisory 'What's missing' panel in the phase view.",
+      "id": "US-011",
+      "priority": 3,
+      "timeoutMinutes": 240,
+      "title": "Phase advisor endpoint and UI panel"
+    },
+    {
+      "acceptanceCriteria": [
+        "Docs reflect the 7-stage projection, profile model, and verified Genesis binding",
+        "Backend and frontend suites fully green; tsc clean; gitleaks 0 findings",
+        "Final commit pushed to both remotes with Forgejo CI success"
+      ],
+      "complexity": 2,
+      "dependsOn": [
+        "US-002",
+        "US-004",
+        "US-006",
+        "US-008",
+        "US-009",
+        "US-010",
+        "US-011"
+      ],
+      "description": "Update docs/contracts/ssdlc-interoperability.md (seven-stage table, profile, Genesis binding sections), docs/agent-skill-packages.md (scope/stages metadata), AGENTS.md lifecycle references. Full backend + frontend suites, tsc both sides, gitleaks. Push to GitHub and Forgejo; Forgejo CI must be green.",
+      "id": "US-012",
+      "priority": 3,
+      "timeoutMinutes": 240,
+      "title": "Docs, hardening, and CI green"
+    }
+  ]
+}

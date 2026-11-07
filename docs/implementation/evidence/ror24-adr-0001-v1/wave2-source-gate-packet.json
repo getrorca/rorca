@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "rorca.wave2-source-gate-packet.v1",
+  "gateFor": "ROR-23",
+  "ror24AcceptanceEnvelopePath": "docs/implementation/evidence/ror24-adr-0001-v1/acceptance-envelope.json",
+  "wave1": {
+    "repository": "getrorca/rorca",
+    "sourceSha": "38d26ee944f0fd80904e79021100d5023b70f170",
+    "specPath": "forge/specs/pending/wave-1-stabilize-evidence-closeout-and-managed-branch-delivery.json",
+    "specSha256": "caeb0720cd09f4e6a5cd22b078b2d50932b34613262c15631cdf71af9c056920",
+    "canonicalStoryMaterialHash": "sha256:d14c00816c013fe27ca59dc44e7f6f7793abff10604e6bad5aec227e25643c84",
+    "storyCount": 10,
+    "criterionCount": 51,
+    "independentReview": {
+      "path": "/tmp/rorca-wave1-local-rereview3-final.md",
+      "sha256": "577a6d9ab9efe0753b50e031d16bc67b53bad71fc314396e077b2d57849ecd4c",
+      "verdict": "APPROVED_FOR_FINAL_WAVE1_PREFLIGHT",
+      "independentlySupportedCriteria": 49,
+      "retainedExactSourceEvidenceCriteria": 2,
+      "failedCriteria": 0
+    },
+    "providerNeutralProof": {
+      "adapterId": "LocalReviewBundleAdapter",
+      "adapterVersion": "local-review-bundle@1.1.0",
+      "manifestSchema": "rorca.local-review-bundle.v1",
+      "requiresNetwork": false,
+      "requiresCredentials": false,
+      "sourceSha256": "c13d488677a4cb24ce24c83db0cd037395b57a2db3adab43a0fd2fd08f2535c1",
+      "testSha256": "01a0af6e5c8af061e70b1a930837ff08c078903a10a42b2019b28511f2ea472d",
+      "migrationSha256": "621703dcfd32eb57ad789c48b3be375908642099f2cee19ea418bec42deb42c2",
+      "databaseTestSha256": "12c6e1cf2f47aa5fb4cb2e268195124893cad96f43a1dce2bede02c599e9462c",
+      "validationReceipt": {
+        "kind": "retained-exact-source-validation-evidence",
+        "databaseLogSha256": "51421330739737154632496434b0d08b59aabf8c745036b982602cca3516221f",
+        "databaseAttestationSha256": "86975269820ff78c454e6804c1b728343f334ca6a2d5e3130ac05a21c9a3a7ce",
+        "cleanupSha256": "e996128af76a8da415b0ed3bb5a5aeef9ab420006e09f8912d07270d465ed2df",
+        "waveUnitLogSha256": "9c8b92e15f0c2d00a7ce80d97028ae6aa096f6342782c589a055bf2ec9ddb98d"
+      },
+      "mergeAuthority": "none",
+      "deploymentAuthority": "none"
+    },
+    "canonicalCloseoutReceipt": null,
+    "passesChanged": false,
+    "executionAuthority": "none"
+  },
+  "implementation": {
+    "baselineSha": "dab2a136a1d1754ccdaeb15224a60a6e9dedd594",
+    "branch": "feat/wave2-governed-contracts-20260729",
+    "mode": "isolated-source-implementation",
+    "authorized": true,
+    "authoritySource": "exact provider-human ROR-24 acceptance scope plus direct user instruction for this isolated runner",
+    "ror24DispatchAllowed": false,
+    "providerOperationsAllowed": false,
+    "mergeAllowed": false,
+    "deploymentAllowed": false,
+    "readinessOverrideAllowed": false,
+    "passMutationAllowed": false
+  },
+  "protectedIdentities": [
+    "20260316000549",
+    "20260316000550"
+  ]
+}

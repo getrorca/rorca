@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:32b7f2fb021f2336d8a145f2ffe60dee05f3f9f06ce3a180fc79f8e507d291ca",
+      "path": "forge/export-kits/rorca-execution-authority-program/ad0af83b4b52ceeaaf787b3b39e88da37da619e618ff4ebe0643323462017529/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:d4bb331f79c1fd8581f2880d202de1eabfca42678de489096465743b3bdb3195",
+      "path": "forge/export-kits/rorca-execution-authority-program/ad0af83b4b52ceeaaf787b3b39e88da37da619e618ff4ebe0643323462017529/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:5faaab671d68cf76fb2613ce6232af52f1e65be05d2bff0d6774833b9c931eeb",
+      "path": "forge/export-kits/rorca-execution-authority-program/ad0af83b4b52ceeaaf787b3b39e88da37da619e618ff4ebe0643323462017529/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:a7d6bc170d3eb5ea2eda573e9605a93ef70eb1dce7e92a1ad7ad4b8d6c6d91e0",
+      "path": "forge/export-kits/rorca-execution-authority-program/ad0af83b4b52ceeaaf787b3b39e88da37da619e618ff4ebe0643323462017529/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/rorca-execution-authority-program/ad0af83b4b52ceeaaf787b3b39e88da37da619e618ff4ebe0643323462017529",
+  "manifestHash": "sha256:ad0af83b4b52ceeaaf787b3b39e88da37da619e618ff4ebe0643323462017529",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:a7d6bc170d3eb5ea2eda573e9605a93ef70eb1dce7e92a1ad7ad4b8d6c6d91e0"
+}

@@ -1,0 +1,328 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
+ * rorca-config.ts — Typed config loader for .rorca/config.json.
+ *
+ * CIE-003: Canonical config with zod validation. Loads, validates, and caches
+ * the .rorca/config.json from any workspace path. Falls back to defaults if
+ * the file is missing or malformed.
+ *
+ * This is the single source of truth for .rorca/config.json types and loading.
+ * complexity-scorer.ts's loadOrchestrationConfig delegates here for the
+ * orchestration section; context-router.ts (CIE-004) will consume routing.
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { z } from 'zod';
+import { logger } from './logger';
+
+// ─── Zod Schemas ─────────────────────────────────────────────────────────────
+
+const RoutingScopeSchema = z.object({
+  path: z.string(),
+  inject: z.array(z.string()),
+  priority: z.number().int().min(0).max(100).default(50),
+  managed: z.enum(['rorca', 'manual', 'hybrid']).default('rorca'),
+});
+
+const RoutingTagSchema = z.object({
+  tag: z.string(),
+  inject: z.array(z.string()),
+});
+
+const RoutingSchema = z.object({
+  global: z.array(z.string()).default(['CLAUDE.md', 'AGENTS.md']),
+  scopes: z.array(RoutingScopeSchema).default([]),
+  tags: z.array(RoutingTagSchema).default([]),
+  tokenBudget: z.number().int().min(1000).max(200000).default(32000),
+});
+
+const FileRegistryEntrySchema = z.object({
+  path: z.string(),
+  role: z.enum(['context', 'skill', 'memory', 'template', 'governance']),
+  managed: z.enum(['rorca', 'manual', 'hybrid']).default('rorca'),
+});
+
+const MemoryConfigSchema = z.object({
+  ledgerPath: z.string().default('.rorca/memory/MEMORY.md'),
+  maxEntries: z.number().int().min(10).default(500),
+  autoCapture: z.boolean().default(true),
+});
+
+const RetrievalGuardrailsSchema = z.object({
+  version: z.number().int().min(1).default(1),
+  recencyDecayLambda: z.number().min(0).max(1).default(0.0077),
+  dominanceThreshold: z.number().min(0.1).max(1).default(0.4),
+  dominanceTopN: z.number().int().min(2).max(20).default(5),
+  minDiversityFloor: z.number().int().min(1).max(10).default(2),
+  pinnedRecencyFloor: z.number().min(0).max(1).default(1),
+  lowConfidenceClusterPenalty: z.number().min(0).max(1).default(0.18),
+  highConfidenceExempt: z.boolean().default(true),
+});
+
+const RetrievalConfigSchema = z.object({
+  graphScoreWeight: z.number().min(0).max(1).default(0),
+  guardrails: RetrievalGuardrailsSchema.default(() => RetrievalGuardrailsSchema.parse({})),
+});
+
+const ContextSchema = z.object({
+  fileRegistry: z.array(FileRegistryEntrySchema).default([]),
+  memory: MemoryConfigSchema.default(() => MemoryConfigSchema.parse({})),
+  retrieval: RetrievalConfigSchema.default(() => RetrievalConfigSchema.parse({})),
+});
+
+const DirectionLayer = z.enum(['L1', 'L2', 'L3', 'L4', 'L5']);
+
+const TeleologySchema = z.object({
+  specDir: z.string().default('forge/specs'),
+  directionStackLayers: z.array(DirectionLayer).default(['L1', 'L2', 'L3', 'L4', 'L5']),
+  defaultModel: z.string().optional(),
+});
+
+const OrchestrationSchema = z.object({
+  tokenBudgetPerStory: z.number().min(1000).default(50000),
+  fallbackEngine: z.enum(['claude', 'opencode', 'codex', 'pi', 'omp']).nullable().default(null),
+  capabilityMismatch: z.enum(['warn', 'reroute', 'block']).default('warn'),
+});
+
+const AdversarialReviewSchema = z.object({
+  enabled: z.boolean().default(false),
+  reviewTimeoutMin: z.number().int().min(1).max(30).default(5),
+});
+
+const GatesSchema = z.object({
+  typecheck: z.boolean().default(true),
+  e2e: z.boolean().default(true),
+  /** 'blocking' = gate failure fails the story (old behaviour). 'warning' = log and continue. */
+  mode: z.enum(['blocking', 'warning']).default('warning'),
+});
+
+const GitReinsGateSchema = z.object({
+  /** Disabled by default. Observe records evidence; enforce blocks a story on any non-pass. */
+  mode: z.enum(['disabled', 'observe', 'enforce']).default('disabled'),
+  timeoutMs: z.number().int().min(1000).max(15 * 60 * 1000).default(120000),
+  maxEvidenceBytes: z.number().int().min(4096).max(32 * 1024).default(32 * 1024),
+});
+
+const ExecutionSchema = z.object({
+  waveParallelism: z.boolean().default(false),
+  storyTimeoutMin: z.number().int().min(1).default(45),
+  maxRetries: z.number().int().min(0).default(3),
+  autoCommit: z.boolean().default(true),
+  adversarialReview: AdversarialReviewSchema.default(() => AdversarialReviewSchema.parse({})),
+  gates: GatesSchema.default(() => GatesSchema.parse({})),
+  gitreins: GitReinsGateSchema.default(() => GitReinsGateSchema.parse({})),
+});
+
+const PersonasConfigSchema = z.object({
+  /** Persona names that are disabled (not injected by buildPrompt / PersonaRegistry). */
+  disabled: z.array(z.string()).default([]),
+});
+
+const EmbeddingSchema = z.object({
+  provider: z.enum(['auto', 'openai', 'openai-large', 'openrouter', 'voyage', 'google', 'local']).default('auto'),
+  model: z.string().optional(),
+});
+
+const GithubConfigSchema = z.object({
+  prTemplate: z.string().optional(),
+});
+
+/** Optional neutral adapter. Paths are operator configuration, never manifest dependencies. */
+const EngineeringCanonConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  packageRoot: z.string().min(1).optional(),
+  /** Package-root-relative skill directory; path escape is rejected by the adapter. */
+  skillRoot: z.string().min(1).default('skills'),
+  tokenBudget: z.number().int().min(64).max(32000).default(8000),
+  reservedTokens: z.number().int().min(0).max(8000).default(1000),
+}).refine(value => value.reservedTokens < value.tokenBudget, {
+  message: 'reservedTokens must be less than tokenBudget',
+  path: ['reservedTokens'],
+});
+
+export const RorcaConfigSchema = z.object({
+  $schema: z.string().optional(),
+  version: z.number().int().min(1).default(1),
+  routing: RoutingSchema.default(() => RoutingSchema.parse({})),
+  context: ContextSchema.default(() => ContextSchema.parse({})),
+  teleology: TeleologySchema.default(() => TeleologySchema.parse({})),
+  orchestration: OrchestrationSchema.default(() => OrchestrationSchema.parse({})),
+  execution: ExecutionSchema.default(() => ExecutionSchema.parse({})),
+  personas: PersonasConfigSchema.default(() => PersonasConfigSchema.parse({})),
+  embedding: EmbeddingSchema.default(() => EmbeddingSchema.parse({})),
+  github: GithubConfigSchema.default(() => GithubConfigSchema.parse({})),
+  engineeringCanon: EngineeringCanonConfigSchema.default(() => EngineeringCanonConfigSchema.parse({})),
+});
+
+// ─── Exported Types ──────────────────────────────────────────────────────────
+
+export type RorcaConfig = z.infer<typeof RorcaConfigSchema>;
+export type RoutingConfig = z.infer<typeof RoutingSchema>;
+export type RoutingScope = z.infer<typeof RoutingScopeSchema>;
+export type RoutingTag = z.infer<typeof RoutingTagSchema>;
+export type ContextConfig = z.infer<typeof ContextSchema>;
+export type FileRegistryEntry = z.infer<typeof FileRegistryEntrySchema>;
+export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
+export type RetrievalGuardrailsConfig = z.infer<typeof RetrievalGuardrailsSchema>;
+export type RetrievalConfig = z.infer<typeof RetrievalConfigSchema>;
+export type TeleologyConfig = z.infer<typeof TeleologySchema>;
+export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
+export type ExecutionConfig = z.infer<typeof ExecutionSchema>;
+export type GatesConfig = z.infer<typeof GatesSchema>;
+export type GitReinsGateConfig = z.infer<typeof GitReinsGateSchema>;
+export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
+export type PersonasConfig = z.infer<typeof PersonasConfigSchema>;
+export type EmbeddingConfig = z.infer<typeof EmbeddingSchema>;
+export type GithubConfig = z.infer<typeof GithubConfigSchema>;
+export type EngineeringCanonConfig = z.infer<typeof EngineeringCanonConfigSchema>;
+
+// ─── Config Loading ──────────────────────────────────────────────────────────
+
+/** Cache by workspace path to avoid repeated disk reads + parse. */
+let cachedConfig: RorcaConfig | null = null;
+let cachedConfigPath: string | null = null;
+let cachedMtime: number = 0;
+
+/**
+ * Resolve the .rorca/config.json path for a workspace.
+ */
+export function configPath(workspacePath: string): string {
+  return path.join(workspacePath, '.rorca', 'config.json');
+}
+
+/**
+ * Load and validate .rorca/config.json from a workspace directory.
+ *
+ * - Returns typed, validated config with defaults filled in.
+ * - Falls back to full defaults if file is missing.
+ * - Throws on invalid JSON syntax (parse error).
+ * - Logs warnings on schema violations but returns defaults for invalid sections.
+ * - Caches by path + mtime — re-reads only if file changed.
+ */
+export function parseRorcaConfigContent(content: string): RorcaConfig {
+  const parsed: unknown = JSON.parse(content);
+  try {
+    return RorcaConfigSchema.parse(parsed);
+  } catch (error) {
+    if (error instanceof z.ZodError) return RorcaConfigSchema.parse({});
+    throw error;
+  }
+}
+
+export function loadRorcaConfig(workspacePath: string): RorcaConfig {
+  const cfgPath = configPath(workspacePath);
+
+  // Check cache validity
+  if (cachedConfig && cachedConfigPath === cfgPath) {
+    try {
+      const stat = fs.statSync(cfgPath);
+      if (stat.mtimeMs === cachedMtime) {
+        return cachedConfig;
+      }
+    } catch {
+      // File was deleted — return defaults
+    }
+  }
+
+  // No file → full defaults
+  if (!fs.existsSync(cfgPath)) {
+    const defaults = RorcaConfigSchema.parse({});
+    // Don't cache missing file — it may appear later
+    return defaults;
+  }
+
+  try {
+    const raw = fs.readFileSync(cfgPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const result = RorcaConfigSchema.parse(parsed);
+
+    // Cache
+    cachedConfig = result;
+    cachedConfigPath = cfgPath;
+    try {
+      cachedMtime = fs.statSync(cfgPath).mtimeMs;
+    } catch {
+      cachedMtime = 0;
+    }
+
+    return result;
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      logger.error(`[rorca-config] Invalid JSON in ${cfgPath}: ${err.message}`);
+      throw err; // Don't silently swallow parse errors
+    }
+    if (err instanceof z.ZodError) {
+      logger.warn(`[rorca-config] Schema validation warnings for ${cfgPath}:`);
+      for (const issue of err.issues) {
+        logger.warn(`  - ${issue.path.join('.')}: ${issue.message}`);
+      }
+    }
+    // Return defaults on validation errors
+    return RorcaConfigSchema.parse({});
+  }
+}
+
+/**
+ * Invalidate cached config (e.g. after writing a new config file).
+ */
+export function invalidateConfigCache(): void {
+  cachedConfig = null;
+  cachedConfigPath = null;
+  cachedMtime = 0;
+}
+
+/**
+ * Check if a .rorca/ directory exists for a workspace.
+ */
+export function hasRorcaDir(workspacePath: string): boolean {
+  return fs.existsSync(path.join(workspacePath, '.rorca'));
+}
+
+/**
+ * Ensure the full .rorca/ directory structure exists.
+ * Creates missing subdirectories (skills/, memory/, templates/).
+ */
+export function ensureRorcaDirStructure(workspacePath: string): void {
+  const dirs = [
+    path.join(workspacePath, '.rorca'),
+    path.join(workspacePath, '.rorca', 'skills'),
+    path.join(workspacePath, '.rorca', 'memory'),
+    path.join(workspacePath, '.rorca', 'templates'),
+    path.join(workspacePath, '.rorca', 'packs'),
+  ];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+}
+
+/**
+ * Write a RorcaConfig to .rorca/config.json. Creates .rorca/ dir if needed.
+ * Invalidates cache after write.
+ */
+export function writeRorcaConfig(workspacePath: string, config: RorcaConfig): void {
+  ensureRorcaDirStructure(workspacePath);
+  const cfgPath = configPath(workspacePath);
+  const content = JSON.stringify(
+    { $schema: './config.schema.json', ...config },
+    null,
+    2,
+  );
+  fs.writeFileSync(cfgPath, content, 'utf-8');
+  invalidateConfigCache();
+}
+
+/**
+ * Generate a default RorcaConfig (all defaults filled by zod).
+ */
+export function defaultRorcaConfig(): RorcaConfig {
+  return RorcaConfigSchema.parse({});
+}

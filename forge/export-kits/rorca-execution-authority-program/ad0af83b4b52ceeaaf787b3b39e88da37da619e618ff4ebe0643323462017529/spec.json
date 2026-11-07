@@ -1,0 +1,155 @@
+{
+  "id": "rorca-execution-authority-program",
+  "mermaidDiagram": "graph LR\n  REA-001[\"REA-001\"]\n  REA-002[\"REA-002\"]\n  REA-003[\"REA-003\"]\n  REA-004[\"REA-004\"]\n  REA-005[\"REA-005\"]\n  REA-006[\"REA-006\"]\n  REA-007[\"REA-007\"]\n  REA-008[\"REA-008\"]\n  REA-001 --> REA-002\n  REA-002 --> REA-003\n  REA-003 --> REA-004\n  REA-001 --> REA-005\n  REA-004 --> REA-005\n  REA-002 --> REA-006\n  REA-003 --> REA-006\n  REA-004 --> REA-007\n  REA-005 --> REA-007\n  REA-006 --> REA-008\n  REA-007 --> REA-008",
+  "slug": "rorca-execution-authority-program",
+  "source": "skill-first-explicit",
+  "title": "Rorca Execution Authority Core",
+  "userStories": [
+    {
+      "acceptanceCriteria": [
+        "The migration applies to a fresh PostgreSQL 16 database and a populated upgrade fixture without touching pgboss.*",
+        "Database constraints reject duplicate idempotency keys, stale fencing generations, over-use, illegal transitions, and grants whose expiry precedes creation",
+        "Authority and receipt rows contain secret references, fingerprints, and provider resource ids but reject provider credential bytes",
+        "Receipt mutation and deletion fail after settlement while retention metadata remains queryable",
+        "A failed upgrade restores the pre-migration fixture or follows the tested forward-fix procedure with no partial authority schema"
+      ],
+      "complexity": 5,
+      "dependsOn": [],
+      "description": "Define versioned Rorca authority persistence in the next canonical backend/src/db/pg-migrations migration and matching backend contracts. Persist OperationIntent, AuthorityRequest, AuthorityDecision, AuthorityGrant, CredentialLease, ExecutionAttempt, ExecutionReceipt, and ProviderBinding with workspace/run/story principals, canonical digests, state transitions, expiry, maximumUses, idempotency keys, fencing generations, timestamps, provenance, and reference-only secret fields. Receipts are append-only. Use Rorca PostgreSQL helpers and numbered parameters; do not touch pgboss.*. Rollback policy is forward-fix plus backup/restore for populated upgrades, not ad hoc down SQL.",
+      "id": "REA-001",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Authority records survive crashes and enforce one use"
+    },
+    {
+      "acceptanceCriteria": [
+        "The API schema returns typed request, decision, grant, and receipt projections and Swagger declares x-rorca-tier and rationale for every operation",
+        "Approval succeeds only for the current exact request digest and records the local operator principal separately from the requesting execution principal",
+        "Denied, cancelled, expired, altered, replayed, and over-used grants return typed failures and execute no provider operation",
+        "The requesting model and ordinary execution child cannot call approve or deny mutations even when prompted",
+        "API responses, WAL events, and audit rows contain no provider secret value"
+      ],
+      "complexity": 4,
+      "dependsOn": [
+        "REA-001"
+      ],
+      "description": "Add the Rorca authority policy service and one operator-only route resource in backend/src/routes with Swagger annotations. Create/read/cancel requests; approve or deny an exact request digest; inspect redacted receipts. The requesting execution principal and the local operator principal are distinct even though Rorca remains local single-user with authRequired=false. The requesting model cannot invoke decision mutations; provider credentials are not fields in request or decision DTOs. A grant binds workspace, run, work item, environment, resource, operation, constraints, evidence digest, expiry, and maximumUses. Mutations are admin-tier and never MCP-exposed.",
+      "id": "REA-002",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Operators decide exact requests without receiving credentials"
+    },
+    {
+      "acceptanceCriteria": [
+        "Run enqueue rejects unknown capabilities, malformed scopes, missing bindings, and stale binding generations before any story job is sent",
+        "A run with all capabilities pre-authorized dispatches without an approval round trip",
+        "A run with multiple missing capabilities creates one durable batched preflight result linked to the exact spec revision and does not start a story timeout",
+        "Restart preserves each waiting request, completed story result, pending story position, and separate wait expiry",
+        "Changing the spec revision, provider binding, environment, or policy invalidates the prior preflight and grant"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "REA-002"
+      ],
+      "description": "Extend canonical story/run-plan contracts with versioned required-capability declarations containing capability id, binding reference, environment/resource scope, requested mode, and evidence requirements. At enqueue, compile the union for all runnable stories, ask registered adapters to validate binding health and credential mintability, and batch missing requirements before dispatch. Persist WAITING_FOR_AUTHORIZATION, WAITING_FOR_AUTHENTICATION, and WAITING_FOR_CHANGE_WINDOW as run states. Waiting uses a separate request expiry and never consumes story execution timeout. Recompile when spec revision, binding generation, or policy changes.",
+      "id": "REA-003",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Runs settle missing authority before story execution begins"
+    },
+    {
+      "acceptanceCriteria": [
+        "Concurrent or replayed dispatch with one idempotency key produces at most one active fenced attempt",
+        "A stale worker cannot settle, revoke, or repeat an operation after a newer fencing generation is reserved",
+        "Crash after external acceptance but before local settlement performs read-side reconciliation and records one receipt without repeating the external effect",
+        "Crash before external acceptance safely retries under the same idempotency key",
+        "Run restart resumes from the exact operation and story position without duplicating commits, deployments, rotations, migrations, or browser sessions"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "REA-003"
+      ],
+      "description": "Add the trusted operation executor around existing completion-runner durability patterns. Every provider effect moves through reserved, running, uncertain, and settled attempt states under an idempotency key and fencing generation. Crash recovery reconciles an uncertain external result through the adapter read path before retrying. The executor preserves completed work, resumes an authorized operation effectively once, and settles a redacted ExecutionReceipt before releasing the run. No narrative blocked note substitutes for the state machine.",
+      "id": "REA-004",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Privileged effects resume without duplication after interruption"
+    },
+    {
+      "acceptanceCriteria": [
+        "The existing database vault implements SecretStore without changing stored ciphertext semantics and remains the default when no external backend is configured",
+        "The optional Infisical adapter passes reference-only payload, principal/purpose audit, bounded latency, explicit offline behavior, and no-ambient-fallback contract tests",
+        "Provider adapters cannot return raw credentials through execute, reconcile, error, log, receipt, or SSE result types",
+        "Secret resolution enforces exact workspace, environment, provider, resource, action, and lease purpose and rejects cross-scope reuse",
+        "A resolution or revocation failure fails the operation closed, marks reconciliation required, and never falls back to process.env or plaintext config"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "REA-001",
+        "REA-004"
+      ],
+      "description": "Define provider-neutral AuthorityProviderAdapter and RuntimeSecretBindingAdapter contracts for capability description, health preflight, lease preparation, execute, reconcile, revoke, and redacted receipt projection. Define SecretStore for reference resolution and attributable access audit. Keep the existing encrypted database vault as the default zero-network/offline adapter. Add an optional Infisical adapter behind configuration; it is never the default and must fail closed on unavailable, stale, or unauthorized resolution. Job payloads and model prompts carry opaque references only; values materialize inside the trusted broker boundary for the minimum operation lifetime.",
+      "id": "REA-005",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Provider adapters resolve secret references without ambient credentials"
+    },
+    {
+      "acceptanceCriteria": [
+        "The inbox lists only the selected workspace requests and renders loading, empty, error, stale, and active states",
+        "Request detail displays digest, principal, operation, resource, environment, constraints, evidence, binding generation, expiry, and maximum uses without a credential field",
+        "Approve, deny, and cancel refresh the run state and cannot submit against a stale digest",
+        "WAITING_FOR_AUTHORIZATION, WAITING_FOR_AUTHENTICATION, and WAITING_FOR_CHANGE_WINDOW appear distinctly while the story timeout remains stopped",
+        "Keyboard navigation, focus return, accessible names, and destructive-action confirmation pass a browser-driven operator journey"
+      ],
+      "complexity": 4,
+      "dependsOn": [
+        "REA-002",
+        "REA-003"
+      ],
+      "description": "Add an Execution Authority operator surface using src/lib/apiFetch and existing panel/SlideOver patterns. Show a keyboard-accessible approval inbox, exact request digest and scope, evidence and binding health, expiry/max uses, run/story location, and approve/deny/cancel controls. Run views display each typed waiting state and distinguish wait expiry from story execution timeout. Render loading, empty, stale, denied, error, and resumed states. No secret value may enter React state, DOM text, localStorage, screenshots, or analytics.",
+      "id": "REA-006",
+      "priority": 2,
+      "timeoutMinutes": 240,
+      "title": "Operators can inspect and control durable authority waits"
+    },
+    {
+      "acceptanceCriteria": [
+        "Injected secret canaries never appear in model environment, prompts, job JSON, logs, errors, WAL, SSE, API responses, screenshots, or receipts",
+        "Forged operator capability digests and agent-originated decision requests fail before a grant is written",
+        "Altered, expired, replayed, over-used, revoked, and cross-scope grants execute no adapter operation",
+        "Adapter egress outside the declared provider host allowlist fails and records a redacted security event",
+        "A crash during approval, lease mint, execution, receipt settlement, or revocation leaves a recoverable state with no untracked live lease"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "REA-004",
+        "REA-005"
+      ],
+      "description": "Centralize authority redaction for request payloads, execution job data, logs, errors, WAL events, SSE, API projections, and receipts. Add secret canaries and adversarial cases for prompt-driven reveal attempts, operator-digest forgery, request mutation, expiry, replay, maximum-use exhaustion, cross-run/workspace/environment/resource reuse, revoked leases, and broker egress outside the adapter allowlist. Preserve existing autonomous bwrap isolation and cleared model environments.",
+      "id": "REA-007",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Redaction and scope violations fail closed at every boundary"
+    },
+    {
+      "acceptanceCriteria": [
+        "A workspace with the feature disabled produces byte-compatible legacy run planning and delivery behavior",
+        "A workspace with the feature enabled but no provider adapters can preflight and wait but cannot perform an external mutation",
+        "Dispatch for these pending specs rejects direct, pr, and draft-pr delivery and preserves an isolated branch until the accepted GitHub external-send policy exists",
+        "Migration, API, UI, crash-recovery, redaction, and disposable-fixture smoke evidence is attached before the capability profile can be enabled",
+        "Disabling the profile stops new leases, revokes or reconciles active leases, preserves receipts, and restores legacy local delivery without deleting audit history"
+      ],
+      "complexity": 4,
+      "dependsOn": [
+        "REA-006",
+        "REA-007"
+      ],
+      "description": "Ship the authority core behind an off-by-default workspace capability profile. Existing specs without required-capability declarations retain current local execution and provider-neutral LocalReviewBundleAdapter behavior. Initially register no mutation-capable provider adapter. This seven-spec program remains pending and cannot approve or run itself. Until the GitHub authority adapter is accepted, program execution policy is branch-only: preserve isolated run branches and reject protected-branch push, PR merge, release, and production effects. Document schemas, API contracts, recovery, retention, operator ceremony, rollout, and forward-fix procedures only after a disposable Rorca-owned smoke fixture passes. Non-goals are hosted auth, tenants, SSO, billing, enterprise RBAC, generalized marketplace discovery, and speculative providers.",
+      "id": "REA-008",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Authority rolls out without changing legacy delivery defaults"
+    }
+  ]
+}

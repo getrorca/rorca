@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "rorca.wave-1-stabilization-contract.v1",
+  "implementationBaselineGitSha": "407752564e654e1bc8d83af4d9f5154f6807f307",
+  "sourceRepository": "https://github.com/getrorca/rorca.git",
+  "waveSpec": {
+    "canonicalPath": "forge/specs/pending/wave-1-stabilize-evidence-closeout-and-managed-branch-delivery.json",
+    "specReference": "SPEC-9831E07EA1D42497",
+    "contentHash": "sha256:1f35f8f67b4c3a56291ed55af33680ae0513c5d5705ac939b2334fbb0166a319",
+    "authoringState": "stale_authoring_preflight",
+    "approvalReady": false,
+    "executionAuthority": "none"
+  },
+  "isolatedLocalProof": {
+    "fixtureKind": "disposable-synthetic-local-run",
+    "runIdentityPolicy": "fresh-dynamic-non-protected",
+    "delivery": "local-review-bundle",
+    "requiresNetwork": false,
+    "requiresCredentials": false,
+    "autoMerge": false,
+    "deploymentAllowed": false,
+    "approvalFabricationAllowed": false
+  },
+  "deferredManagedProof": {
+    "ineligibleRunId": 20260316000550,
+    "reconciliationEligibility": "requires-separate-reviewed-merge-deployment-and-fresh-owner-authorization"
+  },
+  "denyListedRunIds": [
+    20260316000549
+  ],
+  "authority": {
+    "approvalGranted": false,
+    "providerConsentGranted": false,
+    "mergeGranted": false,
+    "deploymentGranted": false,
+    "lifecycleMutationGranted": false
+  }
+}

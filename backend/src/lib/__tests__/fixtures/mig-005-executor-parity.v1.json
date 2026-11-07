@@ -1,0 +1,306 @@
+{
+  "schemaVersion": "rorca.executor-parity-qualification.v1",
+  "storyId": "MIG-005",
+  "qualifiedAt": "2026-03-16T00:06:34.000Z",
+  "consumers": [
+    "AAV-007",
+    "AAV-010"
+  ],
+  "executorAgnosticContract": {
+    "runManifest": {
+      "schemaVersion": "rorca.story-execution-manifest.v1",
+      "workspaceId": "workspace:mig-005",
+      "runId": 5005,
+      "storyId": "MIG-005",
+      "attempt": 2,
+      "generation": 1,
+      "manifestHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "specRevision": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "storyResult": {
+      "runId": 5005,
+      "storyId": "MIG-005",
+      "status": "pass",
+      "integrated": true,
+      "commitSha": "3333333333333333333333333333333333333333",
+      "idempotencyKey": "story-result:5005:MIG-005:2:1",
+      "completionPacket": {
+        "attempt": 2,
+        "generation": 1
+      }
+    },
+    "walReleaseIntentIdentity": {
+      "eventType": "story_passed",
+      "workspaceId": "workspace:mig-005",
+      "runId": 5005,
+      "storyId": "MIG-005",
+      "authorizedSha": "3333333333333333333333333333333333333333",
+      "releaseIntentIdentityHash": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    "retryLineage": {
+      "schemaVersion": "rorca.task-manifest-lineage.v1",
+      "rootRunId": 5004,
+      "parentRunId": 5004,
+      "runId": 5005,
+      "lineageDepth": 1,
+      "attempt": 2,
+      "generation": 1,
+      "lineageIdentityHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "cancellation": {
+      "schemaVersion": "rorca.cancellation.v1",
+      "cancellationId": "cancellation:mig-005",
+      "attemptId": "attempt:mig-005:2",
+      "generation": 1,
+      "reasonCode": "operator_rollback_qualification",
+      "disposition": "acknowledged",
+      "deathReceiptHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  },
+  "scenarios": [
+    {
+      "receiptId": "mig-005:omp:sequential",
+      "mode": "sequential",
+      "selectedExecutor": "omp",
+      "contractSha256": "sha256:30d9ec372a70296bdc90b437c75e5b07e1fc8cbfa276e525928426e89c6db7c0",
+      "contracts": {
+        "runManifest": {
+          "schemaVersion": "rorca.story-execution-manifest.v1",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "attempt": 2,
+          "generation": 1,
+          "manifestHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "specRevision": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "storyResult": {
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "status": "pass",
+          "integrated": true,
+          "commitSha": "3333333333333333333333333333333333333333",
+          "idempotencyKey": "story-result:5005:MIG-005:2:1",
+          "completionPacket": {
+            "attempt": 2,
+            "generation": 1
+          }
+        },
+        "walReleaseIntentIdentity": {
+          "eventType": "story_passed",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "authorizedSha": "3333333333333333333333333333333333333333",
+          "releaseIntentIdentityHash": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "retryLineage": {
+          "schemaVersion": "rorca.task-manifest-lineage.v1",
+          "rootRunId": 5004,
+          "parentRunId": 5004,
+          "runId": 5005,
+          "lineageDepth": 1,
+          "attempt": 2,
+          "generation": 1,
+          "lineageIdentityHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "cancellation": {
+          "schemaVersion": "rorca.cancellation.v1",
+          "cancellationId": "cancellation:mig-005",
+          "attemptId": "attempt:mig-005:2",
+          "generation": 1,
+          "reasonCode": "operator_rollback_qualification",
+          "disposition": "acknowledged",
+          "deathReceiptHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      }
+    },
+    {
+      "receiptId": "mig-005:omp:wave-parallel:story-1",
+      "mode": "wave-parallel",
+      "selectedExecutor": "omp",
+      "contractSha256": "sha256:30d9ec372a70296bdc90b437c75e5b07e1fc8cbfa276e525928426e89c6db7c0",
+      "contracts": {
+        "runManifest": {
+          "schemaVersion": "rorca.story-execution-manifest.v1",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "attempt": 2,
+          "generation": 1,
+          "manifestHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "specRevision": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "storyResult": {
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "status": "pass",
+          "integrated": true,
+          "commitSha": "3333333333333333333333333333333333333333",
+          "idempotencyKey": "story-result:5005:MIG-005:2:1",
+          "completionPacket": {
+            "attempt": 2,
+            "generation": 1
+          }
+        },
+        "walReleaseIntentIdentity": {
+          "eventType": "story_passed",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "authorizedSha": "3333333333333333333333333333333333333333",
+          "releaseIntentIdentityHash": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "retryLineage": {
+          "schemaVersion": "rorca.task-manifest-lineage.v1",
+          "rootRunId": 5004,
+          "parentRunId": 5004,
+          "runId": 5005,
+          "lineageDepth": 1,
+          "attempt": 2,
+          "generation": 1,
+          "lineageIdentityHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "cancellation": {
+          "schemaVersion": "rorca.cancellation.v1",
+          "cancellationId": "cancellation:mig-005",
+          "attemptId": "attempt:mig-005:2",
+          "generation": 1,
+          "reasonCode": "operator_rollback_qualification",
+          "disposition": "acknowledged",
+          "deathReceiptHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      }
+    },
+    {
+      "receiptId": "mig-005:omp:wave-parallel:story-2",
+      "mode": "wave-parallel",
+      "selectedExecutor": "omp",
+      "contractSha256": "sha256:30d9ec372a70296bdc90b437c75e5b07e1fc8cbfa276e525928426e89c6db7c0",
+      "contracts": {
+        "runManifest": {
+          "schemaVersion": "rorca.story-execution-manifest.v1",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "attempt": 2,
+          "generation": 1,
+          "manifestHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "specRevision": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "storyResult": {
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "status": "pass",
+          "integrated": true,
+          "commitSha": "3333333333333333333333333333333333333333",
+          "idempotencyKey": "story-result:5005:MIG-005:2:1",
+          "completionPacket": {
+            "attempt": 2,
+            "generation": 1
+          }
+        },
+        "walReleaseIntentIdentity": {
+          "eventType": "story_passed",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "authorizedSha": "3333333333333333333333333333333333333333",
+          "releaseIntentIdentityHash": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "retryLineage": {
+          "schemaVersion": "rorca.task-manifest-lineage.v1",
+          "rootRunId": 5004,
+          "parentRunId": 5004,
+          "runId": 5005,
+          "lineageDepth": 1,
+          "attempt": 2,
+          "generation": 1,
+          "lineageIdentityHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "cancellation": {
+          "schemaVersion": "rorca.cancellation.v1",
+          "cancellationId": "cancellation:mig-005",
+          "attemptId": "attempt:mig-005:2",
+          "generation": 1,
+          "reasonCode": "operator_rollback_qualification",
+          "disposition": "acknowledged",
+          "deathReceiptHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      }
+    },
+    {
+      "receiptId": "mig-005:pi:explicit-rollback",
+      "mode": "sequential",
+      "selectedExecutor": "pi",
+      "selectionSource": "request.agentOverride",
+      "invocationCount": 1,
+      "contractSha256": "sha256:30d9ec372a70296bdc90b437c75e5b07e1fc8cbfa276e525928426e89c6db7c0",
+      "contracts": {
+        "runManifest": {
+          "schemaVersion": "rorca.story-execution-manifest.v1",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "attempt": 2,
+          "generation": 1,
+          "manifestHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "specRevision": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "storyResult": {
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "status": "pass",
+          "integrated": true,
+          "commitSha": "3333333333333333333333333333333333333333",
+          "idempotencyKey": "story-result:5005:MIG-005:2:1",
+          "completionPacket": {
+            "attempt": 2,
+            "generation": 1
+          }
+        },
+        "walReleaseIntentIdentity": {
+          "eventType": "story_passed",
+          "workspaceId": "workspace:mig-005",
+          "runId": 5005,
+          "storyId": "MIG-005",
+          "authorizedSha": "3333333333333333333333333333333333333333",
+          "releaseIntentIdentityHash": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "retryLineage": {
+          "schemaVersion": "rorca.task-manifest-lineage.v1",
+          "rootRunId": 5004,
+          "parentRunId": 5004,
+          "runId": 5005,
+          "lineageDepth": 1,
+          "attempt": 2,
+          "generation": 1,
+          "lineageIdentityHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "cancellation": {
+          "schemaVersion": "rorca.cancellation.v1",
+          "cancellationId": "cancellation:mig-005",
+          "attemptId": "attempt:mig-005:2",
+          "generation": 1,
+          "reasonCode": "operator_rollback_qualification",
+          "disposition": "acknowledged",
+          "deathReceiptHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      }
+    }
+  ],
+  "durableFailureReceipt": {
+    "provider": "omp",
+    "requestHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "processIdentity": "managed-omp:v17.0.9:5005:qualification",
+    "sourceOrdinal": 7,
+    "sourceEventId": "omp:subagent:MIG-005:failed",
+    "rpcType": "agent_failed",
+    "mappedKind": "agent_failed",
+    "runId": "5005",
+    "storyId": "MIG-005",
+    "attemptId": "attempt:mig-005:2",
+    "generation": 1,
+    "specRevisionHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

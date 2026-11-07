@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Rorca</title>
+    <link rel="icon" type="image/svg+xml" href="/rorca-flat.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+      // Prevent flash: apply saved theme before React hydrates
+      (function() {
+        var t = localStorage.getItem('rorca_theme') || 'dark';
+        if (t === 'system') t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', t);
+      })();
+    </script>
+    <style>
+      /* Critical CSS — inlined so shell skeleton renders before JS loads.
+         Matches tokens.css variables + Shell/Sidebar layout exactly. */
+      :root, [data-theme="dark"] {
+        --bg: #0b0b18; --panel: #10101f; --border: #2d2d4a; --surface-200: #18182a;
+        --text: #fafafa; --text-muted: #a1a1aa; --accent: #3a9996; --accent-border: #5dd4cf;
+        --skeleton: #2d2d4a; --skeleton-shimmer: #3d3d5c;
+        --scrollbar-track: #18182a; --scrollbar-thumb: #2d2d4a;
+        color-scheme: dark;
+      }
+      [data-theme="light"] {
+        --bg: #fafafa; --panel: #ffffff; --border: #e4e4e7; --surface-200: #f4f4f5;
+        --text: #09090b; --text-muted: #52525b; --accent: #0a6963; --accent-border: #0fa8a1;
+        --skeleton: #e5e5e5; --skeleton-shimmer: #f5f5f5;
+        --scrollbar-track: #f4f4f5; --scrollbar-thumb: #d4d4d8;
+        color-scheme: light;
+      }
+      *, *::before, *::after { box-sizing: border-box; margin: 0; }
+      body { background: var(--bg); color: var(--text); font-family: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif; }
+      .shell-skeleton { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+      .shell-skeleton__header {
+        height: 48px; display: flex; align-items: center; justify-content: space-between;
+        padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0;
+      }
+      .shell-skeleton__wordmark {
+        font-family: ui-monospace, monospace; font-weight: 700; font-size: 14px;
+        color: var(--accent); letter-spacing: -0.025em; user-select: none;
+      }
+      .shell-skeleton__header-right { display: flex; align-items: center; gap: 8px; }
+      .shell-skeleton__pill {
+        width: 48px; height: 20px; border-radius: 4px; background: var(--border); opacity: 0.3;
+      }
+      .shell-skeleton__body { display: flex; flex: 1; min-height: 0; }
+      .shell-skeleton__sidebar {
+        width: 48px; background: var(--panel); border-right: 1px solid var(--border);
+        flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding-top: 12px; gap: 4px;
+      }
+      .shell-skeleton__nav-icon {
+        width: 40px; height: 40px; border-radius: 8px; background: var(--border); opacity: 0.15;
+      }
+      .shell-skeleton__main { flex: 1; overflow: hidden; }
+      .shell-skeleton__content { max-width: 672px; margin: 0 auto; padding: 24px; }
+      .shell-skeleton__block {
+        border-radius: 8px; background: var(--border); opacity: 0.12;
+        animation: sk-pulse 1.5s ease-in-out infinite;
+      }
+      @keyframes sk-pulse { 0%, 100% { opacity: 0.12; } 50% { opacity: 0.2; } }
+      @media (max-width: 767px) { .shell-skeleton__sidebar { display: none; } }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <!-- Shell skeleton: renders instantly while JS loads. React replaces on hydrate. -->
+      <div class="shell-skeleton" aria-hidden="true">
+        <div class="shell-skeleton__header">
+          <span class="shell-skeleton__wordmark">Rorca</span>
+          <div class="shell-skeleton__header-right">
+            <div class="shell-skeleton__pill"></div>
+            <div class="shell-skeleton__pill" style="width:32px"></div>
+          </div>
+        </div>
+        <div class="shell-skeleton__body">
+          <div class="shell-skeleton__sidebar">
+            <div class="shell-skeleton__nav-icon"></div>
+            <div class="shell-skeleton__nav-icon"></div>
+            <div class="shell-skeleton__nav-icon"></div>
+            <div class="shell-skeleton__nav-icon"></div>
+          </div>
+          <div class="shell-skeleton__main">
+            <div class="shell-skeleton__content">
+              <div class="shell-skeleton__block" style="width:160px;height:20px;margin-bottom:16px"></div>
+              <div class="shell-skeleton__block" style="width:100%;height:120px;margin-bottom:12px"></div>
+              <div class="shell-skeleton__block" style="width:100%;height:80px;margin-bottom:12px"></div>
+              <div class="shell-skeleton__block" style="width:75%;height:48px"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

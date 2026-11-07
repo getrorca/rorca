@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 22335,
+      "contentHash": "sha256:e26f6532ea58a7a2a60af28bd5327f54434570f4755086c3069c519433d1e04f",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 28742,
+      "contentHash": "sha256:4550b4efb2d7845aa41fe394b9308dbb0d67b6de200effc5cf72121eaf108fdf",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 5508,
+      "contentHash": "sha256:62b75a8e36ebb58bbf417e28b03dd56beb9bf3b9bdc6a67621d50b888eb270eb",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 11797,
+      "contentHash": "sha256:605512fa39fff6831dc7ca5ab13579c62db96c17123635964580c829b38f2d03",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:e6b7c7fb0b80541f614ad3b1c1351d38d481abd62ddb9c3282969e939b0a4959",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "wave-1-stabilize-evidence-closeout-and-managed-branch-delivery",
+  "specMaterialHash": "sha256:e26f6532ea58a7a2a60af28bd5327f54434570f4755086c3069c519433d1e04f"
+}

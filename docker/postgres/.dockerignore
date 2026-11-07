@@ -1,0 +1,6 @@
+# PostgreSQL image context is intentionally allowlisted. A dump, seed, archive,
+# credential file, or unrelated source file cannot enter an image implicitly.
+**
+!Dockerfile
+!init.sql
+!bootstrap-roles.sh

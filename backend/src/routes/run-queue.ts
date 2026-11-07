@@ -1,0 +1,368 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import { Router, Request, Response } from 'express';
+import { query, queryOne, execute, transaction } from '../db/index';
+import { handleRouteError } from '../lib/async-handler';
+import { NotFoundError, ValidationError } from '../lib/errors';
+import {
+  currentWaveParallelPolicyEnvironment,
+  enforceWaveParallelPolicy,
+} from '../lib/wave-parallel-policy';
+
+const router = Router();
+
+// ─── GET /api/run-queue?workspaceId=N ───────────────────────────
+
+/**
+ * @swagger
+ * /api/run-queue:
+ *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
+ *     tags: [Pipeline]
+ *     summary: List pending run queue entries for a workspace
+ *     operationId: listRunQueue
+ *     description: Returns all pending run queue entries for the specified workspace, ordered by position ascending.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID to filter queue entries
+ *     responses:
+ *       200:
+ *         description: List of pending queue entries
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       workspace_id: { type: string }
+ *                       spec_id: { type: string }
+ *                       spec_path: { type: string }
+ *                       position: { type: integer }
+ *                       status: { type: string }
+ *       400: { description: "Missing workspaceId query parameter" }
+ *       500: { description: "Internal server error" }
+ */
+router.get('/', async (req: Request, res: Response) => {
+  try {
+    const workspaceIdParam = req.query.workspaceId;
+    const workspaceId = Array.isArray(workspaceIdParam) ? workspaceIdParam[0] : workspaceIdParam;
+    if (typeof workspaceId !== 'string' || workspaceId.length === 0) {
+      throw new ValidationError('workspaceId query parameter is required');
+    }
+
+    const entries = await query(
+      `SELECT * FROM run_queue WHERE workspace_id = $1 AND status = 'pending' ORDER BY position ASC`,
+      [workspaceId]
+    );
+
+    res.json({ items: entries });
+  } catch (error: any) {
+    handleRouteError(res, error, '[RunQueue] GET');
+  }
+});
+
+// ─── GET /api/run-queue/status ──────────────────────────────────
+
+/**
+ * @swagger
+ * /api/run-queue/status:
+ *   get:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
+ *     tags: [Pipeline]
+ *     summary: Get run queue status summary
+ *     operationId: getRunQueueStatus
+ *     description: Returns the number of pending entries in the queue, the next spec to run, and the ID of any currently running pipeline run. Optionally filtered by workspace.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         schema: { type: string }
+ *         description: Optional workspace ID to scope the status
+ *     responses:
+ *       200:
+ *         description: Queue status summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 queueLength: { type: integer, description: "Number of pending entries" }
+ *                 nextSpec: { type: object, nullable: true, description: "Next pending queue entry" }
+ *                 runningRunId: { type: integer, nullable: true, description: "ID of currently running pipeline run" }
+ *       500: { description: "Internal server error" }
+ */
+router.get('/status', async (req: Request, res: Response) => {
+  try {
+    const workspaceIdParam = req.query.workspaceId;
+    const workspaceId = Array.isArray(workspaceIdParam) ? workspaceIdParam[0] : workspaceIdParam;
+    if (workspaceId !== undefined && (typeof workspaceId !== 'string' || workspaceId.length === 0)) {
+      throw new ValidationError('workspaceId query parameter must be a non-empty string');
+    }
+
+    let queueLength: number;
+    let nextSpec: any = null;
+
+    if (workspaceId) {
+      const countRow = await queryOne<{ count: number }>(
+        `SELECT COUNT(*)::int as count FROM run_queue WHERE workspace_id = $1 AND status = 'pending'`,
+        [workspaceId]
+      );
+      queueLength = countRow?.count ?? 0;
+
+      nextSpec = (await queryOne(
+        `SELECT * FROM run_queue WHERE workspace_id = $1 AND status = 'pending' ORDER BY position ASC LIMIT 1`,
+        [workspaceId]
+      )) || null;
+    } else {
+      const countRow = await queryOne<{ count: number }>(
+        `SELECT COUNT(*)::int as count FROM run_queue WHERE status = 'pending'`
+      );
+      queueLength = countRow?.count ?? 0;
+
+      nextSpec = (await queryOne(
+        `SELECT * FROM run_queue WHERE status = 'pending' ORDER BY position ASC LIMIT 1`
+      )) || null;
+    }
+
+    // An explicit workspace selector scopes both queue and active-run state.
+    // Text workspace IDs are passed through unchanged.
+    const runningRun = workspaceId
+      ? await queryOne<{ id: number }>(
+        `SELECT id FROM pipeline_runs
+          WHERE workspace_id = $1 AND status = 'running'
+          ORDER BY started_at DESC LIMIT 1`,
+        [workspaceId],
+      )
+      : await queryOne<{ id: number }>(
+        `SELECT id FROM pipeline_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`,
+      );
+
+    res.json({
+      queueLength,
+      nextSpec,
+      runningRunId: runningRun?.id ?? null,
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[RunQueue] GET /status');
+  }
+});
+
+// ─── POST /api/run-queue ────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/run-queue:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Add a spec to the run queue
+ *     operationId: enqueueRun
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Direct run-queue mutation is an operator control-plane action; public automation should use the governed pipeline trigger endpoint."
+ *     description: Adds a new entry to the run queue for a workspace. The entry is appended at the end of the queue (max position + 1) and defaults to effective sequential execution.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, specId, specPath]
+ *             properties:
+ *               workspaceId: { type: string, description: "Workspace ID" }
+ *               specId: { type: string, description: "Spec slug identifier" }
+ *               specPath: { type: string, description: "Relative spec path within the workspace" }
+ *               parallelism: { type: integer, minimum: 1, maximum: 10, default: 1, description: "Reserved for compatibility; ordinary queue entries are always sequential and wave-parallel opt-in occurs only at governed pipeline dispatch." }
+ *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
+ *     responses:
+ *       201:
+ *         description: Queue entry created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: integer }
+ *                 workspace_id: { type: string }
+ *                 spec_id: { type: string }
+ *                 spec_path: { type: string }
+ *                 position: { type: integer }
+ *                 status: { type: string }
+ *       400: { description: "Missing required fields (workspaceId, specId, specPath)" }
+ *       404: { description: "Workspace not found" }
+ *       422: { description: "Wave-parallel execution denied by policy" }
+ *       500: { description: "Internal server error" }
+ */
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, specId, specPath, parallelism, autoWorktree } = req.body;
+    if (
+      typeof workspaceId !== 'string' || workspaceId.length === 0
+      || typeof specId !== 'string' || specId.length === 0
+      || typeof specPath !== 'string' || specPath.length === 0
+    ) {
+      throw new ValidationError('workspaceId, specId, and specPath are required strings');
+    }
+    if (parallelism !== undefined && Number(parallelism) > 1) {
+      throw new ValidationError('wave_parallel_denied:run_queue_is_sequential; use an explicit governed pipeline trigger at dispatch');
+    }
+
+    const requestedParallelism = Number(parallelism ?? 1);
+    if (!Number.isInteger(requestedParallelism) || requestedParallelism < 1 || requestedParallelism > 10) {
+      throw new ValidationError('parallelism must be an integer between 1 and 10');
+    }
+    const wavePolicy = enforceWaveParallelPolicy({
+      source: 'run-queue-api',
+      requestedMode: requestedParallelism > 1 ? 'wave-parallel' : 'sequential',
+      requestedParallelism,
+    }, currentWaveParallelPolicyEnvironment());
+
+    const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+      return;
+    }
+
+    // Get max position for this workspace
+    const maxRow = await queryOne<{ maxpos: number | null }>(
+      `SELECT MAX(position) as maxPos FROM run_queue WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    const nextPosition = (maxRow?.maxpos ?? 0) + 1;
+
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO run_queue (workspace_id, spec_id, spec_path, parallelism, auto_worktree, position)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [workspaceId, specId, specPath, wavePolicy.parallelism, autoWorktree ? 1 : 0, nextPosition]
+    );
+
+    const entry = await queryOne('SELECT * FROM run_queue WHERE id = $1', [inserted?.id]);
+    res.status(201).json(entry);
+  } catch (error: any) {
+    handleRouteError(res, error, '[RunQueue] POST');
+  }
+});
+
+// ─── DELETE /api/run-queue/:id ──────────────────────────────────
+
+/**
+ * @swagger
+ * /api/run-queue/{id}:
+ *   delete:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
+ *     tags: [Pipeline]
+ *     summary: Remove an entry from the run queue
+ *     operationId: dequeueRun
+ *     description: Deletes a pending run queue entry by its ID. Returns success if the entry was found and removed.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Queue entry ID
+ *     responses:
+ *       200:
+ *         description: Queue entry removed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       400: { description: "Invalid queue entry ID" }
+ *       404: { description: "Queue entry not found" }
+ *       500: { description: "Internal server error" }
+ */
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const idParam = req.params.id;
+    const idStr = Array.isArray(idParam) ? idParam[0] : idParam;
+    const id = parseInt(idStr, 10);
+    if (isNaN(id)) {
+      throw new ValidationError('Invalid queue entry ID');
+      return;
+    }
+
+    const existing = await queryOne('SELECT id FROM run_queue WHERE id = $1', [id]);
+    if (!existing) {
+      throw new NotFoundError('Queue entry not found');
+      return;
+    }
+
+    await execute('DELETE FROM run_queue WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error: any) {
+    handleRouteError(res, error, '[RunQueue] DELETE');
+  }
+});
+
+// ─── PUT /api/run-queue/reorder ─────────────────────────────────
+
+/**
+ * @swagger
+ * /api/run-queue/reorder:
+ *   put:
+ *     x-rorca-native-api: true
+ *     x-rorca-rationale: "Intentional dashboard/native API operation; authenticated local-admin access only and never MCP-exposed by default."
+ *     tags: [Pipeline]
+ *     summary: Reorder run queue entries
+ *     operationId: reorderRunQueue
+ *     description: Updates the position of run queue entries based on the provided ordered array of IDs. The first ID gets position 1, second gets position 2, etc.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [orderedIds]
+ *             properties:
+ *               orderedIds:
+ *                 type: array
+ *                 items: { type: integer }
+ *                 description: Queue entry IDs in desired order
+ *     responses:
+ *       200:
+ *         description: Queue reordered
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       400: { description: "orderedIds must be a non-empty array" }
+ *       500: { description: "Internal server error" }
+ */
+router.put('/reorder', async (req: Request, res: Response) => {
+  try {
+    const { orderedIds } = req.body;
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      throw new ValidationError('orderedIds must be a non-empty array of queue entry IDs');
+      return;
+    }
+
+    await transaction(async (client) => {
+      for (let i = 0; i < orderedIds.length; i++) {
+        await client.query('UPDATE run_queue SET position = $1 WHERE id = $2', [i + 1, orderedIds[i]]);
+      }
+    });
+
+    res.json({ success: true });
+  } catch (error: any) {
+    handleRouteError(res, error, '[RunQueue] PUT /reorder');
+  }
+});
+
+export default router;

@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:c4c2cbc3af0c9ae73404fc7b8a914cd199822ea91df9e875864074e57199e77f",
+      "path": "forge/export-kits/rorca-supabase-migrations-and-credential-ceremonies/138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:d709c6b2017bfa7625eab2dbe5477e0c382e7f898494addc765a6a277ff5bcba",
+      "path": "forge/export-kits/rorca-supabase-migrations-and-credential-ceremonies/138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:92cb9b157ae0ace34edab821464b44f7417301d1d9be402c752edfce04b49e97",
+      "path": "forge/export-kits/rorca-supabase-migrations-and-credential-ceremonies/138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:eda612226b26dec9f0fd65f1a59691adebbf997a6b4c84bbbc84ffeca796dcb6",
+      "path": "forge/export-kits/rorca-supabase-migrations-and-credential-ceremonies/138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/rorca-supabase-migrations-and-credential-ceremonies/138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33",
+  "manifestHash": "sha256:138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:eda612226b26dec9f0fd65f1a59691adebbf997a6b4c84bbbc84ffeca796dcb6"
+}

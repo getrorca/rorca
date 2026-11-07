@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "rorca.governed-adr-acceptance.v1",
+  "acceptanceId": "linear-comment:2823a595-c79e-4d0a-8e48-7c5216b0bb66",
+  "decision": {
+    "adrId": "ADR-0001",
+    "adrVersion": "ADR-0001/v1",
+    "acceptedAt": "2026-07-29T17:53:58.837Z",
+    "acceptedDate": "2026-07-29",
+    "status": "accepted",
+    "metadataTransition": "Proposed->Accepted",
+    "decisionBytesMateriallyChanged": false
+  },
+  "artifact": {
+    "repository": "getrorca/rorca",
+    "repositoryRemote": "https://github.com/getrorca/rorca.git",
+    "sourceSha": "dab2a136a1d1754ccdaeb15224a60a6e9dedd594",
+    "path": "docs/architecture/adr/0001-governed-execution-authority.md",
+    "gitBlobOid": "8bc32c523890abb2e24bbe2d3253c2ed448c6369",
+    "sha256": "b6ca538e513716b5e331964af110c5f8b20d432c22308cac18099a3ef7f973a5",
+    "statusInAcceptedBytes": "Proposed",
+    "bindingRule": "The authenticated acceptance binds these exact pre-transition bytes; the governed source transition may change only acceptance metadata."
+  },
+  "linear": {
+    "workspaceSlug": "rorca",
+    "teamId": "e9bad59f-2e0a-49cf-b17e-ce50c21404a8",
+    "teamKey": "ROR",
+    "issueId": "ROR-24",
+    "issueUrl": "https://linear.app/rorca/issue/ROR-24/adr-establish-rorca-execution-authority-and-trust-model",
+    "acceptedStateId": "7b11af68-882f-4d3a-bf79-ef0c42140cbe",
+    "acceptedStateName": "Done",
+    "issueUpdatedAt": "2026-07-29T17:54:04.845Z",
+    "issueCompletedAt": "2026-07-29T17:54:04.825Z",
+    "acceptanceCommentId": "2823a595-c79e-4d0a-8e48-7c5216b0bb66",
+    "actor": {
+      "authorityClass": "provider_human",
+      "id": "87d15d67-d272-4007-8300-459bdd6c0331",
+      "name": "Dimitri Teravanessian"
+    }
+  },
+  "snapshot": {
+    "schemaVersion": "rorca.ror24-acceptance-snapshot.v1",
+    "path": "docs/implementation/evidence/ror24-adr-0001-v1/linear-acceptance-snapshot.json",
+    "sha256": "9946a04ece8f1d92b3f0682c1a6a7f131c6c095194b05ab2e09ce87c726fd7c6",
+    "observedAt": "2026-07-29T17:54:32.203824Z",
+    "observer": "pi-linear-structured-tools",
+    "serialization": "exact-file-bytes"
+  },
+  "scope": {
+    "gateFor": "ROR-23",
+    "allowed": [
+      "wave2_preflight",
+      "wave2_isolated_implementation"
+    ],
+    "excluded": [
+      "dispatch_ror24",
+      "merge",
+      "deployment",
+      "provider_operations",
+      "protected_run_access",
+      "proof_run_access",
+      "readiness_override",
+      "pass_fabrication"
+    ],
+    "executionAuthority": "none",
+    "mergeAuthority": "none",
+    "deploymentAuthority": "none"
+  },
+  "protectedIdentities": {
+    "genesisRunId": "20260316000549",
+    "proofRunId": "20260316000550"
+  }
+}

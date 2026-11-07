@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 1294,
+      "contentHash": "sha256:c6170bc16b87f5b2020076da84c9b3a9a3977f419a2f258bc8769459b1429ea0",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 2409,
+      "contentHash": "sha256:5ab96a9d6d8d306feb405f7575e4c54307caad182ce284251208657686242a8f",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 990,
+      "contentHash": "sha256:054505a4f9da2865eb759258bb170572740974a927243228480130943b9318c4",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 921,
+      "contentHash": "sha256:d9af038c7667f2f303b4232df8802e94b9da90ff2119f404dbfce8f15f5e637a",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:afc2c686e95be0f5da3edc873005624f5e36775e6be1c35166e6b78d0c966a11",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "rorca-execution-environment-smoke",
+  "specMaterialHash": "sha256:c6170bc16b87f5b2020076da84c9b3a9a3977f419a2f258bc8769459b1429ea0"
+}

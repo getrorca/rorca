@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "rorca.ssdlc-control-record.v1",
+  "version": "1.0.0",
+  "controlId": "CTRL-REQUIREMENTS-TRACEABILITY",
+  "phase": "requirements",
+  "objective": "Maintain bidirectional traceability from approved requirements to delivery evidence.",
+  "applicability": {
+    "universal": true,
+    "productProfiles": [],
+    "riskProfiles": ["safety-critical"],
+    "domainRegulatory": []
+  },
+  "sourceReferences": [
+    {
+      "genesisEvidenceId": "GEN-ISO-29148-TRACEABILITY",
+      "citation": "ISO/IEC/IEEE 29148:2018, 6.5.2"
+    }
+  ],
+  "sourceStrength": "primary",
+  "requiredEvidence": [
+    {
+      "classification": "artifact",
+      "allowedSourceTypes": ["requirements-traceability-matrix"],
+      "requiredBindings": {
+        "subject": true,
+        "release": true
+      },
+      "minimumTrust": "tool-verified",
+      "evidenceDepth": "demonstrated",
+      "freshness": {
+        "maxAgeSeconds": 86400
+      }
+    }
+  ],
+  "failureSeverity": "blocking",
+  "exceptionPolicy": {
+    "allowed": true,
+    "approvalRequired": true,
+    "justificationRequired": true,
+    "maxDurationDays": 30
+  },
+  "skillRefs": ["rorca:requirements-traceability"]
+}

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "bounty.qualification-evidence.v1",
+  "fixtureId": "hermetic-bounty-mvp-v1",
+  "qualificationMode": "hermetic",
+  "sourceRevision": "fixture-source-revision",
+  "suites": [
+    { "kind": "unit", "name": "bounty-effect-policy-unit", "result": "passed", "evidenceSha256": "sha256:328bdfdd02fe28fc6ee0df62598d83f91b1ce2279bd2f779f0faad606ef435f7" },
+    { "kind": "property", "name": "scope-normalization-property", "result": "passed", "evidenceSha256": "sha256:697e4fb744d19e2d2b149996935c4825dc17024609ed6569526ac8add3663d1d" },
+    { "kind": "postgresql", "name": "bounty-postgresql-hermetic", "result": "passed", "evidenceSha256": "sha256:6534250115e86c5c90caa7ca6b9775f4ab24f3398ac4ebbd632447548c8e20de" },
+    { "kind": "pg-boss", "name": "bounty-pg-boss-hermetic", "result": "passed", "evidenceSha256": "sha256:bc45767c0600b764764fd924735b8385e810e29624736a93455e7324840b07b0" },
+    { "kind": "adapter", "name": "bounty-adapter-hermetic", "result": "passed", "evidenceSha256": "sha256:9056762746c24665df0d4bb377d60293742c9872214d1011117152177cbfaad4" },
+    { "kind": "browser", "name": "bounty-browser-hermetic", "result": "passed", "evidenceSha256": "sha256:32d99c1f9f2fc67a8b826627eabf57218090818a4164ba4e572071733b81f729" },
+    { "kind": "sandbox", "name": "bounty-bwrap-boundary", "result": "passed", "evidenceSha256": "sha256:ed7b0668bba14ae83eb45142df0806697aaf23b8a9cb216525eb521640e308c7" },
+    { "kind": "concurrency", "name": "bounty-concurrency-fences", "result": "passed", "evidenceSha256": "sha256:9b2a1bb865bbf340fa7107d82117d041c4397c721c5335c99e435cabaa47ca74" },
+    { "kind": "crash", "name": "bounty-crash-cuts", "result": "passed", "evidenceSha256": "sha256:0de1c7251bec8c8d21ad118676d2ea7353c1f8853597d248834b60a93ec38332" },
+    { "kind": "recovery", "name": "bounty-restart-recovery", "result": "passed", "evidenceSha256": "sha256:85d528e7d2d73eb6f5a09ef4b86de054249d6c806a5e57c7f23fd3d5ad600c70" },
+    { "kind": "route-tool", "name": "bounty-route-tool-zero-authority", "result": "passed", "evidenceSha256": "sha256:4082427a464469d8ac5e3da80458bba73a39c56312a8f18d862b1cfa6637639b" },
+    { "kind": "ui", "name": "bounty-mission-control-ui", "result": "passed", "evidenceSha256": "sha256:d3a12f53f462e351d6757e2333549ef05351b8fa4bc856d3d8cddb83157ed15f" },
+    { "kind": "oracle", "name": "bounty-oracle-rule-of-two", "result": "passed", "evidenceSha256": "sha256:ef17f48433c03e3f45f1726a4bf282ad95200ceb062404412fc8d0bb35d12971" },
+    { "kind": "receipt", "name": "bounty-immutable-receipt", "result": "passed", "evidenceSha256": "sha256:b60ca5a437861714579ef5919201f522aa647e73eb3e8869fa0c2d1dc9478a95" }
+  ],
+  "controlProofs": [
+    { "id": "sole-broker-egress", "result": "passed", "namedTest": "broker-sole-effect-authority.contract", "evidenceSha256": "sha256:ab118eaa8bc6a42af25123c459cf09ae3abb7f3ac424f633722259b7dd206664" },
+    { "id": "credential-isolation", "result": "passed", "namedTest": "worker-credential-nondisclosure.contract", "evidenceSha256": "sha256:6644769d480687217059b47528679e9191cb76831c50f73053382ba003a65e3c" },
+    { "id": "scope-dns-redirect-containment", "result": "passed", "namedTest": "broker-scope-epoch-dns.contract", "evidenceSha256": "sha256:041e0bc24c98c8e7fc6ff7202d043db2dd93d19d1167d2f4511d6fa2a97ad641" },
+    { "id": "rule-of-two", "result": "passed", "namedTest": "rule-of-two-independent-validation.contract", "evidenceSha256": "sha256:818af8a1576109f59b836019ac8682532366ca16b16154bdf13434a44d076ab2" },
+    { "id": "stop-ordering", "result": "passed", "namedTest": "stop-revoke-fence-terminate.contract", "evidenceSha256": "sha256:04fd747e1e7318d46c495634d94f2d15e5a33986da3176d982b7d2023e24e9c6" },
+    { "id": "evidence-integrity", "result": "passed", "namedTest": "evidence-tamper-rejection.contract", "evidenceSha256": "sha256:de808572839838d5cfbde8ff28c4ad9ca774f18dc80eb0638675a7f2fb5caa29" },
+    { "id": "zero-submission-paths", "result": "passed", "namedTest": "submission-human-presence.contract", "evidenceSha256": "sha256:843aaf7d06c07981ccb86690f6e0a8be7e1fc7e226810e00f99cd3cca173de8a" }
+  ],
+  "metrics": {
+    "classSuccess": { "reflected-xss": 1, "stored-xss": 1, "idor": 1, "server-side-callback": 1, "exposed-private-key": 1, "known-vulnerability": 1, "source-code-control-edge": 1 },
+    "falsePositiveRate": 0,
+    "rejectionRate": 0.5,
+    "oracleFailures": 0,
+    "costMicrousd": 1250000,
+    "inputTokens": 12000,
+    "outputTokens": 2400,
+    "activity": { "brokerRequests": 42, "browserActions": 8, "validatorRuns": 14 },
+    "cacheSpendMicrousd": 110000,
+    "authSpendMicrousd": 90000
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 82239,
+      "contentHash": "sha256:5b12304513521d36d13cd359a8b985925f5e2318f4af68d3054e7f38a2f9eac9",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 133447,
+      "contentHash": "sha256:25d9fdd910bbcdabd1454c214586c128621a1bb6e95e74b6131075876e6c36ac",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 36925,
+      "contentHash": "sha256:0e07d8e3da4f59e49458e29e4b5f0f9642c5b198b3594da90242b974ff0d2cda",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 41999,
+      "contentHash": "sha256:6839f4d86fde236e82e3a32c27247737b15dd46b493689bb712dcd103ad4a34e",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:68bbc6f9f933b575ce5a0b07690022d6bf2629117b622fe6b0c828c5d023cbd7",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "source-verified-hermes-rorca-omp-ssdlc-delivery-program",
+  "specMaterialHash": "sha256:5b12304513521d36d13cd359a8b985925f5e2318f4af68d3054e7f38a2f9eac9"
+}

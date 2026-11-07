@@ -1,0 +1,115 @@
+{
+  "id": "rorca-supabase-migrations-and-credential-ceremonies",
+  "mermaidDiagram": "graph LR\n  SMC-001[\"SMC-001\"]\n  SMC-002[\"SMC-002\"]\n  SMC-003[\"SMC-003\"]\n  SMC-004[\"SMC-004\"]\n  SMC-005[\"SMC-005\"]\n  SMC-006[\"SMC-006\"]\n  SMC-001 --> SMC-002\n  SMC-002 --> SMC-003\n  SMC-003 --> SMC-004\n  SMC-004 --> SMC-005\n  SMC-005 --> SMC-006",
+  "slug": "rorca-supabase-migrations-and-credential-ceremonies",
+  "source": "skill-first-explicit",
+  "title": "Rorca Supabase Database and Credential Authority Adapter",
+  "userStories": [
+    {
+      "acceptanceCriteria": [
+        "Binding preflight rejects wrong project/database/environment, stale generation, unverified role, missing capabilities, and unresolved references",
+        "Schema inspection executes read-only and returns a deterministic inventory with stable object identifiers and hashes",
+        "Inspect cannot execute DDL, DML, backup, restore, migration, key rotation, or provider administration",
+        "Application anon/publishable/secret/service credentials do not grant database schema or migration authority",
+        "Responses, receipts, logs, and database authority rows contain connection/key references and fingerprints but no credential bytes"
+      ],
+      "complexity": 4,
+      "dependsOn": [],
+      "description": "Implement a generic Supabase database AuthorityProviderAdapter and ProviderBinding for one project/environment using immutable project reference, database identity, verified role/capability profile, binding generation, and SecretStore references. database.schema.inspect returns tables, columns, constraints, indexes, extensions, functions, and RLS policies through read-only transactions. Use core authority storage; add no provider-specific secret column. Staging and production bindings are separate and no application runtime credential implies migration authority.",
+      "id": "SMC-001",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Supabase bindings expose exact read-only schema inventory"
+    },
+    {
+      "acceptanceCriteria": [
+        "Backup creation produces a verifiable encrypted artifact record with hash, source identity, retention, and no embedded credential",
+        "A scratch restore recreates expected schema/data checks and records target identity and verification evidence",
+        "Restore rejects ambiguous, source-equal, production, stale, or unauthorized targets before writing",
+        "Inspect and backup grants cannot authorize restore or migration operations",
+        "Backup or restore crash reconciles provider/storage state and leaves one receipt or an explicit cleanup-required record"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SMC-001"
+      ],
+      "description": "Implement database.backup.create and database.backup.restore as distinct capabilities. Create records provider/storage location, content hash, schema/version metadata, encryption provenance, retention, and verification result. Restore requires explicit target identity, scratch by default, a separate high-risk grant, and post-restore integrity checks. Production restore is unavailable without a separately reviewed policy and external gate.",
+      "id": "SMC-002",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Backup evidence and target verification protect restore drills"
+    },
+    {
+      "acceptanceCriteria": [
+        "Preflight rejects schema-hash drift, missing or reordered migrations, duplicate ids, dependency conflicts, unsupported transaction mode, and absent recovery classification",
+        "Reversible staging migration failure executes its tested rollback and verifies the prior schema state",
+        "Forward-only staging migration failure follows the declared forward-fix or scratch-restore procedure and records the resulting schema hash",
+        "Concurrent and replayed apply attempts cannot double-apply a migration manifest",
+        "The receipt records manifest digest, target identity, before/after schema hashes, statements outcome, verification, and recovery proof without credentials"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SMC-002"
+      ],
+      "description": "Implement database.migration.apply.staging from an immutable ordered manifest containing ids, content hashes, current-schema hash, prerequisites, transaction mode, reversibility classification, verification queries, and rollback or forward-fix procedure. Do not require a fictitious down script for every migration: reversible migrations provide tested rollback; forward-only migrations provide backup, forward-fix, and restore evidence. Apply under an advisory/fencing lock, verify expected schema state, and settle a receipt.",
+      "id": "SMC-003",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Staging migration preflight preserves exact ordering and recovery policy"
+    },
+    {
+      "acceptanceCriteria": [
+        "Production apply rejects missing/failed backup, changed manifest/schema, closed window, invalid external gate, expired/replayed grant, and unverified recovery plan",
+        "Deployment authority cannot call production migration operations and production migration authority cannot call deploy operations",
+        "The exact backup, manifest, target, window, evidence, and recovery owner are bound to the grant digest",
+        "Crash before, during, or after apply reconciles schema/history before retry and never double-applies a manifest",
+        "Abort follows the declared reversible rollback, forward-fix, or restore path and records final database consistency"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SMC-003"
+      ],
+      "description": "Implement database.migration.apply.production with immutable manifest and target digests, verified backup, change window, health/abort evidence, rollback owner, and external gate when policy requires independent approval. A deploy grant cannot authorize database mutation and a migration grant cannot deploy application code. Preserve WAITING states without consuming story timeout. Reconcile uncertain DDL outcome from schema and migration history before retry.",
+      "id": "SMC-004",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Production migration authority stays separate from deployment authority"
+    },
+    {
+      "acceptanceCriteria": [
+        "The API catalog and receipts expose three distinct ceremony types and cannot interchange their grants",
+        "Dashboard-created secret and signing values travel directly from secure operator capture to SecretStore/target binding without entering model or ordinary response bodies",
+        "Legacy migration inventories every bound consumer and proves replacement before legacy revocation",
+        "JWT signing rotation enforces standby, current, and revoked states and verifies old/new token behavior during zero-downtime cutover",
+        "Old secret/signing material is revoked only after the exact replacement canary and rollback readiness pass"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SMC-004"
+      ],
+      "description": "Implement separate typed ceremonies for publishable/secret API-key rotation, legacy anon/service_role migration, and JWT signing-key standby/current/revoked rotation. Human Dashboard steps use a secure operator capture directly into SecretStore and RuntimeSecretBindingAdapter; values never pass through model chat, ordinary API JSON, or receipts. Each ceremony has its own capability, request digest, binding inventory, canary, cutover, grace/revocation policy, and recovery procedure. Public publishable values are classified separately from server-only secrets.",
+      "id": "SMC-005",
+      "priority": 2,
+      "timeoutMinutes": 240,
+      "title": "Distinct Supabase key ceremonies preserve their different blast radii"
+    },
+    {
+      "acceptanceCriteria": [
+        "Read-only and scratch-restore qualification succeeds before any staging mutation capability is enabled",
+        "Reversible and forward-only failure fixtures each end in the declared consistent schema state with complete evidence",
+        "Altered manifest, replay, cross-workspace/environment use, deploy-grant substitution, and credential extraction all fail",
+        "Crash injection never double-applies a migration, loses a created key, or leaves an untracked binding generation",
+        "No Categoric/Cashflow-App database, key, environment, migration, or product code is used"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SMC-005"
+      ],
+      "description": "Qualify against a disposable Rorca-owned Supabase project or equivalent supported fixture, never a customer workspace. Exercise read-only inspection, backup/scratch restore, staging reversible and forward-only manifests, separately gated production simulation, all three key-ceremony state machines, replay, cross-scope denial, prompt extraction, and crashes around every external boundary. Rollout proceeds inspect-only, backup/restore, staging mutation, then production/key capabilities. Rollback disables mutation capabilities, revokes leases, and preserves receipts.",
+      "id": "SMC-006",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Disposable database failures leave one consistent reconciled state"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "contractVersion": "bounty.presentation.v1",
+  "toolName": "rorca_contracts_bounty_presentation",
+  "method": "GET",
+  "path": "/api/contracts/bounty-presentation",
+  "openApiTier": "auth",
+  "requiredParams": [],
+  "inputProperties": []
+}

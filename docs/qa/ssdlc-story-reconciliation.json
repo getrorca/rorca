@@ -1,0 +1,216 @@
+{
+  "schemaVersion": "rorca.ssdlc-story-reconciliation.v1",
+  "specId": "rorca-evidence-driven-ssdlc-lifecycle-and-autonomous-delivery-steward",
+  "sourceRunId": 20260316000493,
+  "validationRevision": "a359bbf86230f59ccd857bf3998c4ebbd938aec7",
+  "baseRevision": "6f87e79b0035985463739b05245cdd6e34969717",
+  "result": "31_of_31_reconciled_pass",
+  "method": [
+    "one scoped candidate commit exists for every LFC-001 through LFC-031 story",
+    "original spec/pass flags, per-story progress artifacts, result JSONL, and WAL completion records were used as historical corroboration",
+    "fresh isolated migration, backend, frontend, build, governance, pg-boss cancel, and Playwright evidence validates the integrated candidate"
+  ],
+  "validation": {
+    "migrations": "175 applied; duplicate prefixes removed; 17/17 focused migration assertions passed",
+    "backendFocused": "32 suites; 341/341 tests passed",
+    "pgBossCancel": "2/2 integration tests passed on real pg-boss v10",
+    "frontendFocused": "16 files; 102/102 tests passed",
+    "playwrightGoldenJourney": "passed with retained evidence bundle and 11 screenshots",
+    "playwrightPerformance": "passed; 50-row interaction feedback approximately 15-17ms",
+    "typecheck": "frontend, backend, and Pi extension passed",
+    "build": "production build passed",
+    "governance": "tier lint and contract stability passed; frontend lint had zero errors"
+  },
+  "stories": [
+    {
+      "storyId": "LFC-001",
+      "title": "Define the canonical production-grade SSDLC contract and KISS architecture boundary",
+      "candidateCommit": "4ba103e0f2a4b009b315ad5086744d87bf4b2004",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-002",
+      "title": "Persist plans, evidence, and governed decisions with the minimum PostgreSQL schema",
+      "candidateCommit": "49173af04b04c6418c2915dcbd77d60a0f7c1d39",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-003",
+      "title": "Compile deterministic SSDLC plans from canonical specs",
+      "candidateCommit": "56c4f96cda28a897c88959f546edacc060f5fd1c",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-004",
+      "title": "Integrate plan compilation with spec creation, versioning, and safe backfill",
+      "candidateCommit": "05c8c4ee63b4964cbbb65a315a8f53ab9bd0af6b",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-005",
+      "title": "Normalize immutable lifecycle evidence with provenance, revision identity, and redaction",
+      "candidateCommit": "4ad1df4b36acd3ec72aee9b9f24ddb06d9243d4b",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-006",
+      "title": "Evaluate phase status and invalidate stale downstream evidence deterministically",
+      "candidateCommit": "306dd3038349b97107ef8e2ae4e4685fc8a89171",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-007",
+      "title": "Enforce governed deferrals, N/A rationales, approvals, and overrides",
+      "candidateCommit": "c77e908fc73d51b6ae40c4ad257053856fa76506",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-008",
+      "title": "Define canonical execution-manifest, attempt-result, and story-closeout contracts",
+      "candidateCommit": "b8c30fbb20d8608bef644b42ad17a2f9153c4ec0",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-009",
+      "title": "Complete Pi autonomous-runner integration, validation closeout, and process cleanup",
+      "candidateCommit": "abe68cc03d1d3ffba536d14fa3d8571184775989",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-010",
+      "title": "Reconcile approved-spec pass flags, results, packets, commits, and progress before execution",
+      "candidateCommit": "5f9005fcfc6c5ecd5147e473eb719ee12989af60",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-011",
+      "title": "Preview and enforce the smallest safe retry scope with worktree freshness checks",
+      "candidateCommit": "06e6d5131915168699f529685e4874b6af37be58",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-012",
+      "title": "Classify liveness, blockers, and the next safe action from existing runtime signals",
+      "candidateCommit": "e0ca4883f5913b67d5d071d4f33194c3d10439e1",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-013",
+      "title": "Expose paginated Lifecycle portfolio, spec, phase, traceability, and evidence read APIs",
+      "candidateCommit": "a67cbfe1c839dd11312cca4983a6bc7c206e5e2e",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-014",
+      "title": "Add governed evidence ingress, recompile, decision, retry-preview, and retry-dispatch APIs with SSE invalidation",
+      "candidateCommit": "d335368fb2cda011e3462d78241f8a3f4ec85ca4",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-015",
+      "title": "Create typed frontend lifecycle API clients, query state, and SSE refresh behavior",
+      "candidateCommit": "dede728ca8dcee2dc9a0e9998968f93967fd0676",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-016",
+      "title": "Add Lifecycle Control as a first-class routed panel without disturbing Kanban or slide-overs",
+      "candidateCommit": "faf44f7e5953ee16d9373f277b8c75d5f4a131d2",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-017",
+      "title": "Build Lifecycle Control header, KPIs, search, filters, compact mode, and saved views",
+      "candidateCommit": "b2377a0e0485b7e23597bafebcb03c0f93341651",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-018",
+      "title": "Render the evidence-driven spec-by-phase lifecycle matrix",
+      "candidateCommit": "2c2c1151257c72b1fb02b9881002c9c74846490f",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-019",
+      "title": "Implement the in-context phase detail drawer and next-safe-action guidance",
+      "candidateCommit": "9ce50cdeb75a74efaf7a220c55b101d37e9ce537",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-020",
+      "title": "Add requirement-to-evidence traceability and a safe Evidence Inspector",
+      "candidateCommit": "26c495c908381035f4b739836eee62388e707563",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-021",
+      "title": "Wire retry preview, override review, run/spec drill-down, and approval interactions",
+      "candidateCommit": "2160a311d5f756c032c929108f09da37d51a659a",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-022",
+      "title": "Build exhaustive backend contract, repository, service, route, and execution regression tests",
+      "candidateCommit": "53f474943964e10f812ad84dca3f9d2fa7e0d172",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-023",
+      "title": "Validate frontend behavior, accessibility, responsive layout, themes, and performance",
+      "candidateCommit": "c406b06a7b7dd3399148aba4036eea6415d18be6",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-024",
+      "title": "Prove the complete lifecycle in a deterministic end-to-end staging-quality journey",
+      "candidateCommit": "38cf64d758c40afa2e6f8e2d8ea9feb611b1c179",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-025",
+      "title": "Red-team lifecycle authority, evidence integrity, approval bypass, and failure recovery",
+      "candidateCommit": "b4196afa473464c7cc88c38ea090952ca27f3945",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-026",
+      "title": "Complete production-grade rollout, operations, UX sign-off, and final release evidence",
+      "candidateCommit": "6562a2841e67bb4fcbf5e2244ad5dca58a651cd2",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-027",
+      "title": "Generate governed Learn-phase closeout candidates from verified delivery evidence",
+      "candidateCommit": "c9d8309c494ca877c50af2a1e1be2186638964ee",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-028",
+      "title": "Deliver a light-first state-of-the-art Lifecycle visual system and usability polish",
+      "candidateCommit": "906da29e6d4641a048a58dc56d7ce350be962cf7",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-029",
+      "title": "Define authoritative intent decomposition, spec boundaries, and phase-aware story authoring contracts",
+      "candidateCommit": "db5c544609064ea79ae60c87da50559c7b4debb2",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-030",
+      "title": "Integrate phase-aware decomposition and preflight revision into the existing skill-first forge flow",
+      "candidateCommit": "bd56948803b5dbaaa7ba6f3dd50c30cb5221019a",
+      "status": "reconciled_pass"
+    },
+    {
+      "storyId": "LFC-031",
+      "title": "Integrate one mode-agnostic closeout enforcement seam before story pass",
+      "candidateCommit": "0bf0d49ba79531c2273f0ee3f6081c924507d940",
+      "status": "reconciled_pass"
+    }
+  ],
+  "limitations": [
+    "This reconstruction does not mutate restored production metadata or impersonate an authorized human release approver.",
+    "Final human staging/visual approval remains pending and must bind to the final published candidate revision."
+  ]
+}

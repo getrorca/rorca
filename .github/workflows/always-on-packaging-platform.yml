@@ -1,0 +1,92 @@
+name: Always-On Context packaging and platform contracts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/always-on-packaging-platform.yml'
+      - 'package.json'
+      - 'packages/rorca-capture/**'
+      - 'backend/src/lib/context-safety.js'
+      - 'backend/src/db/pg-migrations/**'
+      - 'packages/rorca-pi-extension/vscode-extension/**'
+      - 'scripts/capture-platform-smoke.mjs'
+      - 'scripts/test-packed-capture-lifecycle.mjs'
+      - 'scripts/prepare-capture-package.mjs'
+      - 'scripts/install.sh'
+      - 'scripts/install.ps1'
+      - 'docs/always-on-context-packaging.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packed-lifecycle:
+    name: Packed lifecycle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - name: Install locked build dependencies
+        run: npm ci --ignore-scripts
+      - name: Build canonical capture package
+        run: npm run build:capture
+      - name: Install/reinstall/upgrade/rollback/uninstall from npm pack
+        run: node scripts/test-packed-capture-lifecycle.mjs
+
+  platform-contract:
+    name: Non-mutating host contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - name: Install locked build dependencies
+        run: npm ci --ignore-scripts
+      - name: Build canonical capture package
+        run: npm run build:capture
+      - name: Render and parse service definitions from packed artifact
+        run: node scripts/capture-platform-smoke.mjs
+      - name: POSIX installer syntax
+        if: runner.os != 'Windows'
+        run: sh -n scripts/install.sh
+      - name: PowerShell installer syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path scripts/install.ps1),
+            [ref]$null,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) { $errors | Out-String | Write-Error; exit 1 }
+
+  real-host-release-gate:
+    name: Real-host evidence required (documentation gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm release matrix does not overclaim render tests
+        run: |
+          grep -F 'required real-host gate' docs/always-on-context-packaging.md
+          grep -F 'render checks do not prove' docs/always-on-context-packaging.md
+          grep -F 'Task Scheduler execution evidence' docs/always-on-context-packaging.md
+          echo 'PASS: live launchd/systemd/Task Scheduler validation remains an explicit release evidence gate.'

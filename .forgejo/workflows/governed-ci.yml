@@ -1,0 +1,44 @@
+name: Governed CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: governed-ci
+  cancel-in-progress: true
+
+jobs:
+  governed-ci:
+    name: Governed CI
+    runs-on: ci-amd64
+    container: node:24-bookworm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Public contract stability
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            export GITHUB_BASE_REF='${{ github.event.before }}'
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            export GITHUB_BASE_REF='HEAD^'
+          fi
+          npm run check:contract
+      - name: API tier annotations
+        run: npm run lint:tier

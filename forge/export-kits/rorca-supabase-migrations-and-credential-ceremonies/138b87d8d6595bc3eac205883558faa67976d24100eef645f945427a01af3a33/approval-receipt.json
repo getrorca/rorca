@@ -1,0 +1,8 @@
+{
+  "actorId": "local-admin",
+  "approvalReceiptId": "e769f266-0e3e-4db5-adc2-92ad63393860",
+  "manifestHash": "sha256:138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33",
+  "schemaVersion": "rorca.export-kit-seal.v1",
+  "sealHash": "sha256:0e482d83565184c58f4a79f49c997435b7d0e9a4a1e3fb4c74e751b27676f52a",
+  "specMaterialHash": "sha256:eda612226b26dec9f0fd65f1a59691adebbf997a6b4c84bbbc84ffeca796dcb6"
+}

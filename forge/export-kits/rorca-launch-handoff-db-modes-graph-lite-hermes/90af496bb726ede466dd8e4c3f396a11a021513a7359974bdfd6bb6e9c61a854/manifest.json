@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 18323,
+      "contentHash": "sha256:bc9f67f035872bbd34832550a21f9df372d77267227391a2d950bd38deb59cd6",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 20662,
+      "contentHash": "sha256:d0317268155e3d01269ba2a5cf7dfc94bc8d21a76b03274f78ca667040ce648f",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 4957,
+      "contentHash": "sha256:ae87bba98e09b5ee896b27ba238209b90ecd6e46af622db8e0d072ee3ecd717d",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 9264,
+      "contentHash": "sha256:8bf76d76cbb07535d083f6441ea9ac4138e237c43ef4cf31f8410de1126ed755",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:90af496bb726ede466dd8e4c3f396a11a021513a7359974bdfd6bb6e9c61a854",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "rorca-launch-handoff-db-modes-graph-lite-hermes",
+  "specMaterialHash": "sha256:bc9f67f035872bbd34832550a21f9df372d77267227391a2d950bd38deb59cd6"
+}

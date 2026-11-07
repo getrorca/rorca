@@ -1,0 +1,22 @@
+{
+  "schema": "hackbot-requirements-trace.v1",
+  "reviewedAt": "2026-08-03",
+  "rows": [
+    {"requirementId":"HB-AUTH-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#controller-mutation-authority.contract"]},
+    {"requirementId":"HB-EFFECT-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#broker-sole-effect-authority.contract"]},
+    {"requirementId":"HB-WORKER-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#worker-bwrap-no-bypass.contract"]},
+    {"requirementId":"HB-HERMES-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#hermes-relay-only.contract"]},
+    {"requirementId":"HB-SCOPE-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#broker-scope-epoch-dns.contract"]},
+    {"requirementId":"HB-EPOCH-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#broker-replay-stale-epoch.contract"]},
+    {"requirementId":"HB-EFFECT-002","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#unknown-effect-default-deny.contract"]},
+    {"requirementId":"HB-EVIDENCE-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#evidence-tamper-rejection.contract"]},
+    {"requirementId":"HB-NET-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#worker-bwrap-no-bypass.contract"]},
+    {"requirementId":"HB-DNS-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#broker-scope-epoch-dns.contract"]},
+    {"requirementId":"HB-SECRETS-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#worker-credential-nondisclosure.contract"]},
+    {"requirementId":"HB-SUBMIT-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#submission-human-presence.contract"]},
+    {"requirementId":"HB-AUDIT-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#evidence-tamper-rejection.contract"]},
+    {"requirementId":"HB-HUMAN-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#submission-human-presence.contract"]},
+    {"requirementId":"HB-RELEASE-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#release-exclusions.contract"]},
+    {"requirementId":"HB-UI-001","disposition":"implemented","evidence":["docs/security/hackbot/bounty-qualification-matrix.v1.json#mission-control-redacted-ui.contract"]}
+  ]
+}

@@ -1,0 +1,748 @@
+{
+  "shareable": [
+    {
+      "path": "backend/",
+      "reason": "Core backend implementation is shared between OSS and OpenCore unless a more specific review/block rule overrides it."
+    },
+    {
+      "path": "src/",
+      "reason": "Core dashboard implementation is shared between OSS and OpenCore unless a more specific review/block rule overrides it."
+    },
+    {
+      "path": "bin/",
+      "reason": "CLI entrypoints are part of the shared product surface."
+    },
+    {
+      "path": "packages/rorca-cli/",
+      "reason": "CLI package changes should usually flow into OpenCore."
+    },
+    {
+      "path": "packages/rorca-pi-extension/",
+      "reason": "Pi extension changes are shared operator surface."
+    },
+    {
+      "path": "packages/rorca-public-contract/",
+      "reason": "Extracted public-contract package is a shared OSS/OpenCore boundary package."
+    },
+    {
+      "path": "public/",
+      "reason": "Shared product static assets are safe to mirror unless private docs/website rules override them."
+    },
+    {
+      "path": "scripts/build-public-contract.ts",
+      "reason": "Public contract generation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/check-pi-packed-forge-parity.mjs",
+      "reason": "Packed Pi and MCP parity is shared release infrastructure."
+    },
+    {
+      "path": "scripts/generate-pi-runtime.mjs",
+      "reason": "Deterministic Pi TypeScript-to-runtime generation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/build-cli.mjs",
+      "reason": "The deterministic bundled CLI build prevents shared runtime resolution from depending on source shadow modules."
+    },
+    {
+      "path": "scripts/openapi-source.ts",
+      "reason": "Current-checkout OpenAPI loading prevents cross-worktree contract contamination in both repositories."
+    },
+    {
+      "path": "scripts/check-contract-stability.ts",
+      "reason": "Public contract validation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/check-rorca-tier-annotations.ts",
+      "reason": "Tier annotation validation is shared backend governance."
+    },
+    {
+      "path": "scripts/check-swagger-coverage.ts",
+      "reason": "Swagger coverage validation is shared backend governance."
+    },
+    {
+      "path": "scripts/public-contract-lib.ts",
+      "reason": "Shared library behind public contract generation."
+    },
+    {
+      "path": "scripts/check-opencore-export.ts",
+      "reason": "Export checker is part of the split bridge and should stay available to OpenCore maintainers."
+    },
+    {
+      "path": "config/open-core-boundaries.json",
+      "reason": "Boundary manifest defines the OSS \u2194 OpenCore bridge policy."
+    },
+    {
+      "path": "docs/OPEN_API_CONTRACT.md",
+      "reason": "Public API contract docs should stay in sync across repos."
+    },
+    {
+      "path": "docs/architecture/",
+      "reason": "Shared product architecture decisions should remain reviewable across OSS and OpenCore."
+    },
+    {
+      "path": "docs/openapi-public-snapshot.json",
+      "reason": "Public API snapshot is part of the shared contract surface."
+    },
+    {
+      "path": "docs/contract-breaking-changes.md",
+      "reason": "Contract break markers inform both repos."
+    },
+    {
+      "path": "docs/pty-v2-production-readiness-report.md",
+      "reason": "PTY release evidence and remaining manual gates apply to both repositories."
+    },
+    {
+      "path": "docs/wave-parallel-experimental-gate.md",
+      "reason": "Experimental parallel-wave safety and rollout guidance applies to both repositories."
+    },
+    {
+      "path": "docs/pty-recovery-operations.md",
+      "reason": "PTY recovery operations and rollback guidance apply to both repositories."
+    },
+    {
+      "path": "docs/pty-transcript-raw-archive.md",
+      "reason": "PTY transcript and raw-archive guarantees apply to both repositories."
+    },
+    {
+      "path": "docs/pty-noisy-recovery-release-evidence.md",
+      "reason": "Deterministic PTY release evidence and review gates apply to both repositories."
+    },
+    {
+      "path": "docs/evidence/pty-noisy-recovery-benchmark.json",
+      "reason": "Bounded deterministic PTY benchmark evidence is part of the shared release gate."
+    },
+    {
+      "path": ".github/workflows/secret-scan.yml",
+      "reason": "Shared repo safety automation can be imported into OpenCore if desired."
+    },
+    {
+      "path": ".github/workflows/contract-check.yml",
+      "reason": "Public contract CI is shared release automation."
+    },
+    {
+      "path": ".forgejo/workflows/ci.yml",
+      "reason": "Canonical build and test CI is shared release-safety automation."
+    },
+    {
+      "path": ".forgejo/workflows/contract-check.yml",
+      "reason": "Public contract CI is shared release automation."
+    },
+    {
+      "path": "e2e/spec-attachments.spec.ts",
+      "reason": "Spec attachment browser coverage protects shared product behavior."
+    },
+    {
+      "path": "e2e/spec-attachments.test.ts",
+      "reason": "Spec attachment test-server coverage protects shared product behavior."
+    },
+    {
+      "path": "playwright.config.ts",
+      "reason": "Browser test configuration is shared validation infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/ci-test-truthfulness.test.mjs",
+      "reason": "CI command truthfulness regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/setup-playwright-fixture.mjs",
+      "reason": "Deterministic Playwright fixture setup is shared validation infrastructure."
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "reason": "Public contract contribution rules must stay synchronized across repositories."
+    },
+    {
+      "path": "eslint.config.js",
+      "reason": "Shared lint baseline can flow into OpenCore."
+    },
+    {
+      "path": "eslint.config.mjs",
+      "reason": "Shared lint baseline can flow into OpenCore."
+    },
+    {
+      "path": "scripts/check-license-boundaries.ts",
+      "reason": "License boundary validation is part of the split infrastructure."
+    },
+    {
+      "path": "scripts/check-license-headers.ts",
+      "reason": "License validation infrastructure can be shared."
+    },
+    {
+      "path": "scripts/license-utils.ts",
+      "reason": "Shared helper for license validation infrastructure."
+    },
+    {
+      "path": "config/rorca-tier-snapshot.json",
+      "reason": "Tier governance snapshots document the shared public API surface."
+    },
+    {
+      "path": "config/release-one-certification-gates.json",
+      "reason": "The deterministic supervised-core release gate and publication stop boundary apply to both OSS and OpenCore."
+    },
+    {
+      "path": "docs/release-certification/release-1-certification.md",
+      "reason": "Release-1 certification operation and human-only boundaries are shared release infrastructure."
+    },
+    {
+      "path": "docs/release-certification/release-1-f2-broad-classification.json",
+      "reason": "The evidence-bound Release-1 failure classification is shared release evidence."
+    },
+    {
+      "path": "scripts/__tests__/release-one-certification.test.mjs",
+      "reason": "Certification fail-fast and self-binding regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/build-cli.test.mjs",
+      "reason": "Deterministic bundled CLI and no-shadow regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/check-opencore-export.test.mjs",
+      "reason": "Candidate-aware OpenCore boundary regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/generate-release-one-f2-classification.mjs",
+      "reason": "Deterministic Release-1 evidence classification generation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/release-one-certification.mjs",
+      "reason": "The no-publication exact-pair certification runner is shared release infrastructure."
+    },
+    {
+      "path": "scripts/capture-real-terminal-boundaries.ts",
+      "reason": "Fail-closed scoped provider capture through the exact-host broker is shared release infrastructure."
+    },
+    {
+      "path": "scripts/verify-real-platform-boundaries.mjs",
+      "reason": "Mandatory actual platform-evidence validation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/__tests__/real-platform-boundaries.test.mjs",
+      "reason": "Real platform artifact fail-closed regression coverage is shared release infrastructure."
+    },
+    {
+      "path": "scripts/run-release-one-broad-certification.mjs",
+      "reason": "Current broad-result classification and no-waiver accounting is shared release infrastructure."
+    },
+    {
+      "path": "docs/agent-skill-packages.md",
+      "reason": "Portable Agent Skill package guidance documents shared canon loading and execution behavior."
+    },
+    {
+      "path": "docs/always-on-context-pr-notes.md",
+      "reason": "Always-on capture release notes describe shared operator behavior."
+    },
+    {
+      "path": "docs/always-on-context-production-readiness.md",
+      "reason": "Always-on capture readiness evidence applies to the shared product surface."
+    },
+    {
+      "path": "docs/release-certification/wave3-postgres16-evidence.txt",
+      "reason": "PostgreSQL certification evidence documents shared database support."
+    },
+    {
+      "path": "docs/qualification/",
+      "reason": "Wave qualification and release-safety contracts apply to the shared execution engine."
+    },
+    {
+      "path": ".github/workflows/wave-qualification.yml",
+      "reason": "Blocking cross-platform wave qualification is shared release-safety automation."
+    },
+    {
+      "path": "docs/run-transport-hardening-review.md",
+      "reason": "Run transport review evidence applies to the shared execution surface."
+    },
+    {
+      "path": "scripts/_compile-target.ts",
+      "reason": "Cross-platform CLI compilation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/_generate-embedded-assets.ts",
+      "reason": "Embedded CLI asset generation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/test-packed-capture-lifecycle.mjs",
+      "reason": "Packed capture lifecycle validation is shared release infrastructure."
+    },
+    {
+      "path": "shared/contracts/__tests__/contracts.test.ts",
+      "reason": "Shared contract regression coverage belongs to the public bridge."
+    },
+    {
+      "path": "docs/",
+      "reason": "OSS documentation surface (README-linked guides, architecture, contracts, operator runbooks). Specific review/block rules override this base rule."
+    },
+    {
+      "path": "docs/open-source/",
+      "reason": "Publication planning and readiness evidence; belongs with the public release process."
+    },
+    {
+      "path": "docs/assets/",
+      "reason": "Documentation imagery referenced by public docs."
+    },
+    {
+      "path": "NOTICE",
+      "reason": "Apache-2.0 NOTICE file; must ship with the public repository."
+    },
+    {
+      "path": ".mcp.json",
+      "reason": "Local MCP client example config. Contains no credential \u2014 the token is read at runtime from $HOME."
+    },
+    {
+      "path": "scripts/__tests__/",
+      "reason": "Repository gate and tooling test suites; shared release infrastructure."
+    },
+    {
+      "path": "genesis/",
+      "reason": "Genesis workspace surface is shared unless a more specific rule blocks it."
+    },
+    {
+      "path": ".github/workflows/",
+      "reason": "CI workflows are part of the public repository surface: they run on GitHub-hosted runners and must ship with the OSS tree so contributor PRs get checks."
+    },
+    {
+      "path": "vite.config.ts",
+      "reason": "Frontend build and Vitest configuration; part of the public build surface."
+    },
+    {
+      "path": "tsconfig.json",
+      "reason": "Root TypeScript project configuration; part of the public build surface."
+    },
+    {
+      "path": "tailwind.config.ts",
+      "reason": "Styling build configuration for the public tree."
+    },
+    {
+      "path": "postcss.config.js",
+      "reason": "Styling build configuration for the public tree."
+    },
+    {
+      "path": "index.html",
+      "reason": "Frontend entry document for the public tree."
+    },
+    {
+      "path": "scripts/monitor-run-journey.sh",
+      "reason": "Operator helper that tails a single run's journey log. Credentials come from the environment; no machine-specific paths."
+    },
+    {
+      "path": "scripts/ledger-guard.sh",
+      "reason": "Operator helper enforcing the run ledger contract. Target worktree comes from RORCA_RUN_WORKTREE."
+    },
+    {
+      "path": "scripts/install-ledger-guard.sh",
+      "reason": "Installs the ledger guard as a local service. Target worktree comes from RORCA_RUN_WORKTREE."
+    },
+    {
+      "path": "scripts/finish-rorca-run.sh",
+      "reason": "Operator helper closing out a finished run. Target worktree comes from RORCA_RUN_WORKTREE."
+    },
+    {
+      "path": "scripts/bootstrap-byop-principals.mjs",
+      "reason": "Operator bootstrap for hosted Postgres (Supabase/Neon/Railway). Provisions the split-principal roles and writes 0600 env profiles outside the repo; contains no credentials."
+    },
+    {
+      "path": "scripts/verify-byop.mjs",
+      "reason": "One-command BYOP verification for hosted Postgres; reads the connection string from a 0600 file outside the repo and prints no credential."
+    },
+    {
+      "path": "scripts/build-binaries.sh",
+      "reason": "Release toolchain: compiles the published binaries; OSS users must be able to build the release artifacts they install."
+    },
+    {
+      "path": "scripts/verify-pack.sh",
+      "reason": "Release toolchain: verifies the published package contents, including the migrations the binary embeds."
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/",
+      "reason": "Public issue templates; part of the community surface every self-hoster uses."
+    },
+    {
+      "path": "CODE_OF_CONDUCT.md",
+      "reason": "Community standards document; required public repository scaffolding."
+    },
+    {
+      "path": "scripts/db-up.mjs",
+      "reason": "Local database bootstrap used by the documented quickstart; OSS users run it directly."
+    },
+    {
+      "path": "CHANGELOG.md",
+      "reason": "Public release history; part of the standard OSS repository surface."
+    },
+    {
+      "path": ".dockerignore",
+      "reason": "Image build-context excludes; OSS users build the same bundled database and app images."
+    }
+  ],
+  "review": [
+    {
+      "path": ".darwin-main-wave3-progress.md",
+      "reason": "Lineage remediation ledgers are review context, not automatic OpenCore code imports."
+    },
+    {
+      "path": ".wave2-darwin-integration-progress.md",
+      "reason": "Serialized integration ledgers are review context, not automatic OpenCore code imports."
+    },
+    {
+      "path": "scripts/swap-7-phases.sh",
+      "reason": "The local live-swap helper contains deployment-specific process labels and paths; additions or removals require deliberate OpenCore review."
+    },
+    {
+      "path": "Dockerfile",
+      "reason": "Combined production image and bundled provider versions can diverge between OSS and OpenCore; review before importing."
+    },
+    {
+      "path": "package.json",
+      "reason": "Root package metadata diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "package-lock.json",
+      "reason": "Root dependency graph diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "backend/package.json",
+      "reason": "Backend package metadata diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "backend/package-lock.json",
+      "reason": "Backend dependency graph diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "CHANGELOG.md",
+      "reason": "Release notes may diverge between OSS and OpenCore repos."
+    },
+    {
+      "path": "README.md",
+      "reason": "OSS README and OpenCore README have intentionally different positioning and licensing language."
+    },
+    {
+      "path": "LICENSE",
+      "reason": "OSS and OpenCore licenses intentionally differ."
+    },
+    {
+      "path": "LICENSE-NOTICES.md",
+      "reason": "OSS and OpenCore notices intentionally differ."
+    },
+    {
+      "path": ".env.example",
+      "reason": "Env examples often diverge between OSS and OpenCore deployment modes."
+    },
+    {
+      "path": ".env.local.example",
+      "reason": "Local env examples often diverge between OSS and OpenCore development setups."
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "reason": "Ownership rules often diverge between public and private repos."
+    },
+    {
+      "path": ".gitignore",
+      "reason": "Ignore rules may diverge between OSS and OpenCore local workflows."
+    },
+    {
+      "path": ".gitleaks.toml",
+      "reason": "Secret scanning policy may diverge between public and private repos."
+    },
+    {
+      "path": "AGENTS.md",
+      "reason": "Agent instructions diverge across the OSS and OpenCore repos."
+    },
+    {
+      "path": "DEPLOYMENT.md",
+      "reason": "Deployment guidance diverges between OSS and OpenCore environments."
+    },
+    {
+      "path": "SECURITY.md",
+      "reason": "Security disclosure text diverges between public and private repos."
+    },
+    {
+      "path": "docs/SECURITY-MODEL.md",
+      "reason": "Security model docs diverge between OSS and OpenCore."
+    },
+    {
+      "path": "docs/implementation/",
+      "reason": "Implementation and validation packets may contain branch-specific evidence and require human review before OpenCore import."
+    },
+    {
+      "path": "backend/src/routes/auth.ts",
+      "reason": "Hosted identity/auth behavior is OpenCore-sensitive."
+    },
+    {
+      "path": "backend/src/routes/workspace-github.ts",
+      "reason": "GitHub account-linking/OAuth behavior is boundary-sensitive."
+    },
+    {
+      "path": "backend/src/routes/users.ts",
+      "reason": "User deletion/account cleanup behavior is boundary-sensitive."
+    },
+    {
+      "path": "backend/src/routes/workspaces.ts",
+      "reason": "Workspace ownership/membership logic diverges between OSS and OpenCore."
+    },
+    {
+      "path": "backend/src/routes/config.ts",
+      "reason": "Provider/auth/config surfaces may diverge between OSS and OpenCore."
+    },
+    {
+      "path": "backend/src/routes/vault.ts",
+      "reason": "Vault/secret behavior is commercial-boundary-sensitive."
+    },
+    {
+      "path": "backend/src/routes/copilot.ts",
+      "reason": "Hosted assistant integration behavior is commercial-boundary-sensitive."
+    },
+    {
+      "path": "backend/src/lib/auth-utils.ts",
+      "reason": "Authentication fallback logic is central to the split boundary."
+    },
+    {
+      "path": "backend/src/lib/get-user.ts",
+      "reason": "Current-user resolution diverges across OSS and OpenCore."
+    },
+    {
+      "path": "backend/src/lib/require-plan.ts",
+      "reason": "Plan/entitlement behavior is OpenCore-owned."
+    },
+    {
+      "path": "backend/src/server.ts",
+      "reason": "Route mounting and auth/license bootstrapping are boundary-sensitive."
+    },
+    {
+      "path": "backend/src/db/pg-migrations/",
+      "reason": "Database schema changes need deliberate review because OpenCore keeps extra tables/features."
+    },
+    {
+      "path": "src/contexts/AuthContext.tsx",
+      "reason": "Frontend auth state is boundary-sensitive."
+    },
+    {
+      "path": "src/lib/supabase.ts",
+      "reason": "Supabase/auth client wiring is boundary-sensitive."
+    },
+    {
+      "path": "src/lib/apiFetch.ts",
+      "reason": "Client auth/header behavior is boundary-sensitive."
+    },
+    {
+      "path": "src/pages/auth/",
+      "reason": "Hosted auth screens belong to the split boundary."
+    },
+    {
+      "path": "src/pages/InviteAcceptPage.tsx",
+      "reason": "Invite/member flows are OpenCore-sensitive."
+    },
+    {
+      "path": "src/routes.tsx",
+      "reason": "Route wiring often reflects auth/OpenCore-only surfaces."
+    },
+    {
+      "path": "src/components/PricingModal.tsx",
+      "reason": "Pricing/upgrade messaging diverges between OSS and OpenCore."
+    },
+    {
+      "path": "src/components/UpgradePrompt.tsx",
+      "reason": "Pricing/upgrade messaging diverges between OSS and OpenCore."
+    },
+    {
+      "path": "src/components/EmailVerificationBanner.tsx",
+      "reason": "Email verification/auth UX is boundary-sensitive."
+    },
+    {
+      "path": "src/panels/settings/AccountSettingsTab.tsx",
+      "reason": "Account surfaces diverge between OSS and OpenCore."
+    },
+    {
+      "path": "src/panels/settings/ProviderSettingsTab.tsx",
+      "reason": "Provider setup can include hosted/OpenCore-specific options."
+    },
+    {
+      "path": "src/panels/settings/ApiKeysSection.tsx",
+      "reason": "Credential storage/UX differs between OSS and OpenCore."
+    },
+    {
+      "path": "tests/auth.spec.ts",
+      "reason": "Browser auth coverage is boundary-sensitive and should be reviewed before importing."
+    },
+    {
+      "path": "deploy/",
+      "reason": "Generic self-host manifests (nginx, logrotate, healthcheck, env example). Private host-specific infra under deploy/ovh/ is blocked."
+    },
+    {
+      "path": ".npmrc",
+      "reason": "Package-manager policy can diverge between OSS and OpenCore release environments."
+    },
+    {
+      "path": "Dockerfile.backend",
+      "reason": "Backend image build policy is deployment-sensitive and requires OpenCore review."
+    },
+    {
+      "path": "Dockerfile.frontend",
+      "reason": "Frontend image build policy is deployment-sensitive and requires OpenCore review."
+    },
+    {
+      "path": "docker-compose.yml",
+      "reason": "Compose topology and runtime defaults are deployment-sensitive and require OpenCore review."
+    },
+    {
+      "path": "scripts/release-one-certification.mjs",
+      "reason": "Release-1 certification runner. Operator-only: binds protected checkout roots, a restricted database identity, and real-platform evidence."
+    },
+    {
+      "path": "scripts/wave3-macos-recert-lifecycle.mjs",
+      "reason": "macOS isolated-lifecycle recertification harness. Operator-only; mutates launchd labels in a nonce-scoped runtime root."
+    },
+    {
+      "path": "scripts/wave4-cleanroom-realhost-cert.ts",
+      "reason": "Real-host clean-room reconstruction certificate runner. Operator-only; clones a pinned source checkout and runs disposable container lanes."
+    },
+    {
+      "path": "config/release-one-certification-gates.json",
+      "reason": "Certification gate schema consumed by the operator-only Release-1 runner."
+    }
+  ],
+  "blocked": [
+    {
+      "path": ".claude/",
+      "reason": "Local/internal Claude tooling is not part of the OSS \u2194 OpenCore bridge."
+    },
+    {
+      "path": ".opencode/",
+      "reason": "Local/internal OpenCode tooling is not part of the OSS \u2194 OpenCore bridge."
+    },
+    {
+      "path": ".pi/",
+      "reason": "Local/internal Pi tooling is not part of the OSS \u2194 OpenCore bridge."
+    },
+    {
+      "path": ".rorca/",
+      "reason": "Private progress/memory artifacts must not be mirrored through the bridge."
+    },
+    {
+      "path": "CLAUDE.md",
+      "reason": "Local/internal Claude guidance is not part of the OSS \u2194 OpenCore bridge."
+    },
+    {
+      "path": "MEMORY.md",
+      "reason": "Private memory artifacts must not be mirrored through the bridge."
+    },
+    {
+      "path": ".env",
+      "reason": "Secret env files are never bridgeable."
+    },
+    {
+      "path": ".env.local",
+      "reason": "Secret env files are never bridgeable."
+    },
+    {
+      "path": "backend/.env",
+      "reason": "Secret env files are never bridgeable."
+    },
+    {
+      "path": "backend/backups/",
+      "reason": "Database backups must never flow through the code bridge."
+    },
+    {
+      "path": "test-results/",
+      "reason": "Generated test artifacts must never flow through the code bridge."
+    },
+    {
+      "path": "landing-page/",
+      "reason": "Website/docs live in rorca-website, not in the code bridge."
+    },
+    {
+      "path": "go-to-market/",
+      "reason": "Private GTM planning does not belong in the code bridge."
+    },
+    {
+      "path": "default-personas/",
+      "reason": "Private/internal persona packs do not belong in the code bridge."
+    },
+    {
+      "path": "forge/logs/",
+      "reason": "Generated forge logs are private/internal artifacts."
+    },
+    {
+      "path": "forge/specs/",
+      "reason": "Private spec artifacts should not be mirrored through the bridge."
+    },
+    {
+      "path": "docs/opencore/",
+      "reason": "OpenCore planning docs live only in the private repo."
+    },
+    {
+      "path": "docs/docs-imagery-plan.md",
+      "reason": "Website planning belongs outside the bridge."
+    },
+    {
+      "path": "docs/screenshot-capture-runbook.md",
+      "reason": "Website planning belongs outside the bridge."
+    },
+    {
+      "path": "docs/website-screenshot-placement-plan.md",
+      "reason": "Website planning belongs outside the bridge."
+    },
+    {
+      "path": "docs/user-guide-implementation-progress.md",
+      "reason": "Website/docs implementation progress belongs outside the bridge."
+    },
+    {
+      "path": "docs/duckbrain-gap-analysis.md",
+      "reason": "Private/internal analysis docs should not be mirrored automatically."
+    },
+    {
+      "path": "scripts/sync-opencore-push.mjs",
+      "reason": "The one-command bridge is an OSS source-side helper and should not be imported into OpenCore."
+    },
+    {
+      "path": "diagrams/",
+      "reason": "Private planning diagrams should not be bridge-synced by default."
+    },
+    {
+      "path": ".pi-supervisor/",
+      "reason": "Local agent session transcripts and autopilot archives; private operator state, never published."
+    },
+    {
+      "path": "tmp/",
+      "reason": "Scratch artifacts and third-party source snapshots (attribution risk); never published."
+    },
+    {
+      "path": "docs/workplans/",
+      "reason": "Internal incremental workplans (base snapshots and diffs); not part of the public documentation surface."
+    },
+    {
+      "path": "docs/archive/",
+      "reason": "Historical audit and archive material kept for internal traceability only."
+    },
+    {
+      "path": "genesis/artifacts/",
+      "reason": "Generated export packs and in-flight mission artifacts; regenerated per run, never published."
+    },
+    {
+      "path": "deploy/ovh/",
+      "reason": "Private operator ingress for the maintainer's own host (Traefik router, network compose); self-hosters bring their own edge and must not inherit this host binding."
+    },
+    {
+      "path": "docs/open-source/PROGRESS.md",
+      "reason": "Maintainer progress log for the open-source conversion; internal working record."
+    },
+    {
+      "path": "docs/operations/",
+      "reason": "Internal operations handoffs and run records naming private hosts and timelines."
+    },
+    {
+      "path": "docs/release-certification/",
+      "reason": "Internal release certification records for the maintainer's hosts."
+    },
+    {
+      "path": "docs/rorca-launch-handoff-master.md",
+      "reason": "Internal launch handoff briefing; superseded by the public README and CHANGELOG."
+    },
+    {
+      "path": "docs/wave5-dms-reconciliation.md",
+      "reason": "Internal reconciliation record; not product documentation."
+    },
+    {
+      "path": "forge/FIN-010-progress.json",
+      "reason": "Internal run progress ledger."
+    }
+  ]
+}

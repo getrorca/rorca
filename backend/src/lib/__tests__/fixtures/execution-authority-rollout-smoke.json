@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "rorca.execution-authority-rollout-smoke.v1",
+  "workspaceId": "rorca:rea-008-disposable-fixture",
+  "observedAt": "2026-08-24T12:00:00.000Z",
+  "legacySpec": {
+    "id": "legacy-local-review",
+    "userStories": [
+      {
+        "id": "LEGACY-001",
+        "title": "Preserve local review delivery"
+      }
+    ]
+  },
+  "authorityProgramSpec": {
+    "id": "rorca-execution-authority-program",
+    "slug": "rorca-execution-authority-program",
+    "title": "Rorca Execution Authority Core",
+    "userStories": [
+      {
+        "id": "REA-008",
+        "title": "Authority rolls out without changing legacy delivery defaults"
+      }
+    ]
+  },
+  "requiredCapability": {
+    "schemaVersion": "rorca.required-capability.v1",
+    "capabilityId": "scm.branch.write",
+    "bindingReference": "fixture-binding",
+    "bindingGeneration": 1,
+    "scope": {
+      "environment": "test",
+      "resource": "rorca/rea-008-disposable-fixture"
+    },
+    "requestedMode": "repository.push",
+    "evidenceRequirements": [],
+    "constraints": {
+      "branch": "rorca/rea-008-disposable-fixture",
+      "protected": false
+    }
+  },
+  "evidence": [
+    {
+      "evidenceKind": "migration",
+      "artifactReference": "fixture://rea-008/migration",
+      "evidenceDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "evidenceKind": "api",
+      "artifactReference": "fixture://rea-008/api",
+      "evidenceDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "evidenceKind": "ui",
+      "artifactReference": "fixture://rea-008/ui",
+      "evidenceDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "evidenceKind": "crash_recovery",
+      "artifactReference": "fixture://rea-008/crash-recovery",
+      "evidenceDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    {
+      "evidenceKind": "redaction",
+      "artifactReference": "fixture://rea-008/redaction",
+      "evidenceDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "evidenceKind": "disposable_fixture_smoke",
+      "artifactReference": "fixture://rea-008/disposable-smoke",
+      "evidenceDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  ]
+}

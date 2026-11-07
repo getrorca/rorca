@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:83bf2e7f809c92cc25f2b05e469b335b97744bdff66e03b4a7f22e229bd2632f",
+      "path": "forge/export-kits/rorca-github-execution-foundation/05dacb3b0bd09c02bbb4033ded3a05942e4c189ebe2d35f5b2917a86b46fb31c/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:7457dd1e02de4011d11dca7570ece3f434a751396c20f33da1f032000d05ef49",
+      "path": "forge/export-kits/rorca-github-execution-foundation/05dacb3b0bd09c02bbb4033ded3a05942e4c189ebe2d35f5b2917a86b46fb31c/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:43c8f3f5d351ce537e0ba721533ea257b87a7057def3a8f80213cf2003c376dc",
+      "path": "forge/export-kits/rorca-github-execution-foundation/05dacb3b0bd09c02bbb4033ded3a05942e4c189ebe2d35f5b2917a86b46fb31c/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:0792fb6e7eb1db6f810e5e075721e5efd43ba23a8c76bc47ae7df974a61281ba",
+      "path": "forge/export-kits/rorca-github-execution-foundation/05dacb3b0bd09c02bbb4033ded3a05942e4c189ebe2d35f5b2917a86b46fb31c/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/rorca-github-execution-foundation/05dacb3b0bd09c02bbb4033ded3a05942e4c189ebe2d35f5b2917a86b46fb31c",
+  "manifestHash": "sha256:05dacb3b0bd09c02bbb4033ded3a05942e4c189ebe2d35f5b2917a86b46fb31c",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:0792fb6e7eb1db6f810e5e075721e5efd43ba23a8c76bc47ae7df974a61281ba"
+}

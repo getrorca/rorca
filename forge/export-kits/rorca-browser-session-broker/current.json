@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:468722fb6e6c17dae6f36f1eee71032757c6d8c8e07624a355b2f1b6596b9de7",
+      "path": "forge/export-kits/rorca-browser-session-broker/8e4837c3746d21574033552dc6e662ff68fd9834a4e5371d3ab0e12d43605ec7/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:fe0744c69b3aa7920e91b696fde569168da8a95e875a125d7a24ba612e0bd8bc",
+      "path": "forge/export-kits/rorca-browser-session-broker/8e4837c3746d21574033552dc6e662ff68fd9834a4e5371d3ab0e12d43605ec7/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:a318fc6a05469db9451650d682f5ea15d99ea102ef0ada21bf83b0b41da5c2b9",
+      "path": "forge/export-kits/rorca-browser-session-broker/8e4837c3746d21574033552dc6e662ff68fd9834a4e5371d3ab0e12d43605ec7/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:c97c8b81d67c176635773ff5fe26366624f6a725db02fae2e2956a8d6da04fe4",
+      "path": "forge/export-kits/rorca-browser-session-broker/8e4837c3746d21574033552dc6e662ff68fd9834a4e5371d3ab0e12d43605ec7/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/rorca-browser-session-broker/8e4837c3746d21574033552dc6e662ff68fd9834a4e5371d3ab0e12d43605ec7",
+  "manifestHash": "sha256:8e4837c3746d21574033552dc6e662ff68fd9834a4e5371d3ab0e12d43605ec7",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:c97c8b81d67c176635773ff5fe26366624f6a725db02fae2e2956a8d6da04fe4"
+}

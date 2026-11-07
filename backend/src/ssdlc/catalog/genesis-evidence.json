@@ -1,0 +1,288 @@
+[
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-29148-6.2.2",
+      "sourceTitle": "ISO/IEC/IEEE 29148:2018",
+      "exactCitation": "ISO/IEC/IEEE 29148:2018, Clause 6.2.2 (Business or mission analysis process)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PO.1.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PO.1.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-29148-5.2.5",
+      "sourceTitle": "ISO/IEC/IEEE 29148:2018",
+      "exactCitation": "ISO/IEC/IEEE 29148:2018, Clause 5.2.5 (Characteristics of individual requirements)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-29148-6.5.2",
+      "sourceTitle": "ISO/IEC/IEEE 29148:2018",
+      "exactCitation": "ISO/IEC/IEEE 29148:2018, Clause 6.5.2 (Requirements management process)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-42010-6.8",
+      "sourceTitle": "ISO/IEC/IEEE 42010:2022",
+      "exactCitation": "ISO/IEC/IEEE 42010:2022, Clause 6.8 (Architecture rationale)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-42010-6.3",
+      "sourceTitle": "ISO/IEC/IEEE 42010:2022",
+      "exactCitation": "ISO/IEC/IEEE 42010:2022, Clause 6.3 (Stakeholders and concerns)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PW.4.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PW.4.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PW.7.2",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PW.7.2",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-29119-2-8.2",
+      "sourceTitle": "ISO/IEC/IEEE 29119-2:2021",
+      "exactCitation": "ISO/IEC/IEEE 29119-2:2021, Clause 8.2 (Test design and implementation process)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-25010-4.2",
+      "sourceTitle": "ISO/IEC 25010:2023",
+      "exactCitation": "ISO/IEC 25010:2023, Clause 4.2 (Product quality model)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PW.1.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PW.1.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PS.3.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PS.3.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PO.5.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PO.5.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-DORA-CICD",
+      "sourceTitle": "DORA Accelerate State of DevOps 2023 Report",
+      "exactCitation": "DORA Accelerate State of DevOps 2023 Report, Section \"Technical capabilities: Continuous integration and continuous delivery\"",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-29119-2-8.5",
+      "sourceTitle": "ISO/IEC/IEEE 29119-2:2021",
+      "exactCitation": "ISO/IEC/IEEE 29119-2:2021, Clause 8.5 (Test execution process)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-ISO-29119-3-7",
+      "sourceTitle": "ISO/IEC/IEEE 29119-3:2021",
+      "exactCitation": "ISO/IEC/IEEE 29119-3:2021, Clause 7 (Organizational test process documentation)",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PW.7.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PW.7.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PO.4.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PO.4.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-PS.2.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice PS.2.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-DORA-CFR",
+      "sourceTitle": "DORA Accelerate State of DevOps 2023 Report",
+      "exactCitation": "DORA Accelerate State of DevOps 2023 Report, Section \"Software delivery performance: Change failure rate\"",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-DORA-FOUR-KEYS",
+      "sourceTitle": "DORA Accelerate State of DevOps 2023 Report",
+      "exactCitation": "DORA Accelerate State of DevOps 2023 Report, Section \"Software delivery performance: Four key metrics\"",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  },
+  {
+    "evidence": {
+      "genesisEvidenceId": "GEN-NIST-SSDF-RV.3.1",
+      "sourceTitle": "NIST SP 800-218 Secure Software Development Framework (SSDF) Version 1.1",
+      "exactCitation": "NIST SP 800-218 SSDF v1.1, Practice RV.3.1",
+      "evidenceStrength": "primary"
+    },
+    "bridgeProvenance": {
+      "source": "genesis-bridge",
+      "reviewStatus": "approved",
+      "access": "allowed"
+    }
+  }
+]

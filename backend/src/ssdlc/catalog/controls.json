@@ -1,0 +1,1069 @@
+[
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-PLANNING-NEED-SCOPE",
+    "phase": "planning",
+    "objective": "Confirm the delivery need and bounded scope before planning.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-29148-6.2.2",
+        "citation": "ISO/IEC/IEEE 29148:2018, Clause 6.2.2 (Business or mission analysis process)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "review",
+        "allowedSourceTypes": [
+          "governed:human-review"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 604800
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:intake/need-validity",
+      "family:intake/scope-boundaries",
+      "aav:intake-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-PLANNING-RISK-CLASSIFICATION",
+    "phase": "planning",
+    "objective": "Classify delivery risk and select proportionate assurance.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PO.1.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PO.1.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "review",
+        "allowedSourceTypes": [
+          "governed:human-review"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 604800
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:intake/risk-classification",
+      "aav:intake-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-REQUIREMENTS-COMPLETE-VERIFIABLE",
+    "phase": "requirements",
+    "objective": "Record complete, singular, feasible, and verifiable requirements.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-29148-5.2.5",
+        "citation": "ISO/IEC/IEEE 29148:2018, Clause 5.2.5 (Characteristics of individual requirements)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "artifact",
+        "allowedSourceTypes": [
+          "aav-019:repository-artifact"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 604800
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:requirements/completeness",
+      "family:requirements/verifiability",
+      "aav:requirements-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-REQUIREMENTS-TRACEABILITY",
+    "phase": "requirements",
+    "objective": "Trace requirements and identify measurable product quality attributes.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-29148-6.5.2",
+        "citation": "ISO/IEC/IEEE 29148:2018, Clause 6.5.2 (Requirements management process)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "artifact",
+        "allowedSourceTypes": [
+          "aav-019:repository-artifact"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 604800
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "rorca:requirements-traceability"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DESIGN-DECISIONS-QUALITY",
+    "phase": "design",
+    "objective": "Document architecture decisions and their quality-attribute rationale.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-42010-6.8",
+        "citation": "ISO/IEC/IEEE 42010:2022, Clause 6.8 (Architecture rationale)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "review",
+        "allowedSourceTypes": [
+          "governed:human-review"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 604800
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:architecture/architecture-decisions",
+      "family:architecture/quality-attribute-design",
+      "aav:architecture-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DESIGN-THREAT-BOUNDARIES",
+    "phase": "design",
+    "objective": "Model threats, stakeholders, concerns, and dependency trust boundaries.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-42010-6.3",
+        "citation": "ISO/IEC/IEEE 42010:2022, Clause 6.3 (Stakeholders and concerns)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "artifact",
+        "allowedSourceTypes": [
+          "aav-019:repository-artifact"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 604800
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:architecture/threat-model",
+      "family:architecture/dependency-boundaries",
+      "aav:architecture-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEVELOPMENT-SECURE-REVIEW",
+    "phase": "development",
+    "objective": "Apply secure coding practices and peer review each material change.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PW.4.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PW.4.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "artifact",
+        "allowedSourceTypes": [
+          "aav-019:repository-artifact"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:implementation/secure-coding",
+      "family:implementation/code-review",
+      "aav:implementation-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEVELOPMENT-TRACE-UNIT",
+    "phase": "development",
+    "objective": "Link code changes to intent and execute unit-level verification.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PW.7.2",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PW.7.2"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:implementation/change-traceability",
+      "family:implementation/unit-verification",
+      "aav:implementation-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-TESTING-REQ-REGRESSION",
+    "phase": "testing",
+    "objective": "Verify requirements and execute repeatable regression testing.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-29119-2-8.2",
+        "citation": "ISO/IEC/IEEE 29119-2:2021, Clause 8.2 (Test design and implementation process)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:validation/requirements-verification",
+      "family:validation/regression-testing",
+      "aav:validation-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-TESTING-QUALITY-ATTRIBUTES",
+    "phase": "testing",
+    "objective": "Measure delivered behavior against the selected product quality model.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-25010-4.2",
+        "citation": "ISO/IEC 25010:2023, Clause 4.2 (Product quality model)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:validation/quality-attribute-verification",
+      "aav:validation-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-TESTING-THREAT-AUTHZ-SECRETS",
+    "phase": "testing",
+    "objective": "Verify threat controls, authorization boundaries, and secret handling.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PW.1.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PW.1.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "artifact",
+        "allowedSourceTypes": [
+          "aav-019:repository-artifact"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "critical",
+    "exceptionPolicy": {
+      "allowed": false,
+      "approvalRequired": false,
+      "justificationRequired": false
+    },
+    "skillRefs": [
+      "family:security/threat-control-verification",
+      "family:security/authz-boundaries",
+      "family:security/secrets",
+      "aav:security-assurance"
+    ],
+    "evidenceClassification": "security_finding"
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-TESTING-SUPPLY-CHAIN",
+    "phase": "testing",
+    "objective": "Verify supply-chain provenance and governed vulnerability response.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PS.3.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PS.3.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "artifact",
+        "allowedSourceTypes": [
+          "aav-019:repository-artifact"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "critical",
+    "exceptionPolicy": {
+      "allowed": false,
+      "approvalRequired": false,
+      "justificationRequired": false
+    },
+    "skillRefs": [
+      "aav:supply-chain-assurance"
+    ],
+    "evidenceClassification": "security_finding"
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEPLOYMENT-READINESS-PARITY",
+    "phase": "deployment",
+    "objective": "Demonstrate deployment readiness and production-like environment parity.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PO.5.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PO.5.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:staging/deployment-readiness",
+      "family:staging/environment-parity",
+      "aav:staging-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEPLOYMENT-RELEASE-EVIDENCE",
+    "phase": "deployment",
+    "objective": "Assemble release-bound evidence through an automated delivery workflow.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-DORA-CICD",
+        "citation": "DORA Accelerate State of DevOps 2023 Report, Section \"Technical capabilities: Continuous integration and continuous delivery\""
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:staging/release-evidence",
+      "aav:staging-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-TESTING-ACCEPTANCE",
+    "phase": "testing",
+    "objective": "Validate acceptance criteria using controlled test execution.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-29119-2-8.5",
+        "citation": "ISO/IEC/IEEE 29119-2:2021, Clause 8.5 (Test execution process)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:qa/acceptance-validation",
+      "aav:qa-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-TESTING-INDEPENDENT-REVIEW",
+    "phase": "testing",
+    "objective": "Independently review test evidence before release approval.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-ISO-29119-3-7",
+        "citation": "ISO/IEC/IEEE 29119-3:2021, Clause 7 (Organizational test process documentation)"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "review",
+        "allowedSourceTypes": [
+          "governed:human-review"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:qa/independent-evidence-review",
+      "aav:qa-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEPLOYMENT-APPROVAL-INTEGRATION",
+    "phase": "deployment",
+    "objective": "Require authorized approval and protected integration for release changes.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PW.7.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PW.7.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "approval",
+        "allowedSourceTypes": [
+          "governed:approval"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": false,
+      "approvalRequired": false,
+      "justificationRequired": false
+    },
+    "skillRefs": [
+      "family:merge/change-approval",
+      "family:merge/protected-integration",
+      "aav:merge-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEPLOYMENT-EVIDENCE-COMPLETE",
+    "phase": "deployment",
+    "objective": "Confirm mandatory evidence is complete before protected integration.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PO.4.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PO.4.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "approval",
+        "allowedSourceTypes": [
+          "governed:approval"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": false,
+      "approvalRequired": false,
+      "justificationRequired": false
+    },
+    "skillRefs": [
+      "family:merge/evidence-completeness",
+      "aav:merge-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEPLOYMENT-APPROVAL-DEPLOYMENT",
+    "phase": "deployment",
+    "objective": "Authorize release and verify the deployed software identity and behavior.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-PS.2.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice PS.2.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "approval",
+        "allowedSourceTypes": [
+          "governed:approval"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": false,
+      "approvalRequired": false,
+      "justificationRequired": false
+    },
+    "skillRefs": [
+      "family:production/release-approval",
+      "family:production/deployment-verification",
+      "aav:production-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-DEPLOYMENT-ROLLBACK-OBSERVE",
+    "phase": "deployment",
+    "objective": "Prove rollback readiness and observe production delivery outcomes.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-DORA-CFR",
+        "citation": "DORA Accelerate State of DevOps 2023 Report, Section \"Software delivery performance: Change failure rate\""
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": true
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 86400
+        }
+      }
+    ],
+    "failureSeverity": "blocking",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 14
+    },
+    "skillRefs": [
+      "family:production/rollback-readiness",
+      "family:production/observability",
+      "aav:production-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-MAINTENANCE-OUTCOME-METRICS",
+    "phase": "maintenance",
+    "objective": "Compare predicted outcomes with delivery performance metrics.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-DORA-FOUR-KEYS",
+        "citation": "DORA Accelerate State of DevOps 2023 Report, Section \"Software delivery performance: Four key metrics\""
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "measurement",
+        "allowedSourceTypes": [
+          "aav-019:pipeline-measurement"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "tool-verified",
+        "evidenceDepth": "demonstrated",
+        "freshness": {
+          "maxAgeSeconds": 2592000
+        }
+      }
+    ],
+    "failureSeverity": "advisory",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 30
+    },
+    "skillRefs": [
+      "family:learn/prediction-vs-outcome",
+      "family:learn/delivery-metrics",
+      "aav:learn-assurance"
+    ]
+  },
+  {
+    "schemaVersion": "rorca.ssdlc-control-record.v1",
+    "version": "1.0.0",
+    "controlId": "CTRL-MAINTENANCE-INCIDENT-CONTROLS",
+    "phase": "maintenance",
+    "objective": "Analyze incidents, control effectiveness, and governed improvement candidates.",
+    "applicability": {
+      "universal": true,
+      "productProfiles": [],
+      "riskProfiles": [],
+      "domainRegulatory": []
+    },
+    "sourceReferences": [
+      {
+        "genesisEvidenceId": "GEN-NIST-SSDF-RV.3.1",
+        "citation": "NIST SP 800-218 SSDF v1.1, Practice RV.3.1"
+      }
+    ],
+    "sourceStrength": "primary",
+    "requiredEvidence": [
+      {
+        "classification": "review",
+        "allowedSourceTypes": [
+          "governed:human-review"
+        ],
+        "requiredBindings": {
+          "subject": true,
+          "release": false
+        },
+        "minimumTrust": "independently-verified",
+        "evidenceDepth": "independent-verification",
+        "freshness": {
+          "maxAgeSeconds": 2592000
+        }
+      }
+    ],
+    "failureSeverity": "advisory",
+    "exceptionPolicy": {
+      "allowed": true,
+      "approvalRequired": true,
+      "justificationRequired": true,
+      "maxDurationDays": 30
+    },
+    "skillRefs": [
+      "family:learn/incident-analysis",
+      "family:learn/control-effectiveness",
+      "family:learn/improvement-candidates",
+      "aav:learn-assurance"
+    ]
+  }
+]

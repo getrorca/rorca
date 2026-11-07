@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 16388,
+      "contentHash": "sha256:b9fc08d4a9b5636448a73a3f372d4a8ebccad9203b9a3447e4df0ece89e1f326",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 24701,
+      "contentHash": "sha256:8d34b5239b5b1cce882afe73342f1249fd2fa95aa4ab54826f09fdd66f8f3014",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 4685,
+      "contentHash": "sha256:6ef6fbe19700bb80c90efc533f32e65148659c1293c42f8a3131ec6ff3d17676",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 10093,
+      "contentHash": "sha256:de7dbd3a6a78e1c87e370d81a5a9ea944f7ff8b05e17e490bbc8a378a54a2001",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:3fea61f1f7219f7f4183b394f58643b304c0de722be5467b8d71ee664dcc9aab",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "wave-5-forgejo-adapter-omp-shim",
+  "specMaterialHash": "sha256:b9fc08d4a9b5636448a73a3f372d4a8ebccad9203b9a3447e4df0ece89e1f326"
+}

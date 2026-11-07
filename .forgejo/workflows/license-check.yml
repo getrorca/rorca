@@ -1,0 +1,26 @@
+name: License Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: license-check
+  cancel-in-progress: true
+
+jobs:
+  license-check:
+    name: License Headers And Boundaries
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run check:licenses
+      - run: npm run check:license-boundaries

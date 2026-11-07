@@ -1,0 +1,102 @@
+name: Public API Contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: contract-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Contract Stability
+    runs-on: ci-amd64
+    services:
+      postgres:
+        # Canonical migrations use pgvector; AGE remains optional/lite-mode in
+        # this contract environment and is safely skipped by the migration runner.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: rorca_bootstrap
+          POSTGRES_PASSWORD: ${{ secrets.CI_POSTGRES_PASSWORD }}
+          POSTGRES_DB: rorca
+        options: >-
+          --health-cmd "pg_isready -U rorca_bootstrap -d rorca"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      CI_DB_HOST: postgres
+      CI_DB_NAME: rorca
+      RORCA_DB_MODE: byop
+      RORCA_DISABLE_BACKGROUND_RUNTIME: "true"
+      RORCA_SERVE_MCP: "false"
+      GITHUB_PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Generate ephemeral database credentials
+        # No database credential is committed. The bootstrap password comes from
+        # the CI secret CI_POSTGRES_PASSWORD; the split-principal role passwords
+        # are generated per run and exported to later steps via GITHUB_ENV.
+        run: |
+          set -euo pipefail
+          runtime_pw="$(openssl rand -hex 16)"
+          migrator_pw="$(openssl rand -hex 16)"
+          writer_pw="$(openssl rand -hex 16)"
+          {
+            echo "RORCA_RUNTIME_DATABASE_USER=rorca_runtime"
+            echo "RORCA_MIGRATION_DATABASE_USER=rorca_migrator"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_USER=rorca_canonical_writer"
+            echo "RORCA_RUNTIME_DATABASE_PASSWORD=${runtime_pw}"
+            echo "RORCA_MIGRATION_DATABASE_PASSWORD=${migrator_pw}"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_PASSWORD=${writer_pw}"
+            echo "DATABASE_URL=postgres://rorca_runtime:${runtime_pw}@${CI_DB_HOST}:5432/${CI_DB_NAME}"
+            echo "RORCA_MIGRATION_DATABASE_URL=postgres://rorca_migrator:${migrator_pw}@${CI_DB_HOST}:5432/${CI_DB_NAME}"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_URL=postgres://rorca_canonical_writer:${writer_pw}@${CI_DB_HOST}:5432/${CI_DB_NAME}"
+          } >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: cd backend && npm ci
+      - name: Provision isolated split database principals
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends postgresql-client
+          PGPASSWORD="$POSTGRES_BOOTSTRAP_PASSWORD" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+            --host "$POSTGRES_HOST" --username "$POSTGRES_BOOTSTRAP_USER" --dbname "$POSTGRES_DB" \
+            --command 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto;'
+          docker/postgres/bootstrap-roles.sh
+        env:
+          POSTGRES_HOST: postgres
+          POSTGRES_DB: rorca
+          POSTGRES_BOOTSTRAP_USER: rorca_bootstrap
+          POSTGRES_BOOTSTRAP_PASSWORD: ${{ secrets.CI_POSTGRES_PASSWORD }}
+          RORCA_MIGRATION_DATABASE_USER: rorca_migrator
+      - run: npm run build
+      - name: Regenerate governed contract artifacts
+        run: npm run build:contract
+      - name: Refuse stale committed contract artifacts
+        run: git diff --exit-code -- docs/OPEN_API_CONTRACT.md docs/openapi-public-snapshot.json packages/rorca-public-contract
+      - if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.base_ref }}" --depth=1
+      - name: Start backend
+        run: npm run dev:server:contract > /tmp/rorca-contract-server.log 2>&1 &
+      - run: npm run check:contract
+        env:
+          RORCA_CONTRACT_BASE_URL: http://127.0.0.1:3030
+      - if: always()
+        run: cat /tmp/rorca-contract-server.log

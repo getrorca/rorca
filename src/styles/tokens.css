@@ -1,0 +1,167 @@
+/* Light-first product theme. Explicit theme selectors preserve deterministic SSR/loading colors. */
+:root,
+[data-theme="light"] {
+  --bg: #fafafa;
+  --panel: #ffffff;
+  --surface-200: #f4f4f5;
+  --border: #e4e4e7;
+  --text: #09090b;
+  --text-muted: #52525b; /* Zinc-600: 7.21:1 on #fafafa — passes WCAG AA */
+  --accent: #0a6963;
+  --accent-hover: #0c7f7a;
+  --accent-border: #0a6963;
+  --accent-contrast: #ffffff;
+  --success: #047857;
+  --warning: #a14807;
+  --error: #b91c1c;
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --status-healthy: var(--success);
+  --status-healthy-bg: rgba(4, 120, 87, 0.08);
+  --status-degraded: var(--warning);
+  --status-degraded-bg: rgba(161, 72, 7, 0.08);
+  --status-offline: var(--error);
+  --status-offline-bg: rgba(185, 28, 28, 0.07);
+  /* Lifecycle status language: one tone per evaluated status, used by badges, cells, and rails. */
+  --lc-passed: #047857;
+  --lc-passed-bg: rgba(4, 120, 87, 0.08);
+  --lc-progress: #0a6963;
+  --lc-progress-bg: rgba(10, 105, 99, 0.08);
+  --lc-blocked: #b91c1c;
+  --lc-blocked-bg: rgba(185, 28, 28, 0.07);
+  --lc-approval: #a14807;
+  --lc-approval-bg: rgba(161, 72, 7, 0.08);
+  --lc-stale: #57534e; /* Stone-600: reads as outdated, not as an error; 6.6:1 on #fafafa */
+  --lc-stale-bg: rgba(87, 83, 78, 0.08);
+  --lc-muted: var(--text-muted);
+  --lc-muted-bg: var(--surface-200);
+  /* Lifecycle risk tones: critical is a deeper red than high so the two never read alike. */
+  --lc-risk-low: #047857;
+  --lc-risk-low-bg: rgba(4, 120, 87, 0.08);
+  --lc-risk-medium: #a14807;
+  --lc-risk-medium-bg: rgba(161, 72, 7, 0.08);
+  --lc-risk-high: #b91c1c;
+  --lc-risk-high-bg: rgba(185, 28, 28, 0.07);
+  --lc-risk-critical: #7f1d1d;
+  --lc-risk-critical-bg: rgba(127, 29, 29, 0.1);
+  /* Operational state packet channels (Mission OS). Each channel is a separate
+     semantic dimension; components must pair these with text and icon, never color alone. */
+  --pk-active: #0369a1; /* liveness: running — sky, distinct from outcome green and accent teal */
+  --pk-active-bg: rgba(3, 105, 161, 0.08);
+  --pk-queued: #4f46e5; /* liveness: queued — indigo */
+  --pk-queued-bg: rgba(79, 70, 229, 0.08);
+  --pk-paused: #9333ea; /* liveness: paused — purple */
+  --pk-paused-bg: rgba(147, 51, 234, 0.08);
+  --pk-confidence: #6d28d9; /* confidence channel — violet */
+  --pk-confidence-bg: rgba(109, 40, 217, 0.07);
+  --pk-fresh: var(--accent); /* freshness: fresh — quiet progress tone */
+  --pk-fresh-bg: rgba(10, 105, 99, 0.08);
+  --skeleton: #e5e5e5;
+  --skeleton-shimmer: #f5f5f5;
+  --terminal-bg: #f5f5f5;
+  --terminal-fg: #1e1e1e;
+  --terminal-line: #e0e0e0;
+  --terminal-state-live: var(--success);
+  --terminal-state-live-bg: rgba(4, 120, 87, 0.08);
+  --terminal-state-notice: var(--accent);
+  --terminal-state-notice-bg: rgba(10, 105, 99, 0.08);
+  --terminal-state-warning: var(--warning);
+  --terminal-state-warning-bg: rgba(161, 72, 7, 0.09);
+  --terminal-focus-ring: var(--accent-border);
+  --switch-knob: #ffffff;
+  --kbd-bg: rgba(255, 255, 255, 0.2);
+  --backdrop-opacity: 0.5;
+  --backdrop: rgba(9, 9, 11, 0.5);
+  --motion-duration-feedback: 140ms;
+  --motion-duration-drawer: 150ms;
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --inline-code-bg: rgba(0, 0, 0, 0.06);
+  --code-block-bg: rgba(0, 0, 0, 0.05);
+  --code-block-text: #1e1e1e;
+  --scrollbar-track: #f4f4f5;
+  --scrollbar-thumb: #d4d4d8;
+  --scrollbar-thumb-hover: #a1a1aa;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #0b0b18;
+  --panel: #10101f;
+  --surface-200: #18182a;
+  --border: #2d2d4a;
+  --text: #fafafa;
+  --text-muted: #a1a1aa; /* 4.65:1 on #0b0b18 — passes WCAG AA */
+  --accent: #3a9996;
+  --accent-hover: #4db5b1;
+  --accent-border: #5dd4cf;
+  --accent-contrast: #ffffff;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --status-healthy: var(--success);
+  --status-healthy-bg: rgba(16, 185, 129, 0.12);
+  --status-degraded: var(--warning);
+  --status-degraded-bg: rgba(245, 158, 11, 0.12);
+  --status-offline: var(--error);
+  --status-offline-bg: rgba(239, 68, 68, 0.12);
+  /* Lifecycle status language: one tone per evaluated status, used by badges, cells, and rails. */
+  --lc-passed: #10b981;
+  --lc-passed-bg: rgba(16, 185, 129, 0.12);
+  --lc-progress: #5dd4cf;
+  --lc-progress-bg: rgba(58, 153, 150, 0.12);
+  --lc-blocked: #ef4444;
+  --lc-blocked-bg: rgba(239, 68, 68, 0.12);
+  --lc-approval: #f59e0b;
+  --lc-approval-bg: rgba(245, 158, 11, 0.12);
+  --lc-stale: #a8a29e;
+  --lc-stale-bg: rgba(168, 162, 158, 0.12);
+  --lc-muted: var(--text-muted);
+  --lc-muted-bg: var(--surface-200);
+  /* Lifecycle risk tones: critical is a lighter red than high so both stay readable on dark. */
+  --lc-risk-low: #10b981;
+  --lc-risk-low-bg: rgba(16, 185, 129, 0.12);
+  --lc-risk-medium: #f59e0b;
+  --lc-risk-medium-bg: rgba(245, 158, 11, 0.12);
+  --lc-risk-high: #ef4444;
+  --lc-risk-high-bg: rgba(239, 68, 68, 0.12);
+  --lc-risk-critical: #fca5a5;
+  --lc-risk-critical-bg: rgba(252, 165, 165, 0.12);
+  /* Operational state packet channels (Mission OS) — dark theme counterparts. */
+  --pk-active: #38bdf8;
+  --pk-active-bg: rgba(56, 189, 248, 0.12);
+  --pk-queued: #818cf8;
+  --pk-queued-bg: rgba(129, 140, 248, 0.12);
+  --pk-paused: #c084fc;
+  --pk-paused-bg: rgba(192, 132, 252, 0.12);
+  --pk-confidence: #a78bfa;
+  --pk-confidence-bg: rgba(167, 139, 250, 0.12);
+  --pk-fresh: var(--accent);
+  --pk-fresh-bg: rgba(58, 153, 150, 0.12);
+  --skeleton: #2d2d4a;
+  --skeleton-shimmer: #3d3d5c;
+  --terminal-bg: #0d0d1a;
+  --terminal-fg: #d4d4d4;
+  --terminal-line: #1a1a2e;
+  --terminal-state-live: var(--success);
+  --terminal-state-live-bg: rgba(16, 185, 129, 0.12);
+  --terminal-state-notice: var(--accent-border);
+  --terminal-state-notice-bg: rgba(58, 153, 150, 0.12);
+  --terminal-state-warning: var(--warning);
+  --terminal-state-warning-bg: rgba(245, 158, 11, 0.12);
+  --terminal-focus-ring: var(--accent-border);
+  --switch-knob: #ffffff;
+  --kbd-bg: rgba(255, 255, 255, 0.15);
+  --backdrop-opacity: 0.75;
+  --backdrop: rgba(9, 9, 11, 0.75);
+  --inline-code-bg: rgba(58, 153, 150, 0.1);
+  --code-block-bg: rgba(0, 0, 0, 0.4);
+  --code-block-text: #e0e0e0;
+  --scrollbar-track: #18182a;
+  --scrollbar-thumb: #2d2d4a;
+  --scrollbar-thumb-hover: #3d3d5c;
+  color-scheme: dark;
+}

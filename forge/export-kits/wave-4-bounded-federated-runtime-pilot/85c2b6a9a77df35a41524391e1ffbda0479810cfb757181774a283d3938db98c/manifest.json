@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 32554,
+      "contentHash": "sha256:590c0291844b45384c3d67ade4cb73c90d2d806ef3dba8e69555801ac5959894",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 47307,
+      "contentHash": "sha256:dfb28d56251059f3869b5b1e322568885c8e563d4c8eb5bb86c38104ff4a9acb",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 6173,
+      "contentHash": "sha256:330322f08a420d618c58e8aa45d9b14931dbf079803a71618351a6f3db667550",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 21351,
+      "contentHash": "sha256:bfe6c444d0146b7880ffdacb84c772d242c9d83c796abdb2edb25de22889b2ea",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:85c2b6a9a77df35a41524391e1ffbda0479810cfb757181774a283d3938db98c",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "wave-4-bounded-federated-runtime-pilot",
+  "specMaterialHash": "sha256:590c0291844b45384c3d67ade4cb73c90d2d806ef3dba8e69555801ac5959894"
+}

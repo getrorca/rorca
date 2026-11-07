@@ -1,0 +1,224 @@
+{
+  "schemaVersion": "bounty.qualification-receipt.v1",
+  "receiptId": "sha256:a71a99c600ff09167366ee8a7826e472ab4879d0fc51fa604948053b88c1f0be",
+  "candidateId": "bounty-mission-control-mvp",
+  "issuedAt": "2026-08-03T00:00:00.000Z",
+  "immutable": true,
+  "qualificationMode": "hermetic",
+  "release": {
+    "qualifiedFixture": true,
+    "featureState": "disabled",
+    "enableAvailable": false,
+    "disposition": "disabled-pending-post-commit-requalification"
+  },
+  "requalificationTriggers": [
+    "prompt",
+    "skill",
+    "router",
+    "oracle",
+    "persona",
+    "model",
+    "runtime",
+    "policy",
+    "broker",
+    "adapter",
+    "migration",
+    "configuration",
+    "corpus",
+    "test-evidence"
+  ],
+  "requalificationFingerprint": "sha256:0131c41084c93312f951fa4e8cb7a723964e179c1c8caedf3bbf23d946d6559a",
+  "bindings": {
+    "sourceSha": "7221543f8567686ca06aa825ddd2b2991b9cedcd",
+    "sourceTreeHash": "sha256:c2ce8fa85fc72c4c068c6d89c84bef82ecd281f40c410a304d6cff0791e3f0d2",
+    "migrationHash": "sha256:527e03c263096b8b05b8029cd621e3aa6b156952dfe5b2be57f478e0900a3543",
+    "configHash": "sha256:b22de13cb9424fabaac48f8afd62828d881dc205d785924293586db5e8a98f09",
+    "brokerHash": "sha256:bbd60ab0040136c4aa7831b33ee934646b9bdfc51311615af15650fbba054ec2",
+    "adapterHash": "sha256:ee60971148eb9294bacc5fdbb1f6bbd0f8e60721f588da2c084af0db93bd99aa",
+    "promptHash": "sha256:12807335704502300876281b141ad46c7ef24d64697fbe72b8216be6116e907b",
+    "skillHash": "sha256:b632bc167c1ce4d4893c5f2c5e66bebe1f06f6ea9ed17aee0360ba06046042e2",
+    "routerHash": "sha256:b05dc179fe2831095b12e1a80fb754c2bf3dbb59e4dde513003dffa6b59bc85a",
+    "oracleHash": "sha256:c02ab5f18a22c26dedd6ac6c9167e226756d145a7b307c4e602c2fa540f659d1",
+    "personaHash": "sha256:a758e447b647421c9a08fe53c7ee0115d518ffd11e26e53416558890799b296a",
+    "modelHash": "sha256:a5f65f19ff9334ef50e3c1669517b52c56f28b7b69d9abd6f817fcb2920e37a2",
+    "runtimeHash": "sha256:dd870ab51611dd750f94fec5cbcbfe16eda7cc444acf9ac159ebee75adc1a775",
+    "policyHash": "sha256:50b101070ef1da2546e6fe63feb621675657635715d064020950b589314ec085",
+    "evidenceRoot": "sha256:ac7fd01d6fb8031f2f3e0a037b5fed0333254d144b0b20ea61d15a2109ad0330"
+  },
+  "corpora": [
+    {
+      "id": "bounty-private-positive-v1",
+      "class": "private",
+      "manifestSha256": "sha256:6cc71bb49808c2f01f2c5df89aae8e736f8bc08e43554b37555881a9bc4b52e1",
+      "itemCount": 48,
+      "blinded": true,
+      "immutable": true,
+      "repositoryContentIncluded": false
+    },
+    {
+      "id": "bounty-anti-cheat-negative-v1",
+      "class": "anti-cheat",
+      "manifestSha256": "sha256:690f44ba6a126f7aa78d753a7b85e6c2647c3b10b20729a9d8c28972cac9ffa6",
+      "itemCount": 64,
+      "blinded": true,
+      "immutable": true,
+      "repositoryContentIncluded": false
+    }
+  ],
+  "suiteEvidence": [
+    {
+      "kind": "unit",
+      "name": "bounty-effect-policy-unit",
+      "result": "passed",
+      "evidenceSha256": "sha256:328bdfdd02fe28fc6ee0df62598d83f91b1ce2279bd2f779f0faad606ef435f7"
+    },
+    {
+      "kind": "property",
+      "name": "scope-normalization-property",
+      "result": "passed",
+      "evidenceSha256": "sha256:697e4fb744d19e2d2b149996935c4825dc17024609ed6569526ac8add3663d1d"
+    },
+    {
+      "kind": "postgresql",
+      "name": "bounty-postgresql-hermetic",
+      "result": "passed",
+      "evidenceSha256": "sha256:6534250115e86c5c90caa7ca6b9775f4ab24f3398ac4ebbd632447548c8e20de"
+    },
+    {
+      "kind": "pg-boss",
+      "name": "bounty-pg-boss-hermetic",
+      "result": "passed",
+      "evidenceSha256": "sha256:bc45767c0600b764764fd924735b8385e810e29624736a93455e7324840b07b0"
+    },
+    {
+      "kind": "adapter",
+      "name": "bounty-adapter-hermetic",
+      "result": "passed",
+      "evidenceSha256": "sha256:9056762746c24665df0d4bb377d60293742c9872214d1011117152177cbfaad4"
+    },
+    {
+      "kind": "browser",
+      "name": "bounty-browser-hermetic",
+      "result": "passed",
+      "evidenceSha256": "sha256:32d99c1f9f2fc67a8b826627eabf57218090818a4164ba4e572071733b81f729"
+    },
+    {
+      "kind": "sandbox",
+      "name": "bounty-bwrap-boundary",
+      "result": "passed",
+      "evidenceSha256": "sha256:ed7b0668bba14ae83eb45142df0806697aaf23b8a9cb216525eb521640e308c7"
+    },
+    {
+      "kind": "concurrency",
+      "name": "bounty-concurrency-fences",
+      "result": "passed",
+      "evidenceSha256": "sha256:9b2a1bb865bbf340fa7107d82117d041c4397c721c5335c99e435cabaa47ca74"
+    },
+    {
+      "kind": "crash",
+      "name": "bounty-crash-cuts",
+      "result": "passed",
+      "evidenceSha256": "sha256:0de1c7251bec8c8d21ad118676d2ea7353c1f8853597d248834b60a93ec38332"
+    },
+    {
+      "kind": "recovery",
+      "name": "bounty-restart-recovery",
+      "result": "passed",
+      "evidenceSha256": "sha256:85d528e7d2d73eb6f5a09ef4b86de054249d6c806a5e57c7f23fd3d5ad600c70"
+    },
+    {
+      "kind": "route-tool",
+      "name": "bounty-route-tool-zero-authority",
+      "result": "passed",
+      "evidenceSha256": "sha256:4082427a464469d8ac5e3da80458bba73a39c56312a8f18d862b1cfa6637639b"
+    },
+    {
+      "kind": "ui",
+      "name": "bounty-mission-control-ui",
+      "result": "passed",
+      "evidenceSha256": "sha256:d3a12f53f462e351d6757e2333549ef05351b8fa4bc856d3d8cddb83157ed15f"
+    },
+    {
+      "kind": "oracle",
+      "name": "bounty-oracle-rule-of-two",
+      "result": "passed",
+      "evidenceSha256": "sha256:ef17f48433c03e3f45f1726a4bf282ad95200ceb062404412fc8d0bb35d12971"
+    },
+    {
+      "kind": "receipt",
+      "name": "bounty-immutable-receipt",
+      "result": "passed",
+      "evidenceSha256": "sha256:b60ca5a437861714579ef5919201f522aa647e73eb3e8869fa0c2d1dc9478a95"
+    }
+  ],
+  "controlProofs": [
+    {
+      "id": "sole-broker-egress",
+      "result": "passed",
+      "namedTest": "broker-sole-effect-authority.contract",
+      "evidenceSha256": "sha256:ab118eaa8bc6a42af25123c459cf09ae3abb7f3ac424f633722259b7dd206664"
+    },
+    {
+      "id": "credential-isolation",
+      "result": "passed",
+      "namedTest": "worker-credential-nondisclosure.contract",
+      "evidenceSha256": "sha256:6644769d480687217059b47528679e9191cb76831c50f73053382ba003a65e3c"
+    },
+    {
+      "id": "scope-dns-redirect-containment",
+      "result": "passed",
+      "namedTest": "broker-scope-epoch-dns.contract",
+      "evidenceSha256": "sha256:041e0bc24c98c8e7fc6ff7202d043db2dd93d19d1167d2f4511d6fa2a97ad641"
+    },
+    {
+      "id": "rule-of-two",
+      "result": "passed",
+      "namedTest": "rule-of-two-independent-validation.contract",
+      "evidenceSha256": "sha256:818af8a1576109f59b836019ac8682532366ca16b16154bdf13434a44d076ab2"
+    },
+    {
+      "id": "stop-ordering",
+      "result": "passed",
+      "namedTest": "stop-revoke-fence-terminate.contract",
+      "evidenceSha256": "sha256:04fd747e1e7318d46c495634d94f2d15e5a33986da3176d982b7d2023e24e9c6"
+    },
+    {
+      "id": "evidence-integrity",
+      "result": "passed",
+      "namedTest": "evidence-tamper-rejection.contract",
+      "evidenceSha256": "sha256:de808572839838d5cfbde8ff28c4ad9ca774f18dc80eb0638675a7f2fb5caa29"
+    },
+    {
+      "id": "zero-submission-paths",
+      "result": "passed",
+      "namedTest": "submission-human-presence.contract",
+      "evidenceSha256": "sha256:843aaf7d06c07981ccb86690f6e0a8be7e1fc7e226810e00f99cd3cca173de8a"
+    }
+  ],
+  "metrics": {
+    "classSuccess": {
+      "reflected-xss": 1,
+      "stored-xss": 1,
+      "idor": 1,
+      "server-side-callback": 1,
+      "exposed-private-key": 1,
+      "known-vulnerability": 1,
+      "source-code-control-edge": 1
+    },
+    "falsePositiveRate": 0,
+    "rejectionRate": 0.5,
+    "oracleFailures": 0,
+    "costMicrousd": 1250000,
+    "inputTokens": 12000,
+    "outputTokens": 2400,
+    "activity": {
+      "brokerRequests": 42,
+      "browserActions": 8,
+      "validatorRuns": 14
+    },
+    "cacheSpendMicrousd": 110000,
+    "authSpendMicrousd": 90000
+  },
+  "traceabilityHash": "sha256:9ada511711ed0c3a3795b0569b9901b5ece9fb2faab8cda4d653f57eb82b4202",
+  "receiptHash": "sha256:166b2aa2e2fe63f0bbcf634dd89f924aeb52ea16f2cbad0faa9f9135b3e52e3a"
+}

@@ -1,0 +1,21 @@
+=== invocation ===
+INV=wave2pf2026072918064435d26c
+WS=wave2pf2026072918064435d26cworkspace
+PGBIN=/usr/local/Cellar/postgresql@16/16.13/bin
+ADMIN=wave2pf2026072918064435d26cadmin
+OWNER=wave2pf2026072918064435d26cowner
+DB=rorca_wave2pf2026072918064435d26c_test
+PGPORT_W2=5450
+APPPORT=3347
+=== database/owner/extensions ===
+rorca_wave2pf2026072918064435d26c_test|wave2pf2026072918064435d26cowner|16.13 (Homebrew)|wave2pf2026072918064435d26cowner|true|false|false|false|false|false|age:1.5.0,pgcrypto:1.3,plpgsql:1.0,vector:0.8.0
+=== migrations ===
+248|248|20260729130000
+=== workspace ===
+1|wave2pf2026072918064435d26cworkspace|/private/tmp/rorca-wave2-integration-20260729
+=== preflight WAL ===
+1|spec_authoring_preflight|wave2pf2026072918064435d26cworkspace|authoring-preflight|2026-07-29 11:11:33.194226-07|{"model": "pi-direct-deterministic", "state": "accepted", "callerSurface": "pi.wave2.governed-preflight", "acceptedPlanHash": "sha256:b074b5d0150cf2a3debe1ae807384c25ff48aca02b8a549bedc24dbf21cd208a", "acceptedSpecCount": 1, "proposedSpecCount": 1, "persistenceOutcome": "not_started", "acceptedPreflightHash": "sha256:d127a35b84218a8fa2e63f0479377b80c504b0378633334fa9ab200627ead613", "diagnosticsCategories": [], "preflightAttemptCount": 1, "authoringProfileVersion": "wave2-integrated-context-1"}
+2|spec_authoring_preflight|wave2pf2026072918064435d26cworkspace|authoring-preflight|2026-07-29 11:13:20.899529-07|{"model": "pi-direct-deterministic", "state": "accepted", "callerSurface": "pi.wave1.governed-preflight", "acceptedPlanHash": "sha256:b96407f485af17cad02432ffdca675ab60d1b8ae212a9abbbb305f2d229941f7", "acceptedSpecCount": 1, "proposedSpecCount": 1, "persistenceOutcome": "not_started", "acceptedPreflightHash": "sha256:64087ba83d99b50e586a77811642ceabd859fdf6e5075ca0f032000b8408c6bf", "diagnosticsCategories": [], "preflightAttemptCount": 1, "authoringProfileVersion": "wave2-integrated-context-1"}
+3|spec_authoring_preflight|wave2pf2026072918064435d26cworkspace|authoring-preflight|2026-07-29 11:13:53.233681-07|{"model": "pi-direct-deterministic", "state": "accepted", "callerSurface": "pi.wave1.governed-preflight", "acceptedPlanHash": "sha256:01b17b5809c5d9b21121b5d83a8cec6c00df595558cb40aa177a1b28749d4957", "acceptedSpecCount": 1, "proposedSpecCount": 1, "persistenceOutcome": "not_started", "acceptedPreflightHash": "sha256:211096453a2cb870da78d445d96622740e4e7fbe48255c136f63d5107c9243d8", "diagnosticsCategories": [], "preflightAttemptCount": 1, "authoringProfileVersion": "wave1-exact-source-context-1"}
+=== no confirmation/persistence ===
+0|0

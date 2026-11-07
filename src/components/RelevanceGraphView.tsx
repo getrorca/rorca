@@ -1,0 +1,418 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
+ * RelevanceGraphView — Radial SVG rendering of the spec-centric memory
+ * relevance graph inside the Context Inspector.
+ *
+ * Responsibilities:
+ *  - Accept pre-fetched graph data and compute radial layout via computeRadialLayout.
+ *  - Render nodes with accessible visual encoding: color by type, badge by status.
+ *  - Edges drawn as SVG lines with thickness/dash/opacity from visual hints.
+ *  - Node click dispatches to the parent for retrieval detail synchronization.
+ *  - Fallback states: loading, unavailable, empty, error.
+ *  - Missing graph evidence labeled as "unavailable / semantic-only".
+ */
+
+import { useMemo } from 'react';
+import { Loader2, AlertTriangle, Network } from 'lucide-react';
+import { computeRadialLayout } from '../lib/radial-layout';
+import { GraphCapabilityNotice, runtimeToNoticeProps } from './GraphCapabilityNotice';
+import type {
+  SpecRelevanceGraphResponse,
+  GraphFetchState,
+  PositionedNode,
+  PositionedEdge,
+  RelevanceNodeType,
+} from '../types/spec-relevance-graph';
+
+// ─── Visual constants ────────────────────────────────────────────────────────
+
+const NODE_RADIUS: Record<RelevanceNodeType, number> = {
+  hub: 28,
+  file: 16,
+  memory: 18,
+  context: 16,
+};
+
+const NODE_COLOR: Record<RelevanceNodeType, string> = {
+  hub: 'var(--accent)',
+  file: 'var(--accent-border)',
+  memory: 'var(--warning)',
+  context: 'var(--success)',
+};
+
+function nodeStatusColor(node: PositionedNode): string {
+  if (node.dropped) return 'var(--error)';
+  if (node.enteredPrompt) return 'var(--success)';
+  if (node.selected) return 'var(--warning)';
+  return NODE_COLOR[node.type] ?? 'var(--text-muted)';
+}
+
+function nodeAriaLabel(node: PositionedNode): string {
+  const status = node.dropped
+    ? 'dropped'
+    : node.enteredPrompt
+      ? 'entered prompt'
+      : node.selected
+        ? 'selected'
+        : 'candidate';
+  const score = node.relevanceScore != null ? ` (${Math.round(node.relevanceScore * 100)}%)` : '';
+  return `${node.type}: ${node.label}${score} — ${status}`;
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+interface RelevanceGraphViewProps {
+  state: GraphFetchState;
+  onNodeClick?: (node: PositionedNode) => void;
+  selectedNodeId?: string | null;
+}
+
+export default function RelevanceGraphView({ state, onNodeClick, selectedNodeId }: RelevanceGraphViewProps) {
+  // Loading
+  if (state.status === 'loading') {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-2 py-10" data-testid="graph-loading">
+        <Loader2 size={20} className="animate-spin text-muted" />
+        <span className="text-xs text-muted">Loading relevance graph…</span>
+      </div>
+    );
+  }
+
+  // Error
+  if (state.status === 'error') {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-2 py-10" data-testid="graph-error">
+        <AlertTriangle size={20} className="text-error" />
+        <span className="text-xs text-error">Could not load relevance graph</span>
+        <span className="text-[10px] text-muted">{state.error}</span>
+      </div>
+    );
+  }
+
+  // Unavailable (backend has no telemetry / AGE data)
+  if (state.status === 'unavailable') {
+    const reasons = state.data?.fallback?.missingReasons ?? [];
+    const runtimeNotice = runtimeToNoticeProps(state.data?.runtime);
+    return (
+      <div className="flex-1 px-4 py-6" data-testid="graph-unavailable">
+        <div className="mx-auto flex max-w-lg flex-col gap-4">
+          {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} /> : null}
+          <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
+            <Network size={20} className="text-muted opacity-40" />
+            <span className="text-xs text-muted">
+              {state.data?.runtime?.graphMode === 'lite'
+                ? 'Full graph evidence is unavailable for this run'
+                : 'Graph evidence is unavailable for this run'}
+            </span>
+            <span className="max-w-xs text-[10px] text-muted/70">
+              {state.data?.runtime?.graphMode === 'lite'
+                ? 'Graph Lite can still use semantic retrieval telemetry, but AGE graph-path evidence was not available for this result.'
+                : state.data?.runtime?.message ?? 'This run has semantic-only retrieval data. Graph neighborhood evidence requires retrieval telemetry or Apache AGE graph paths.'}
+            </span>
+            {reasons.length > 0 && (
+              <ul className="mt-1 list-disc pl-4 text-[10px] text-muted/60">
+                {reasons.map((r, i) => <li key={i}>{r}</li>)}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Empty (available but zero nodes)
+  if (state.status === 'empty' || !state.data) {
+    const runtimeNotice = runtimeToNoticeProps(state.data?.runtime);
+    return (
+      <div className="flex-1 px-4 py-6" data-testid="graph-empty">
+        <div className="mx-auto flex max-w-lg flex-col gap-4">
+          {runtimeNotice ? <GraphCapabilityNotice {...runtimeNotice} compact /> : null}
+          <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
+            <Network size={20} className="text-muted opacity-40" />
+            <span className="text-xs text-muted">No graph data for this run</span>
+            <span className="max-w-xs text-[10px] text-muted/70">
+              {state.data?.runtime?.graphMode === 'lite'
+                ? 'Graph Lite is active, but this run did not capture fallback graph evidence yet.'
+                : 'No graph evidence was captured for this run yet.'}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return <GraphCanvas data={state.data} onNodeClick={onNodeClick} selectedNodeId={selectedNodeId} />;
+}
+
+// ─── SVG Canvas ──────────────────────────────────────────────────────────────
+
+function GraphCanvas({
+  data,
+  onNodeClick,
+  selectedNodeId,
+}: {
+  data: SpecRelevanceGraphResponse;
+  onNodeClick?: (node: PositionedNode) => void;
+  selectedNodeId?: string | null;
+}) {
+  const layout = useMemo(
+    () => computeRadialLayout(data.nodes, data.edges),
+    [data.nodes, data.edges],
+  );
+
+  const { nodes, edges, viewBox } = layout;
+  const vb = `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`;
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0" data-testid="graph-canvas">
+      {data.runtime.graphMode !== 'full' ? (
+        <div className="shrink-0 px-4 pt-3">
+          <GraphCapabilityNotice {...(runtimeToNoticeProps(data.runtime) ?? { graphMode: data.runtime.graphMode })} compact />
+        </div>
+      ) : null}
+      {/* Summary bar */}
+      <div className="shrink-0 px-4 py-2 border-b border-border flex items-center gap-4 text-[10px] text-muted">
+        <span>{data.summary.nodeCount} nodes</span>
+        <span>{data.summary.edgeCount} edges</span>
+        <span className="text-success">{data.summary.selectedCount} selected</span>
+        <span className="text-error">{data.summary.droppedCount} dropped</span>
+        {data.summary.avgRelevanceScore != null && (
+          <span>avg score: {Math.round(data.summary.avgRelevanceScore * 100)}%</span>
+        )}
+        {data.truncation.filesTruncated && (
+          <span className="text-warning" title="File nodes truncated to cap">truncated</span>
+        )}
+        {data.runtime.graphMode !== 'full' && (
+          <span className="text-warning/80" title={data.runtime.message}>{data.runtime.graphMode}</span>
+        )}
+        {!data.fallback.graphPathsAvailable && (
+          <span className="text-muted/60" title="No Apache AGE graph paths">semantic-only</span>
+        )}
+      </div>
+
+      <GraphReadGuide />
+
+      {/* Score legend */}
+      {data.scoreLegend.length > 0 && (
+        <div className="shrink-0 px-4 py-1.5 border-b border-border/50 flex flex-wrap gap-3 text-[10px] text-muted" data-testid="graph-score-legend">
+          {data.scoreLegend.map((l) => (
+            <span key={l.field} title={l.description}>
+              <span className="font-medium">{l.label}</span>: {l.description}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* SVG */}
+      <div className="flex-1 overflow-auto min-h-0 p-2">
+        <svg
+          viewBox={vb}
+          className="w-full h-full"
+          role="img"
+          aria-label="Spec-centric memory relevance graph"
+          data-testid="graph-svg"
+        >
+          {/* Edges */}
+          <g data-testid="graph-edges">
+            {edges.map((e) => (
+              <EdgeLine key={e.id} edge={e} />
+            ))}
+          </g>
+          {/* Nodes */}
+          <g data-testid="graph-nodes">
+            {nodes.map((n) => (
+              <NodeCircle key={n.id} node={n} selected={selectedNodeId === n.id} onClick={onNodeClick} />
+            ))}
+          </g>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+function GraphReadGuide() {
+  return (
+    <div className="shrink-0 px-4 py-2 border-b border-border/50 bg-panel/30" data-testid="graph-read-guide">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[10px] text-muted">
+        <span className="font-semibold uppercase tracking-wider text-[var(--text)]">How to read</span>
+        <LegendChip color="var(--accent)" label="Hub = this spec/story/run" />
+        <LegendChip color="var(--accent-border)" label="Files = routed code context" />
+        <LegendChip color="var(--success)" label="Green memories = sent to agent" />
+        <LegendChip color="var(--warning)" label="Amber = relevant but held back" />
+        <LegendChip color="var(--error)" label="Red/dashed = ignored" />
+        <span>Number inside a memory = relevance %. Click any node to see why it matters.</span>
+      </div>
+    </div>
+  );
+}
+
+function LegendChip({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+      {label}
+    </span>
+  );
+}
+
+// ─── Edge rendering ──────────────────────────────────────────────────────────
+
+function EdgeLine({ edge }: { edge: PositionedEdge }) {
+  return (
+    <line
+      x1={edge.x1}
+      y1={edge.y1}
+      x2={edge.x2}
+      y2={edge.y2}
+      stroke="currentColor"
+      className="text-muted/30"
+      strokeWidth={edge.visualHints.thickness}
+      strokeDasharray={edge.visualHints.dashed ? '4 3' : undefined}
+      opacity={edge.visualHints.opacity}
+      data-testid={`graph-edge-${edge.id}`}
+    />
+  );
+}
+
+// ─── Node rendering ──────────────────────────────────────────────────────────
+
+function NodeCircle({
+  node,
+  selected,
+  onClick,
+}: {
+  node: PositionedNode;
+  selected?: boolean;
+  onClick?: (node: PositionedNode) => void;
+}) {
+  const r = NODE_RADIUS[node.type] ?? 16;
+  const color = nodeStatusColor(node);
+  const isClickable = !!onClick;
+  const labelLines = getNodeLabelLines(node);
+
+  return (
+    <g
+      role={isClickable ? 'button' : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      aria-label={nodeAriaLabel(node)}
+      className={isClickable ? 'cursor-pointer' : undefined}
+      onClick={isClickable && onClick ? () => onClick(node) : undefined}
+      onKeyDown={isClickable && onClick ? (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick(node);
+        }
+      } : undefined}
+      data-testid={`graph-node-${node.id}`}
+    >
+      <title>{node.label}</title>
+      {selected && (
+        <circle
+          cx={node.cx}
+          cy={node.cy}
+          r={r + 6}
+          fill="none"
+          stroke="var(--accent)"
+          strokeWidth={2}
+          strokeOpacity={0.65}
+        />
+      )}
+      <circle
+        cx={node.cx}
+        cy={node.cy}
+        r={r}
+        fill={color}
+        fillOpacity={node.dropped ? 0.3 : 0.8}
+        stroke={selected ? 'var(--accent)' : node.dropped ? 'var(--error)' : color}
+        strokeWidth={selected ? 3.5 : node.enteredPrompt ? 3 : 1.5}
+        strokeDasharray={node.dropped ? '3 2' : undefined}
+      />
+      {/* Score percentage for memory/context nodes */}
+      {(node.type === 'memory' || node.type === 'context') && node.relevanceScore != null && (
+        <text
+          x={node.cx}
+          y={node.cy + 1}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          className="text-[8px] font-mono font-bold fill-white pointer-events-none"
+        >
+          {Math.round(node.relevanceScore * 100)}
+        </text>
+      )}
+      {/* Hub label inside */}
+      {node.type === 'hub' && (
+        <text
+          x={node.cx}
+          y={node.cy + 1}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          className="text-[9px] font-semibold fill-white pointer-events-none"
+        >
+          Hub
+        </text>
+      )}
+      {/* Label below node */}
+      <text
+        x={node.cx}
+        y={node.cy + r + 12}
+        textAnchor="middle"
+        className={`${node.type === 'hub' ? 'text-[8.5px]' : 'text-[8px]'} fill-current text-muted pointer-events-none`}
+      >
+        {labelLines.map((line, index) => (
+          <tspan key={`${node.id}-label-${index}`} x={node.cx} dy={index === 0 ? 0 : 10}>
+            {line}
+          </tspan>
+        ))}
+      </text>
+    </g>
+  );
+}
+
+function getNodeLabelLines(node: PositionedNode): string[] {
+  if (node.type === 'hub') {
+    const specOnly = node.label.split(' / ')[0]?.replace(/ \(run \d+\)$/i, '') || node.label;
+    return wrapLabel(specOnly, 30, 2);
+  }
+  return wrapLabel(node.label, 18, 2);
+}
+
+function wrapLabel(value: string, maxChars: number, maxLines: number): string[] {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized) return [''];
+  if (normalized.length <= maxChars) return [normalized];
+
+  const tokens = normalized.split(/\s+|(?<=-)/).filter(Boolean);
+  const lines: string[] = [];
+  let current = '';
+
+  for (const token of tokens) {
+    const separator = current && !current.endsWith('-') ? ' ' : '';
+    const next = current ? `${current}${separator}${token}` : token;
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
+    }
+    if (current) lines.push(current.replace(/-$/, ''));
+    current = token;
+    if (lines.length === maxLines) break;
+  }
+  if (lines.length < maxLines && current) lines.push(current.replace(/-$/, ''));
+
+  if (lines.length === 0) lines.push(normalized.slice(0, maxChars));
+  const consumed = lines.join('').replace(/\s/g, '').length;
+  const compactLength = normalized.replace(/\s/g, '').length;
+  if (consumed < compactLength && lines.length > 0) {
+    const last = lines[lines.length - 1];
+    lines[lines.length - 1] = last.length >= maxChars
+      ? `${last.slice(0, Math.max(0, maxChars - 1))}…`
+      : `${last}…`;
+  }
+
+  return lines.slice(0, maxLines);
+}

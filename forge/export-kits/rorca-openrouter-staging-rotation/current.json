@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:485f4f8ed6c9b387b677ea4bbe6a56c214ba27be39f802aae9d5d8d48510234f",
+      "path": "forge/export-kits/rorca-openrouter-staging-rotation/8bb35fa9878f207d9749b62253a376c5fe16321719affd386911839dfc060e80/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:5ba39c56770b346253f1ccf2e764626e2fec279cdba23a52cb1ba3c81daa2fd9",
+      "path": "forge/export-kits/rorca-openrouter-staging-rotation/8bb35fa9878f207d9749b62253a376c5fe16321719affd386911839dfc060e80/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:41ab6abe533ca9b5bc89689d21e92c0cc32b4ac933cbb65e583da4c2467b5417",
+      "path": "forge/export-kits/rorca-openrouter-staging-rotation/8bb35fa9878f207d9749b62253a376c5fe16321719affd386911839dfc060e80/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:0320bfc3861bab3bd9e7d624ebb8239767898b177ec7c19c9355c90bb00d8f93",
+      "path": "forge/export-kits/rorca-openrouter-staging-rotation/8bb35fa9878f207d9749b62253a376c5fe16321719affd386911839dfc060e80/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/rorca-openrouter-staging-rotation/8bb35fa9878f207d9749b62253a376c5fe16321719affd386911839dfc060e80",
+  "manifestHash": "sha256:8bb35fa9878f207d9749b62253a376c5fe16321719affd386911839dfc060e80",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:0320bfc3861bab3bd9e7d624ebb8239767898b177ec7c19c9355c90bb00d8f93"
+}

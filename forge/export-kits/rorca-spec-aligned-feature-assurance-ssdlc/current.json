@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:2ee466aa51a4ddcdbe8ddf35d0ce47656d47601be4b88d5e12638d465cd9e9b8",
+      "path": "forge/export-kits/rorca-spec-aligned-feature-assurance-ssdlc/0013121079ac7f976279f53310df1056ad5b21fd58603bc77cfffe6d921c4f0e/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:841f3025ac689e6d72ace582b53c17013d8ef3c81749e2d1268702ac60d2b6f5",
+      "path": "forge/export-kits/rorca-spec-aligned-feature-assurance-ssdlc/0013121079ac7f976279f53310df1056ad5b21fd58603bc77cfffe6d921c4f0e/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:21d62eb921fcbe970f34c447e8d0e9abaf358b7fe5fdc7656ff8f7afa833ef0c",
+      "path": "forge/export-kits/rorca-spec-aligned-feature-assurance-ssdlc/0013121079ac7f976279f53310df1056ad5b21fd58603bc77cfffe6d921c4f0e/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:bcd312b3c09c360d133667f9253644288a82e502a4169882275712d37401b8c2",
+      "path": "forge/export-kits/rorca-spec-aligned-feature-assurance-ssdlc/0013121079ac7f976279f53310df1056ad5b21fd58603bc77cfffe6d921c4f0e/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/rorca-spec-aligned-feature-assurance-ssdlc/0013121079ac7f976279f53310df1056ad5b21fd58603bc77cfffe6d921c4f0e",
+  "manifestHash": "sha256:0013121079ac7f976279f53310df1056ad5b21fd58603bc77cfffe6d921c4f0e",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:bcd312b3c09c360d133667f9253644288a82e502a4169882275712d37401b8c2"
+}

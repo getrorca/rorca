@@ -1,0 +1,197 @@
+services:
+  db:
+    build:
+      context: docker/postgres
+      dockerfile: Dockerfile
+    environment:
+      # Offline bootstrap administrator only. API/worker never receive it.
+      POSTGRES_USER: ${RORCA_POSTGRES_BOOTSTRAP_USER:?set RORCA_POSTGRES_BOOTSTRAP_USER}
+      POSTGRES_PASSWORD: ${RORCA_POSTGRES_BOOTSTRAP_PASSWORD:?set RORCA_POSTGRES_BOOTSTRAP_PASSWORD}
+      POSTGRES_DB: ${RORCA_POSTGRES_DATABASE:-rorca}
+    volumes:
+      - rorca_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  db-role-bootstrap:
+    build:
+      context: docker/postgres
+      dockerfile: Dockerfile
+    entrypoint: ["/usr/local/bin/rorca-bootstrap-roles"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: ${RORCA_POSTGRES_DATABASE:-rorca}
+      POSTGRES_BOOTSTRAP_USER: ${RORCA_POSTGRES_BOOTSTRAP_USER:?set RORCA_POSTGRES_BOOTSTRAP_USER}
+      POSTGRES_BOOTSTRAP_PASSWORD: ${RORCA_POSTGRES_BOOTSTRAP_PASSWORD:?set RORCA_POSTGRES_BOOTSTRAP_PASSWORD}
+      RORCA_MIGRATION_DATABASE_USER: ${RORCA_MIGRATION_DATABASE_USER:?set RORCA_MIGRATION_DATABASE_USER}
+      RORCA_MIGRATION_DATABASE_PASSWORD: ${RORCA_MIGRATION_DATABASE_PASSWORD:?set RORCA_MIGRATION_DATABASE_PASSWORD}
+      RORCA_RUNTIME_DATABASE_USER: ${RORCA_RUNTIME_DATABASE_USER:?set RORCA_RUNTIME_DATABASE_USER}
+      RORCA_RUNTIME_DATABASE_PASSWORD: ${RORCA_RUNTIME_DATABASE_PASSWORD:?set RORCA_RUNTIME_DATABASE_PASSWORD}
+      RORCA_CANONICAL_WRITER_DATABASE_USER: ${RORCA_CANONICAL_WRITER_DATABASE_USER:?set RORCA_CANONICAL_WRITER_DATABASE_USER}
+      RORCA_CANONICAL_WRITER_DATABASE_PASSWORD: ${RORCA_CANONICAL_WRITER_DATABASE_PASSWORD:?set RORCA_CANONICAL_WRITER_DATABASE_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  db-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["sh", "-c", "node backend/dist/db/pg-index.js && node backend/dist/db/pg-boss-install.js"]
+    environment:
+      # This one-shot process is the only application image that receives the
+      # migration-owner credential. It exits before API/worker can start.
+      DATABASE_URL: ${RORCA_MIGRATION_DATABASE_URL:?set RORCA_MIGRATION_DATABASE_URL}
+      RORCA_RUNTIME_DATABASE_USER: ${RORCA_RUNTIME_DATABASE_USER:?set RORCA_RUNTIME_DATABASE_USER}
+      RORCA_CANONICAL_WRITER_DATABASE_USER: ${RORCA_CANONICAL_WRITER_DATABASE_USER:?set RORCA_CANONICAL_WRITER_DATABASE_USER}
+      NODE_ENV: production
+    depends_on:
+      db-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  rorca:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # The image's CLI entrypoint also starts an embedded worker. Compose owns a
+    # dedicated worker service below, so run only the HTTP server here.
+    command: node backend/dist/server.js
+    environment:
+      DATABASE_URL: ${RORCA_RUNTIME_DATABASE_URL:?set RORCA_RUNTIME_DATABASE_URL}
+      RORCA_MIGRATIONS_PREAPPLIED: "true"
+      RORCA_PGBOSS_PREAPPLIED: "true"
+      RORCA_RUNTIME_DATABASE_USER: ${RORCA_RUNTIME_DATABASE_USER:?set RORCA_RUNTIME_DATABASE_USER}
+      RORCA_CANONICAL_WRITER_DATABASE_URL: ${RORCA_CANONICAL_WRITER_DATABASE_URL:?set RORCA_CANONICAL_WRITER_DATABASE_URL}
+      RORCA_CANONICAL_WRITER_DATABASE_USER: ${RORCA_CANONICAL_WRITER_DATABASE_USER:?set RORCA_CANONICAL_WRITER_DATABASE_USER}
+      RORCA_SERVE_STATIC: "1"
+      NODE_ENV: production
+      RORCA_AGENT: ${RORCA_AGENT:-claude}
+      RORCA_MODEL: ${RORCA_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      RORCA_INTERNAL_SERVICE_TOKEN: ${RORCA_INTERNAL_SERVICE_TOKEN:-}
+      RORCA_DISPATCH_RECEIVER_TOKEN: ${RORCA_DISPATCH_RECEIVER_TOKEN:-}
+      # Wave 4 federated-runtime authentication pepper. Absent keeps
+      # non-federation APIs available; federation authentication fails closed.
+      RORCA_FEDERATED_CREDENTIAL_PEPPER: ${RORCA_FEDERATED_CREDENTIAL_PEPPER:-}
+      # Loopback/proxy allowlist for the TLS-terminating front; the federation
+      # lane requires req.secure (X-Forwarded-Proto https from a trusted proxy).
+      RORCA_TRUSTED_PROXY_IPS: ${RORCA_TRUSTED_PROXY_IPS:-}
+      # Shared immutable startup receipt; absent keeps ordinary APIs available
+      # but historical closeout reconciliation fails closed.
+      RORCA_BUILD_IDENTITY_RECEIPT: ${RORCA_BUILD_IDENTITY_RECEIPT:-}
+      # Digest only. The preimage is entered explicitly in the local browser and
+      # is never placed in Compose, server persistence, worker, or child env.
+      RORCA_OPERATOR_CAPABILITY_SHA256: ${RORCA_OPERATOR_CAPABILITY_SHA256:-}
+      # Supported OSS topology is one private local operator. This is not a
+      # hosted multi-user auth surface; only the signed webhook callback may be
+      # routed publicly by the separate exact-path OVH configuration.
+      AUTH_REQUIRED: "false"
+      # API-side spec-drafting CLIs use the same mandatory namespace and
+      # exact-host model-egress boundary as worker agents. HTTP SDK calls remain
+      # in the trusted API process and never grant a child ambient authority.
+      RORCA_AUTONOMOUS_ISOLATION: linux-bwrap
+      RORCA_BWRAP_BIN: /usr/local/bin/rorca-sandbox-launcher
+      RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS: ${RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS:-api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com}
+      RORCA_PTY_ARCHIVE_ROOT: /data/rorca/pty-archives
+    volumes:
+      - rorca_pty_archives:/data/rorca/pty-archives
+    # `.env` is interpolation input only. Never use `env_file` here: doing so
+    # would leak bootstrap/migration/worker-only secrets into the API process.
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    # Bind the combined API/UI to loopback by default. Do not change this to a
+    # public interface; use the reviewed exact-path webhook overlay instead.
+    ports:
+      - "${RORCA_BIND_ADDRESS:-127.0.0.1}:${RORCA_PORT:-3030}:3030"
+    # The trusted API needs namespace construction only for sandboxed drafting
+    # CLIs. Its child drops ALL capabilities and receives no host namespace,
+    # API environment, credential home, DB route, or unrestricted network.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - SETFCAP
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined
+      - seccomp:./container/seccomp/autonomous-sandbox.json
+    pids_limit: 512
+    restart: unless-stopped
+    labels:
+      - traefik.enable=false
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: node backend/dist/worker.js
+    environment:
+      DATABASE_URL: ${RORCA_RUNTIME_DATABASE_URL:?set RORCA_RUNTIME_DATABASE_URL}
+      RORCA_MIGRATIONS_PREAPPLIED: "true"
+      RORCA_PGBOSS_PREAPPLIED: "true"
+      RORCA_RUNTIME_DATABASE_USER: ${RORCA_RUNTIME_DATABASE_USER:?set RORCA_RUNTIME_DATABASE_USER}
+      NODE_ENV: production
+      RORCA_AGENT: ${RORCA_AGENT:-claude}
+      RORCA_MODEL: ${RORCA_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      RORCA_INTERNAL_SERVICE_TOKEN: ${RORCA_INTERNAL_SERVICE_TOKEN:-}
+      # The dispatch sender/worker must not possess receiver acceptance authority.
+      RORCA_BUILD_IDENTITY_RECEIPT: ${RORCA_BUILD_IDENTITY_RECEIPT:-}
+      RORCA_AUTONOMOUS_ISOLATION: linux-bwrap
+      RORCA_BWRAP_BIN: /usr/local/bin/rorca-sandbox-launcher
+      # Exact CONNECT destinations for model inference only. The autonomous
+      # namespace has no direct interface/default route and cannot reach DB,
+      # GitHub, localhost, or the Rorca control plane.
+      RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS: ${RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS:-api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com}
+      RORCA_PTY_ARCHIVE_ROOT: /data/rorca/pty-archives
+    volumes:
+      - rorca_pty_archives:/data/rorca/pty-archives
+    # Explicit environment allowlist: no bootstrap, migrator, canonical writer,
+    # or operator-capability secret is inherited from `.env`.
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    # The trusted worker uses SYS_ADMIN to stage private mount/PID/network
+    # namespaces before entering its child user namespace. SETFCAP is required
+    # by Linux >=5.12 only to map container uid 0 into that child namespace.
+    # The launcher drops ALL child capabilities before model execution.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - SETFCAP
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined
+      - seccomp:./container/seccomp/autonomous-sandbox.json
+    pids_limit: 512
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'worker.js' > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  rorca_pgdata:
+    driver: local
+  rorca_pty_archives:
+    driver: local

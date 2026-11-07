@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "rorca.ssdlc-evidence-source-routes.v1",
+  "routes": [
+    {
+      "sourceType": "aav-019:repository-artifact",
+      "routeKind": "adapter",
+      "adapterId": "AAV-019",
+      "implementationRef": "ssdlc/evaluation/gate-evaluator.ts#evaluateGate"
+    },
+    {
+      "sourceType": "aav-019:pipeline-measurement",
+      "routeKind": "adapter",
+      "adapterId": "AAV-019",
+      "implementationRef": "ssdlc/evaluation/gate-evaluator.ts#evaluateGate"
+    },
+    {
+      "sourceType": "governed:human-review",
+      "routeKind": "human",
+      "workflowRef": "AAV phase review",
+      "decisionRecordRequired": true
+    },
+    {
+      "sourceType": "governed:approval",
+      "routeKind": "approval",
+      "workflowRef": "Mission release approval",
+      "decisionRecordRequired": true
+    }
+  ]
+}

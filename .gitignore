@@ -1,0 +1,106 @@
+node_modules
+.env
+.env.local
+backend/.env
+*.db
+*.db-shm
+*.db-wal
+dist
+.DS_Store
+*.log
+/*.tgz
+/rorca-baseline.json
+
+# Local-only helper trees
+.claude/
+.opencode/
+.pi/
+.rorca/*
+!.rorca/skills/
+!.rorca/skills/**
+default-personas/
+go-to-market/
+MEMORY.md
+
+# Local agent tooling state and scratch trees — never published.
+# Untracked (files kept on disk) as part of open-source publication hygiene.
+# See docs/open-source/OPEN-SOURCE-READINESS-PLAN.md
+.pi-supervisor/
+tmp/
+backend/node-compile-cache/
+docs/workplans/
+genesis/artifacts/
+
+# Author-side progress ledgers and validation notes — kept locally, never published.
+.*-progress.md
+.*-review.md
+.*-scout.md
+.*-audit.md
+.*-smoke.md
+.*-progress.txt
+implementation-0*-*.md
+ssdlc-validation-*.md
+*-implementation-progress.md
+*-spec-creation-progress.md
+
+# `.rorca/` is a blocked boundary (private progress/memory artifacts). The skills
+# exception is retired here so skill packs are not picked up by the export
+# candidate scan; publishing them is a deliberate future decision.
+.rorca/skills/
+.rorca/skills/**
+
+# OCT-024: node-pty native prebuilds (platform-specific, rebuilt on install)
+backend/node_modules/node-pty/prebuilds/
+
+# Rorca run-tracking files (parallel-safe)
+progress.txt
+.rorca/run-state.json
+.rorca/memory/health-log.json
+.rorca/auth-boundary-progress.md
+.rorca/memory/MEMORY.md
+.rorca/memory/MEMORY_ARCHIVE.md
+
+# Database exports are incident/backup artifacts, never source inputs.
+backend/backups/
+**/backups/
+**/dumps/
+docker/postgres/seed*
+*.dump
+*.pgdump
+*.backup
+*.bak
+*.sql.gz
+*.sql.bz2
+*.sql.xz
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.zip
+*.7z
+*.rar
+
+# Bun binary build artifacts
+bin/.generated/
+build/
+rorca
+!packages/rorca-pi-extension/extensions/rorca/
+!packages/rorca-pi-extension/extensions/rorca/**
+.rorca-results.jsonl
+
+# Supabase local development artifacts
+supabase/.branches/
+supabase/.temp/
+
+# Local run/test artifacts
+forge/logs/
+forge/specs/archive/
+forge/specs/approved/
+forge/specs/logs/
+forge/specs/pending/
+test-results/
+
+# Run trace artifacts (Context Inspector raw payloads)
+*.ndjson.gz
+.rorca/traces/

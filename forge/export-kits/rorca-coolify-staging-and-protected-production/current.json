@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:cf8a32af7d9d2684fbb4931476e9b63d544165c614c388ef93f040f65db21640",
+      "path": "forge/export-kits/rorca-coolify-staging-and-protected-production/9d398831078861231db4fee9ab516a738f0e512c935504691fc867038dc52429/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:64cb90a79f3b4755dea05cf56ebb9ce91acb786197d10e10ef691fad88bcf6b2",
+      "path": "forge/export-kits/rorca-coolify-staging-and-protected-production/9d398831078861231db4fee9ab516a738f0e512c935504691fc867038dc52429/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:f62886199e2399b080ecf1ba3182e5db1f66c7fa467a1bb5e2c1d2ecee4a68d1",
+      "path": "forge/export-kits/rorca-coolify-staging-and-protected-production/9d398831078861231db4fee9ab516a738f0e512c935504691fc867038dc52429/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:81ce353c83a6a34fc777d7771abb12e0c4cfd1d6218849624a1e36489de6121b",
+      "path": "forge/export-kits/rorca-coolify-staging-and-protected-production/9d398831078861231db4fee9ab516a738f0e512c935504691fc867038dc52429/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/rorca-coolify-staging-and-protected-production/9d398831078861231db4fee9ab516a738f0e512c935504691fc867038dc52429",
+  "manifestHash": "sha256:9d398831078861231db4fee9ab516a738f0e512c935504691fc867038dc52429",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:81ce353c83a6a34fc777d7771abb12e0c4cfd1d6218849624a1e36489de6121b"
+}

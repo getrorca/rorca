@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 9377,
+      "contentHash": "sha256:eda612226b26dec9f0fd65f1a59691adebbf997a6b4c84bbbc84ffeca796dcb6",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 15088,
+      "contentHash": "sha256:92cb9b157ae0ace34edab821464b44f7417301d1d9be402c752edfce04b49e97",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 4652,
+      "contentHash": "sha256:d709c6b2017bfa7625eab2dbe5477e0c382e7f898494addc765a6a277ff5bcba",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 4763,
+      "contentHash": "sha256:c4c2cbc3af0c9ae73404fc7b8a914cd199822ea91df9e875864074e57199e77f",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:138b87d8d6595bc3eac205883558faa67976d24100eef645f945427a01af3a33",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "rorca-supabase-migrations-and-credential-ceremonies",
+  "specMaterialHash": "sha256:eda612226b26dec9f0fd65f1a59691adebbf997a6b4c84bbbc84ffeca796dcb6"
+}

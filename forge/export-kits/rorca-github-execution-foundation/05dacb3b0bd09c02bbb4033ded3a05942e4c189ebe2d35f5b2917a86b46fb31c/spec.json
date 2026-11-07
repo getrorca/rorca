@@ -1,0 +1,116 @@
+{
+  "id": "rorca-github-execution-foundation",
+  "mermaidDiagram": "graph LR\n  GEF-001[\"GEF-001\"]\n  GEF-002[\"GEF-002\"]\n  GEF-003[\"GEF-003\"]\n  GEF-004[\"GEF-004\"]\n  GEF-005[\"GEF-005\"]\n  GEF-006[\"GEF-006\"]\n  GEF-001 --> GEF-002\n  GEF-002 --> GEF-003\n  GEF-003 --> GEF-004\n  GEF-002 --> GEF-005\n  GEF-004 --> GEF-006\n  GEF-005 --> GEF-006",
+  "slug": "rorca-github-execution-foundation",
+  "source": "skill-first-explicit",
+  "title": "Rorca GitHub Execution Foundation",
+  "userStories": [
+    {
+      "acceptanceCriteria": [
+        "An architecture test reports one canonical GitHub App registration, repository binding, installation-token provider, settings path, and adapter implementation",
+        "A workspace without a GitHub binding continues to produce a local review bundle and never attempts network delivery",
+        "The GitHub adapter is selected only by an explicit healthy repository binding and accepted external-send authority policy",
+        "ProviderBinding stores installation/repository identifiers and secret references but no installation token, app JWT, private key, PAT, or SSH key",
+        "Existing GitHub delivery routes remain compatible and duplicate routes, vaults, token caches, and settings components are absent"
+      ],
+      "complexity": 4,
+      "dependsOn": [],
+      "description": "Reconcile the new optional GitHub adapter with Rorca existing GitHub App binding, installation-token provider, workspace GitHub routes/UI, and accepted LocalReviewBundleAdapter architecture. Extend those surfaces rather than duplicating registration, credentials, migrations, routes, or settings UI. Implement the core AuthorityProviderAdapter contract for a generic workspace-bound repository. LocalReviewBundleAdapter remains the default and requires no GitHub account; GitHub is an opt-in external-send adapter. Use the core ProviderBinding tables and routes, so no GitHub-specific secret column or separate authority table is introduced.",
+      "id": "GEF-001",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "GitHub authority reuses the accepted provider-neutral delivery boundary"
+    },
+    {
+      "acceptanceCriteria": [
+        "Preflight rejects an unbound, suspended, stale, profile-unverified, permission-deficient, or non-mintable installation before branch work starts",
+        "A minted lease accesses exactly the bound repository and only contents read/write, pull-request write, checks read, and review-request operations required by the grant",
+        "Installation tokens and app JWTs are absent from model prompts, child persistent environment, job payloads, logs, API responses, receipts, and database rows",
+        "A token cannot read or change Actions secrets, repository administration, releases, deployments, or another repository",
+        "Lease settlement revokes the token when supported or records verified expiry and clears the in-memory cache"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "GEF-001"
+      ],
+      "description": "Map scm.repository.read, scm.branch.write, scm.pull_request.write, scm.checks.read, and scm.review.request to a GitHub App installation binding. Mint short-lived installation access tokens for exactly one approved repository and permission profile; cache only in memory for the lease; inject only into the trusted adapter process; revoke or allow bounded expiry after settlement. Preflight validates installation state, repository ownership/name/id, verified provider profile, app permission grant, token mintability, and binding generation. Exclude PAT, developer SSH, repository secret, and signing-key fallbacks.",
+      "id": "GEF-002",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Repository-scoped installation leases expose only reviewed SCM capabilities"
+    },
+    {
+      "acceptanceCriteria": [
+        "A disposable bound repository journey reports the approved base revision, isolated checkout, one feature branch, one Rorca-authored commit, one pull request, observed checks, and requested review",
+        "Protected-branch push, force push, merge, tag, release, repository administration, Actions-secret mutation, and production deployment are absent or rejected",
+        "Replaying branch push or pull-request creation returns the existing resource and produces no duplicate commit or pull request",
+        "The adapter never changes LocalReviewBundleAdapter as the default provider-neutral delivery path",
+        "The receipt records repository id, base and head revisions, branch, pull-request URL/id, check conclusions, review request, and no secret values"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "GEF-002"
+      ],
+      "description": "Implement typed adapter operations for prepareRepository at the approved revision, createBranch using a collision-safe run/story identity, commit with the Rorca machine identity, push the feature branch under a separate external-send grant, create or update one pull request, observe checks, and request review. Use isolated worktrees and existing DeliveryAdapter semantics. Reject protected-branch push, force push, merge, tag, release, repository settings, Actions-secret mutation, and production deployment. A restarted operation discovers existing branch/PR resources before creating anything.",
+      "id": "GEF-003",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Authorized SCM delivery produces a review branch but never merges"
+    },
+    {
+      "acceptanceCriteria": [
+        "Crash after push but before settlement finds the remote branch/commit and records one settled receipt without a second push",
+        "Crash after pull-request acceptance finds and reuses the existing pull request without creating another",
+        "Completion, denial, cancellation, expiry, and failure all remove the isolated worktree and settle token revocation or verified expiry",
+        "A revocation failure leaves the lease unusable and reconciliation-required until a read-side check settles it",
+        "Receipts are immutable, redacted, workspace scoped, and link every operation attempt to the core request/grant/lease"
+      ],
+      "complexity": 4,
+      "dependsOn": [
+        "GEF-003"
+      ],
+      "description": "Implement GitHub-specific reconcile and revoke behavior over the core attempt state machine. Mark externally accepted operations with stable repository, branch, commit, pull-request, check-run, and installation resource identifiers. On crash, query those identifiers before retry. Remove the isolated worktree after settlement while preserving the branch/review artifact according to policy. Revocation failure remains reconciliation-required and blocks new use.",
+      "id": "GEF-004",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "SCM receipts reconcile unknown outcomes and revoke every lease"
+    },
+    {
+      "acceptanceCriteria": [
+        "The existing settings panel displays one repository binding path with loading, missing, stale, ready, revalidation, disabled, and error states",
+        "Bind and revalidate prove immutable repository identity and granted permissions without returning a token to the browser",
+        "Disabling a binding invalidates preflight, revokes or expires active leases, and prevents new external-send grants",
+        "Settings mutations remain local operator/admin tier and are not exposed through MCP",
+        "A browser inspection reports no app private key, app JWT, installation token, PAT, or secret in DOM, storage, network response bodies, or logs"
+      ],
+      "complexity": 3,
+      "dependsOn": [
+        "GEF-002"
+      ],
+      "description": "Extend the existing GitHub settings surface and API rather than creating a second panel. Display app registration readiness, installation/repository binding, verified profile, granted permissions, token-mint probe result, binding generation, and capability availability. Allow explicit bind, revalidate, and disable operations under existing local provider-mutation authority. Never display or accept installation tokens. Data changes remain in core ProviderBinding and audit records; no child migration.",
+      "id": "GEF-005",
+      "priority": 2,
+      "timeoutMinutes": 180,
+      "title": "Operators can qualify repository bindings without handling tokens"
+    },
+    {
+      "acceptanceCriteria": [
+        "The disposable journey completes feature-branch and pull-request delivery while protected main remains unchanged",
+        "Credential reveal, protected-branch push, merge, other-repository access, Actions-secret access, altered request, replay, and revoked-token reuse all fail",
+        "Crash at token mint, push, pull-request creation, check observation, and revocation resumes or reconciles once without duplicate external resources",
+        "Disabling the adapter restores local review bundle delivery and leaves no active installation lease",
+        "No Categoric/Cashflow-App repository, workspace, spec, environment, or product code is required by the qualification"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "GEF-004",
+        "GEF-005"
+      ],
+      "description": "Qualify the adapter on a disposable Rorca-owned repository with protected main and no customer workspace dependency. Inject prompt requests to reveal credentials, push main, merge, access another repository, read secrets, alter approved arguments, reuse a revoked token, replay a grant, and crash at each external boundary. Keep the adapter disabled by default after qualification; rollout is per healthy binding. Rollback disables the adapter, revokes leases, preserves local review bundles, and retains receipts.",
+      "id": "GEF-006",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Disposable-repository attacks cannot broaden SCM authority"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:ebeea560505d24f08daf3f15c584f2b293a0792c45004780519b0276cda2b429",
+      "path": "forge/export-kits/wave-3a-wrap-current-engine-as-rorcamanagedexecutor/39fe58ae8b756e8f2377c9b94b78e720005ce8165aed91b96f8e9fe3ef6d7f88/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:0d5025fa5caba70c036717bba572c4c4a2efb35983ad1ce79a94d06d4f730726",
+      "path": "forge/export-kits/wave-3a-wrap-current-engine-as-rorcamanagedexecutor/39fe58ae8b756e8f2377c9b94b78e720005ce8165aed91b96f8e9fe3ef6d7f88/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:d79a5eb1cdb5b4215eb995379fceb06db926ba210fa28c5b2f96f3951daa915a",
+      "path": "forge/export-kits/wave-3a-wrap-current-engine-as-rorcamanagedexecutor/39fe58ae8b756e8f2377c9b94b78e720005ce8165aed91b96f8e9fe3ef6d7f88/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:e15b5eacd8458442ceb4816b881aa5e9505d1124e82e738efbedbdc89ba7617d",
+      "path": "forge/export-kits/wave-3a-wrap-current-engine-as-rorcamanagedexecutor/39fe58ae8b756e8f2377c9b94b78e720005ce8165aed91b96f8e9fe3ef6d7f88/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/wave-3a-wrap-current-engine-as-rorcamanagedexecutor/39fe58ae8b756e8f2377c9b94b78e720005ce8165aed91b96f8e9fe3ef6d7f88",
+  "manifestHash": "sha256:39fe58ae8b756e8f2377c9b94b78e720005ce8165aed91b96f8e9fe3ef6d7f88",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:e15b5eacd8458442ceb4816b881aa5e9505d1124e82e738efbedbdc89ba7617d"
+}

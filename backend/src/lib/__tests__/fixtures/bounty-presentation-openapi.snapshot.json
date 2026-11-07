@@ -1,0 +1,9 @@
+{
+  "contractVersion": "bounty.presentation.v1",
+  "method": "GET",
+  "path": "/api/contracts/bounty-presentation",
+  "operationId": "getBountyPresentationContract",
+  "tier": "auth",
+  "idempotent": true,
+  "responseSchemaVersion": "bounty.presentation.v1"
+}

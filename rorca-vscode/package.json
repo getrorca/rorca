@@ -1,0 +1,186 @@
+{
+  "name": "rorca-vscode",
+  "displayName": "Rorca",
+  "description": "AI spec orchestration and pipeline management for autonomous software development",
+  "version": "0.0.1",
+  "publisher": "rorca",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rorca",
+          "title": "Rorca",
+          "icon": "resources/rorca.svg"
+        }
+      ]
+    },
+    "views": {
+      "rorca": [
+        {
+          "id": "rorcaSpecs",
+          "name": "Specs",
+          "contextualTitle": "Rorca Specs"
+        },
+        {
+          "id": "rorcaMcpTools",
+          "name": "MCP Tools",
+          "contextualTitle": "Rorca MCP Tools"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "rorca.refreshSpecs",
+        "title": "Refresh Specs",
+        "category": "Rorca",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rorca.refreshMcpTools",
+        "title": "Refresh MCP Tools",
+        "category": "Rorca",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rorca.approveSpec",
+        "title": "Approve Spec",
+        "category": "Rorca",
+        "icon": "$(check)"
+      },
+      {
+        "command": "rorca.triggerRun",
+        "title": "Trigger Run",
+        "category": "Rorca",
+        "icon": "$(play)"
+      },
+      {
+        "command": "rorca.openInBrowser",
+        "title": "Open in Browser",
+        "category": "Rorca",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "rorca.copySpecJson",
+        "title": "Copy Spec JSON",
+        "category": "Rorca",
+        "icon": "$(clippy)"
+      },
+      {
+        "command": "rorca.testConnection",
+        "title": "Test Connection",
+        "category": "Rorca",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "rorca.startServer",
+        "title": "Start Server",
+        "category": "Rorca",
+        "icon": "$(server-process)"
+      },
+      {
+        "command": "rorca.forgeFromSelection",
+        "title": "Forge from Selection",
+        "category": "Rorca",
+        "icon": "$(wand)"
+      }
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "rorca.approveSpec",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "inline"
+        },
+        {
+          "command": "rorca.triggerRun",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "inline"
+        },
+        {
+          "command": "rorca.openInBrowser",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "1_actions"
+        },
+        {
+          "command": "rorca.copySpecJson",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "1_actions"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "rorca.refreshSpecs",
+          "when": "view == rorcaSpecs",
+          "group": "navigation"
+        },
+        {
+          "command": "rorca.forgeFromSelection",
+          "when": "view == rorcaSpecs && rorca.serverOnline",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rorca",
+      "properties": {
+        "rorca.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:3030",
+          "description": "URL of the Rorca backend server",
+          "scope": "window"
+        },
+        "rorca.defaultWorkspacePath": {
+          "type": "string",
+          "default": "",
+          "description": "Default workspace path for this project — overrides workspace autodetection",
+          "scope": "resource"
+        },
+        "rorca.autoRefreshInterval": {
+          "type": "number",
+          "default": 60,
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Seconds between automatic refresh (0 to disable)",
+          "scope": "window"
+        },
+        "rorca.showStatusBarItem": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Rorca connection status in the VS Code status bar",
+          "scope": "window"
+        },
+        "rorca.insertSyntax": {
+          "type": "string",
+          "enum": ["name-only", "json-call", "slash-command"],
+          "default": "name-only",
+          "description": "Format to insert when using Insert at Cursor: name-only, json-call, or slash-command",
+          "scope": "window"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "npm run check-types && node esbuild.js",
+    "check-types": "tsc --noEmit",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "vscode:prepublish": "npm run package",
+    "package": "npm run check-types && node esbuild.js --production"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.100.0",
+    "typescript": "^5.9.0",
+    "esbuild": "^0.25.0",
+    "npm-run-all": "^4.1.5",
+    "@vscode/vsce": "^3.0.0"
+  }
+}

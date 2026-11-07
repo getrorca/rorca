@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "bounty.qualification-plan.v1",
+  "candidateId": "bounty-mission-control-mvp",
+  "featureStateDuringQualification": "disabled",
+  "releaseEnableAvailable": false,
+  "qualificationMode": "hermetic",
+  "frozenAt": "2026-08-03T00:00:00.000Z",
+  "requalificationTriggers": [
+    "prompt", "skill", "router", "oracle", "persona", "model", "runtime", "policy",
+    "broker", "adapter", "migration", "configuration", "corpus", "test-evidence"
+  ],
+  "corpora": [
+    {
+      "id": "bounty-private-positive-v1",
+      "class": "private",
+      "storage": "external-encrypted-fixture-store",
+      "locator": "qualification://bounty/private-positive/v1",
+      "manifestSha256": "sha256:6cc71bb49808c2f01f2c5df89aae8e736f8bc08e43554b37555881a9bc4b52e1",
+      "itemCount": 48,
+      "blinded": true,
+      "immutable": true,
+      "repositoryContentIncluded": false
+    },
+    {
+      "id": "bounty-anti-cheat-negative-v1",
+      "class": "anti-cheat",
+      "storage": "external-encrypted-fixture-store",
+      "locator": "qualification://bounty/anti-cheat-negative/v1",
+      "manifestSha256": "sha256:690f44ba6a126f7aa78d753a7b85e6c2647c3b10b20729a9d8c28972cac9ffa6",
+      "itemCount": 64,
+      "blinded": true,
+      "immutable": true,
+      "repositoryContentIncluded": false
+    }
+  ],
+  "hermeticTargets": [
+    { "id": "http-origin", "kind": "http", "origin": "http://127.0.0.1:0", "network": "loopback-only", "credentials": "synthetic" },
+    { "id": "redirect-dns", "kind": "dns-redirect", "origin": "https://target.invalid", "network": "in-memory-resolver", "credentials": "none" },
+    { "id": "browser-origin", "kind": "browser", "origin": "https://browser.invalid", "network": "intercepted-loopback", "credentials": "synthetic" },
+    { "id": "callback-origin", "kind": "callback", "origin": "https://callback.invalid", "network": "in-memory-broker", "credentials": "none" },
+    { "id": "caido-adapter", "kind": "adapter", "origin": "caido://fixture", "network": "fake-transport", "credentials": "none" }
+  ],
+  "requiredSuites": [
+    { "kind": "unit", "name": "bounty-effect-policy-unit", "command": "cd backend && npx jest --config jest.bounty-unit.config.ts --runInBand src/lib/__tests__/bounty-effect-policy.test.ts" },
+    { "kind": "property", "name": "scope-normalization-property", "command": "cd backend && npx jest --config jest.bounty-unit.config.ts --runInBand src/lib/__tests__/bounty-scope.test.ts" },
+    { "kind": "postgresql", "name": "bounty-postgresql-hermetic", "command": "backend Jest bounty migration and mission-state suites against docker-compose.test.yml" },
+    { "kind": "pg-boss", "name": "bounty-pg-boss-hermetic", "command": "backend Jest bounty job-outbox contract against an isolated explicitly-created queue" },
+    { "kind": "adapter", "name": "bounty-adapter-hermetic", "command": "cd backend && node --import tsx --test src/lib/__tests__/bounty-caido-adapter.node.test.ts src/lib/__tests__/bounty-production-integrations.node.test.ts" },
+    { "kind": "browser", "name": "bounty-browser-hermetic", "command": "Playwright Mission Control and broker-isolated browser fixture suite" },
+    { "kind": "sandbox", "name": "bounty-bwrap-boundary", "command": "backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/bounty-isolated-runtime.node.test.ts" },
+    { "kind": "concurrency", "name": "bounty-concurrency-fences", "command": "backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/bounty-mission-orchestrator.node.test.ts" },
+    { "kind": "crash", "name": "bounty-crash-cuts", "command": "backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/bounty-mission-control.node.test.ts" },
+    { "kind": "recovery", "name": "bounty-restart-recovery", "command": "backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/bounty-mission-control.node.test.ts" },
+    { "kind": "route-tool", "name": "bounty-route-tool-zero-authority", "command": "backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/bounty-presentation-contract.node.test.ts backend/src/lib/__tests__/bounty-rest-controller.node.test.ts" },
+    { "kind": "ui", "name": "bounty-mission-control-ui", "command": "npx vitest run src/api/__tests__/bountyMissionControl.test.ts src/panels/__tests__/MissionControlPanel.test.tsx" },
+    { "kind": "oracle", "name": "bounty-oracle-rule-of-two", "command": "backend/node_modules/.bin/tsx --test backend/src/lib/__tests__/bounty-finding-validation.node.test.ts" },
+    { "kind": "receipt", "name": "bounty-immutable-receipt", "command": "node --test scripts/__tests__/bounty-qualification.test.mjs" }
+  ],
+  "requiredControlProofs": [
+    "sole-broker-egress", "credential-isolation", "scope-dns-redirect-containment", "rule-of-two",
+    "stop-ordering", "evidence-integrity", "zero-submission-paths"
+  ],
+  "requiredMetrics": [
+    "classSuccess", "falsePositiveRate", "rejectionRate", "oracleFailures", "costMicrousd",
+    "inputTokens", "outputTokens", "activity", "cacheSpendMicrousd", "authSpendMicrousd"
+  ],
+  "receiptBindings": [
+    "sourceSha", "sourceTreeHash", "migrationHash", "configHash", "brokerHash", "adapterHash",
+    "promptHash", "skillHash", "routerHash", "oracleHash", "personaHash", "modelHash",
+    "runtimeHash", "policyHash", "evidenceRoot"
+  ]
+}

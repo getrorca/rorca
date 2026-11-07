@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 21956,
+      "contentHash": "sha256:00ce99011da23fae84b9daf001d2d7d262c98928055a65b9ab45d0ecabc83199",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 29299,
+      "contentHash": "sha256:a3c8d1fcaa7226dc2dd5cfece32acdd9560d7b8e81d47b5be4f4a6f2e9de06cd",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 4211,
+      "contentHash": "sha256:09c5d616eb30f2f70c66d0cd1d058ad3e262d22c42a9d584722b27d275b87fb9",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 13426,
+      "contentHash": "sha256:92b5f3678fe0c6746abcf5a17b14b9bb926ace3a6b2d2c1d3985edd710bdd1cd",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:46b91a027cd374d808e14289d98cbdfa51ee22f04c2354d19d9a53e6bd3dcc94",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "wave-3b-runtime-neutral-live-output-and-structured-activity-streaming",
+  "specMaterialHash": "sha256:00ce99011da23fae84b9daf001d2d7d262c98928055a65b9ab45d0ecabc83199"
+}

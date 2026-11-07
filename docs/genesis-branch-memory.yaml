@@ -1,0 +1,325 @@
+architectural_decisions:
+  - description: >
+      CI Autofix system routes GitHub check_run webhook failures through a direction-stack-aware fix spec generator
+      that re-runs the execution engine and posts commit status back. Direction stack (L1–L5) is read before generating
+      the repair spec — same context injection path as normal spec generation.
+    evidence: "backend/src/lib/ci-autofix/, table ci_autofix_runs (migration 20260413220000)"
+
+  - description: >
+      MCP slow-path timeout is 10 minutes (not 30s default) for any LLM-backed tool. Tools in SLOW_PATHS:
+      /enrich, /match-skills, /suggest-skills, /add-stories, /knowledge-graph, spec generation.
+    evidence: "backend/src/lib/mcp-http.ts SLOW_PATHS array, raised from 5min to 10min in chunk 6"
+
+  - description: >
+      Pi is the 4th first-class AgentType alongside claude/opencode/codex. Pi receives the direction stack as
+      a --skill file per story; uses --fork per story for clean slate with context preserved on retry.
+      Pi uses --session/--fork/--continue for resumable branching runs.
+    evidence: "VALID_AGENT_TYPES in config.ts, execution-engine.ts, pi-detector.ts"
+
+  - description: >
+      Native PostgreSQL is the default DB strategy; Docker is opt-in sidecar. Lite Mode (no Apache AGE)
+      returns structured 503 with { code: 'AGE_NOT_INSTALLED', mode: 'lite', hint } via age-guard.ts.
+      AGE-dependent routes must check this guard; never silently fail.
+    evidence: "backend/src/lib/db-strategy.ts, age-guard.ts, graph-runtime.ts"
+
+  - description: >
+      RLS rollout uses Supabase Auth with auth_id column on users table and a get_user_workspace_ids()
+      Postgres helper function. workspace_members must be created atomically in the earliest migration
+      that needs it (circular dependency risk). RLS policies must be per-operation (SELECT/INSERT/UPDATE/DELETE),
+      not a single ALL policy. Do NOT add OWNER TO rorca in migrations — that role doesn't exist on Supabase.
+    evidence: "MU-003 through MU-016 migrations, backend/src/routes/auth.ts deleted (282 lines)"
+
+  - description: >
+      GraphRAG retrieval pipeline with canonical scoring, reranking, diversity guardrails, and recency decay.
+      Graph scoring is feature-flagged via graph-scoring-rollout.ts. Retrieval changes must pass
+      ranking-benchmark.ts regression benchmarks before merging. Score explainability is required — debug
+      fields must be present on retrieval output.
+    evidence: "backend/src/lib/retrieval-pipeline.ts, retrieval-telemetry.ts, ranking-benchmark.ts"
+
+  - description: >
+      Memory Ontology Graph (MOG) layer in memory-graph.ts (~850 lines) + memory-relations.ts. Stores typed
+      memory-to-memory edges (supersession, conflict, projection rules) in memory_relations table
+      (migration 20260602120000). memory-ontology.ts is the canonical stale/conflict detection module —
+      retrieval pipeline filters through it before any memory reaches the LLM. Never duplicate this logic.
+    evidence: "backend/src/lib/memory-graph.ts, memory-relations.ts, memory-ontology.ts, MOG-001–009"
+
+  - description: >
+      memory-router.ts is the central integration point for retrieval, graph scoring, and context enrichment.
+      High-churn file — changes elsewhere in the retrieval stack almost always require coordinated changes here.
+    evidence: "Modified in 5/7 commits in chunk 13; currently 354+ lines"
+
+  - description: >
+      FinOps accounting engine (backend/src/lib/finops-accounting.ts) classifies billing modes and handles
+      allocation math. Analytics route grew to 800+ lines — per-run FinOpsTab and historical FinOpsDashboardPanel
+      are separate components with different data contracts. New settings tabs follow a 3-file pattern:
+      Tab component + register in SettingsPanel.tsx + register in routes.tsx.
+    evidence: "billing_profiles migration 20260604123000, FIN-003/FIN-004 commits"
+
+  - description: >
+      Genesis Local KB is a new subsystem with curator jobs queued via pg-boss, DuckBrain AI module
+      (peer to llm-client.ts), genesis-disabled.ts guard for graceful endpoint blocking, genesis-vault.ts
+      for credentials, and genesis-status.ts for health reporting via GET /api/kb-status. All optional
+      subsystems must wire into GET /api/health.
+    evidence: "GKB-023–028, backend/src/lib/duckbrain.ts, genesis-status.ts, genesis-curator.ts"
+
+  - description: >
+      License split enforced by CI: CLI/frontend = MIT, backend = BSL-1.1. New backend files must carry
+      BSL header. docs/SECURITY-MODEL.md is the canonical location for security architecture; update when
+      changing auth, MCP, or plan-gating.
+    evidence: ".github/workflows/license-check.yml, CLI-056, LICENSE-NOTICES.md"
+
+  - description: >
+      plan-gate.ts and require-plan.ts enforce server-side plan resolution with anti-tamper checks.
+      Plan resolution is authoritative server-side only — never trust client-supplied plan claims or JWT
+      plan fields. mcp-auth.js was deleted and must not be recreated; auth logic lives in get-user.ts,
+      license-verifier.ts, plan-gate.ts, require-plan.ts.
+    evidence: "CLI-056, mcp-auth.js deletion (249 lines)"
+
+  - description: >
+      worktree-runtime.ts extracted from execution-engine.ts — worktree hydration logic is a separate
+      module. Keep execution-engine.ts and worktree concerns separate going forward.
+    evidence: "backend/src/lib/worktree-runtime.ts, chunk 12"
+
+  - description: >
+      Memory saves in the execution engine now route through MCP rather than direct DB writes.
+      context_enrich is now a queued job type (spec_jobs table, migration 20260527120000_add_context_enrich_to_spec_jobs.sql),
+      not an inline synchronous step.
+    evidence: "execution-engine.ts MCP memory routing, chunk 12"
+
+  - description: >
+      context-safety.ts is the canonical module for all content sensitivity checks (path/ignore/size/hash/
+      redaction/Genesis sensitivity vocabulary/privacy tiers). Never reinvent sensitivity or redaction logic elsewhere.
+    evidence: "backend/src/lib/context-safety.ts, expanded 137+ lines in chunk 18"
+
+  - description: >
+      CapabilitiesContext in src/contexts/CapabilitiesContext.tsx drives all capability-gated UI rendering
+      (graph, AGE, Genesis). Frontend reads a runtime capabilities surface from GET /api/health —
+      not compile-time flags.
+    evidence: "Shell.tsx, LHM-001, GraphCapabilityNotice component"
+
+  - description: >
+      forceRerun param on pipeline trigger resets all story passes=false in spec JSON before inserting
+      story_results. Without it, triggering a fully-passed spec immediately marks the run done with no
+      story execution.
+    evidence: "pipeline trigger endpoint, chunk 1"
+
+  - description: >
+      Chrome MCP has two modes: @playwright/mcp (fresh isolated browser) vs chrome-devtools-mcp on port 4041
+      (attaches to live authenticated Chrome via CDP). Auto-launches Chrome if not reachable at localhost:9222,
+      polls up to 15s for CDP readiness.
+    evidence: "chromeMcp flag in execution-engine.ts, chunk 1"
+
+bug_patterns:
+  - pattern: >
+      JSON.parse() crash on nullable JSON DB columns. NULL or empty string stored in JSON columns like
+      auto_pr_reviewers causes JSON.parse(null) or JSON.parse('') to throw. Fix with explicit try/catch
+      returning [] as fallback — not a single-line coalesce.
+    example: "auto_pr_reviewers column in github_connections; chunk 2"
+
+  - pattern: >
+      Express route ordering: static routes must be registered before parameterized routes or Express
+      matches the literal string as a param value (e.g. /sessions/history matched as :sessionId='history').
+    example: "Terminal session routes in chunk 5"
+
+  - pattern: >
+      handleRouteError() signature is (res, error, context?) — first arg is res, not req. Passing req as
+      first arg silently breaks all error responses with no TypeScript error.
+    example: "chunk 5"
+
+  - pattern: >
+      React useEffect dependency loops: context values (toast callbacks, etc.) get new object references on
+      every render. Capture them in refs and exclude from dep arrays. Do not include callbacks in dep arrays.
+    example: "TerminalPane.tsx, chunk 5"
+
+  - pattern: >
+      React StrictMode double-invocation creates duplicate resources. Use a creatingRef boolean guard in
+      useEffect that POSTs to create a resource; pair with ON CONFLICT DO NOTHING on backend INSERT.
+    example: "useTerminalSession.ts, chunk 5"
+
+  - pattern: >
+      SET LOCAL is a no-op in pg autocommit mode. Use session-level SET with RESET in a finally block
+      before client.release() for any session variables (e.g. app.current_user_id). Without this,
+      session variable values leak between pool borrowers.
+    example: "chunk 6, RLS user context injection"
+
+  - pattern: >
+      AGE search_path pool poisoning: setupAgeSession() sets search_path=ag_catalog which poisons the
+      pool connection. Any code calling it must restore SET search_path = rorca, public in a finally
+      block before client.release(). Causes intermittent "Workspace not found" 404s on all workspace routes.
+    example: "knowledge-graph.ts, graph-context.ts, graph-drift-detector.ts"
+
+  - pattern: >
+      auto_pr_enabled feature flag blocks explicit user-triggered PR actions. When the user explicitly
+      requests a PR (merge_strategy = 'pr' or 'draft-pr'), pass force: true from the worker to bypass
+      the feature flag check. Explicit user actions must never be silently blocked by feature flags.
+    example: "github-pr-creator.ts, chunk 8"
+
+  - pattern: >
+      mergeStrategy and autoMerge dropped in frontend API call: triggerPipeline() in src/api/pipeline.ts
+      was not forwarding these fields from request body to backend. Fields must be explicitly forwarded
+      in the fetch payload, not assumed to pass through.
+    example: "chunk 8"
+
+  - pattern: >
+      MCP slow-path LLM-backed tools silently timeout at 30s default. All LLM-backed MCP tools
+      (/enrich, /match-skills, spec gen, etc.) must be in the SLOW_PATHS list in mcp-http.ts.
+    example: "chunk 1 MCP slow-path fix"
+
+  - pattern: >
+      Supabase migration OWNER TO clause: OWNER TO rorca must NOT appear in Supabase migrations.
+      The rorca role doesn't exist on hosted Supabase. 3 existing migrations required patching.
+    example: "chunk 8"
+
+  - pattern: >
+      Enrichment concurrency without isValidModel check: missing model validation before chatComplete
+      caused silent failures. Always validate model with isValidModel() and fall back to DEFAULT_MODEL
+      before any LLM call. Cap enrichment concurrency at 3 to prevent rate limit storms.
+    example: "chunk 8"
+
+  - pattern: >
+      worktree.domains is a JSONB array column (not a scalar string). Extract first element for
+      L2 direction layer lookups: domains[0] not domains.
+    example: "workspaces table, chunk 5"
+
+  - pattern: >
+      Graph projection stale orphans: graph projections must be explicitly deleted and reconciled —
+      stale projections left orphaned will pollute retrieval results. knowledge-graph.ts must handle
+      deletion sync and reconciliation pruning.
+    example: "chunk 13 graph projection lifecycle management"
+
+  - pattern: >
+      db-strategy.js and db-strategy.ts are dual JS/TS versions that must be kept in sync.
+      bin/rorca.js uses the JS version (CLI entry point); the server uses TS. Edits to one require
+      the other.
+    example: "backend/src/lib/db-strategy.ts + db-strategy.js, chunk 15"
+
+  - pattern: >
+      Migration repair pattern: when data is corrupted by earlier migrations, fix it with a dedicated
+      repair migration (e.g. 20260629220000_genesis_metadata_repair.sql) rather than editing the
+      original migration file.
+    example: "chunk 18, genesis_metadata_repair.sql (283 lines)"
+
+conventions:
+  - rule: >
+      New migrations MUST use timestamp format YYYYMMDDHHMMSS_description.sql, never sequential numbers.
+      Sequential numbers (001, 002...) collide on parallel branches. pg-index.ts detects duplicate prefixes
+      and fails loudly at startup.
+
+  - rule: >
+      New agent binary types (pi, opencode, codex) follow a 3-file pattern: {agent}-detector.ts for
+      binary detection, health endpoint exposure as { piInstalled, piVersion }, and registration in
+      VALID_AGENT_TYPES in config.ts.
+
+  - rule: >
+      AGE-unavailable routes return 503 { error, code: 'AGE_NOT_INSTALLED', mode: 'lite', hint } via
+      age-guard.ts. Graph-dependent UI components must handle available: false states gracefully using
+      GraphCapabilityNotice.
+
+  - rule: >
+      WebSocket terminal connections use wsToken (one-time UUID, 60s TTL) from POST /api/terminal/sessions,
+      NOT sessionId in the URL. Server validates, maps to sessionId, then deletes token. Prevents
+      sessionId enumeration.
+
+  - rule: >
+      @refresh reset Vite directive is required on large multi-hook panels (SpecsPanel.tsx, MemoryPanel.tsx
+      at ~1200+ lines) to prevent HMR state corruption.
+
+  - rule: >
+      RLS policies must be split per-operation (SELECT/INSERT/UPDATE/DELETE), not a single ALL policy,
+      for fine-grained access control.
+
+  - rule: >
+      Graph writes must go through canonical key resolution before insertion. Do not write directly to
+      graph nodes without resolving the rorca_v2 canonical identity key scheme.
+
+  - rule: >
+      Destructive memory/curation operations (prune, supersede) must show blast-radius impact preview
+      before committing. This is the established UX pattern (MOG-003) for destructive memory operations.
+
+  - rule: >
+      Retrieval pipeline changes must pass ranking-benchmark.ts regression benchmarks with fixture files
+      before merging. Score explainability fields are required — retrieval scores must be inspectable.
+
+  - rule: >
+      New optional subsystems (Genesis KB, graph, etc.) must wire a status/availability signal into
+      GET /api/health and expose a -disabled.ts guard route for graceful endpoint blocking when unavailable.
+
+  - rule: >
+      FinOps settings tabs follow a 3-file pattern: Tab component + register in SettingsPanel.tsx +
+      register in routes.tsx.
+
+  - rule: >
+      merge_strategy (direct/pr/draft-pr/branch-only) resolution order: per-run override → spec JSON →
+      workspace config → 'direct'. Must be persisted to DB at trigger time, not only stored in pg-boss
+      job payload.
+
+  - rule: >
+      trust_tier vocabulary from US-002/US-004 (context-intelligence contracts) is the canonical
+      sensitivity/trust model. Genesis source imports carry explicit sensitivity/trust tier metadata
+      aligned with this vocabulary.
+
+  - rule: >
+      Lucide icons do not accept a title prop; use aria-label instead (causes TS2322 otherwise).
+
+avoid:
+  - approach: Docker-first DB (CLI-031)
+    reason: >
+      CLI-031 was explicitly deprecated. Docker Desktop is too heavy on macOS. Native PostgreSQL is the
+      default; Docker is opt-in sidecar only. Use db-strategy.ts for capability abstraction.
+
+  - approach: PTY embedded terminal (TerminalPanel/TerminalPane/TerminalDrawer/pty-manager.ts)
+    reason: >
+      Entire PTY/embedded terminal feature was deleted (~5,678 lines) in chunk 12. Do not reference
+      node-pty, pty-manager.ts, ReadOnlyTerminalPane, useTerminalSession, TerminalDrawerContext, or
+      attempt to resurrect this feature.
+
+  - approach: mcp-auth.js as a standalone auth module
+    reason: >
+      Deleted (249 lines, CLI-056). MCP auth is now consolidated across get-user.ts, license-verifier.ts,
+      plan-gate.ts, require-plan.ts. Do not recreate a monolithic mcp-auth file.
+
+  - approach: rorca init as a standalone CLI story
+    reason: >
+      CLI-032 deprecated — scope folded into CLI-033, CLI-040, CLI-044. Do not implement as own unit.
+
+  - approach: Client-supplied plan claims or JWT plan fields for authorization decisions
+    reason: >
+      Plan resolution is server-side authoritative only. The CLI is open-source and untrusted.
+      plan-gate.ts has anti-tamper checks; any plan field from request body or JWT is rejected.
+
+  - approach: Skill-first Forge refactor as a planned architectural direction
+    reason: >
+      Two planning docs (docs/pi-skill-first-rorca-refactor-plan.md and docs/rorca-wide-skill-first-forge-refactor-plan.md)
+      were deleted — this approach was abandoned/scrubbed.
+
+  - approach: GitHub OAuth routes in backend/src/routes/auth.ts
+    reason: >
+      auth.ts was deleted (282 lines, MU-017). GitHub OAuth is now fully Supabase-owned. Do not re-add
+      custom OAuth routes for GitHub.
+
+  - approach: Ad-hoc AGE availability checks inline in route handlers
+    reason: >
+      Use age-guard.ts for all AGE availability checks. Inline guards create inconsistent 503 responses
+      and miss the structured error code contract that Lite Mode clients depend on.
+
+  - approach: Unbounded graph traversals in memory/retrieval queries
+    reason: >
+      Memory graph uses bounded neighborhood queries only. Unbounded traversals degrade performance
+      and destabilize retrieval — memory-graph.ts enforces this boundary.
+
+  - approach: Duplicate anti-echo-chamber or sensitivity logic outside canonical modules
+    reason: >
+      Anti-echo-chamber guardrails (recency decay, pinning, diversity) live in retrieval-pipeline.ts
+      and memory-router.ts. Sensitivity enforcement lives in context-safety.ts. Duplicating this logic
+      elsewhere leads to inconsistent behavior and was an explicit historical mistake.
+
+  - approach: Using sequential migration numbers for new migrations
+    reason: >
+      Sequential prefixes (001, 002...) collide when parallel worktree branches create migrations
+      simultaneously. pg-index.ts detects duplicates and fails loudly. Always use YYYYMMDDHHMMSS format.
+
+  - approach: Storing mergeStrategy only in the pg-boss job payload
+    reason: >
+      Worker was previously not persisting merge_strategy to DB at trigger time, only in the job payload.
+      After worker restarts, the payload was unavailable, silently defaulting to 'direct'. Persist to
+      pipeline_runs at trigger time.

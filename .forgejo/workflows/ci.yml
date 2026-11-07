@@ -1,0 +1,328 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci
+  cancel-in-progress: true
+
+jobs:
+  canonical-typecheck:
+    name: Canonical Repository Type Check
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+      - name: Generate ephemeral database credentials
+        # No database credential is committed. The bootstrap password comes from
+        # the CI secret CI_POSTGRES_PASSWORD; the split-principal role passwords
+        # are generated per run and exported to later steps via GITHUB_ENV.
+        run: |
+          set -euo pipefail
+          runtime_pw="$(openssl rand -hex 16)"
+          migrator_pw="$(openssl rand -hex 16)"
+          writer_pw="$(openssl rand -hex 16)"
+          {
+            echo "RORCA_RUNTIME_DATABASE_USER=rorca_runtime"
+            echo "RORCA_MIGRATION_DATABASE_USER=rorca_migrator"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_USER=rorca_canonical_writer"
+            echo "RORCA_RUNTIME_DATABASE_PASSWORD=${runtime_pw}"
+            echo "RORCA_MIGRATION_DATABASE_PASSWORD=${migrator_pw}"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_PASSWORD=${writer_pw}"
+            echo "DATABASE_URL=postgres://rorca_runtime:${runtime_pw}@${CI_DB_HOST}:5432/${CI_DB_NAME}"
+            echo "RORCA_MIGRATION_DATABASE_URL=postgres://rorca_migrator:${migrator_pw}@${CI_DB_HOST}:5432/${CI_DB_NAME}"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_URL=postgres://rorca_canonical_writer:${writer_pw}@${CI_DB_HOST}:5432/${CI_DB_NAME}"
+          } >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm run typecheck
+
+  ssdlc-contract-registry:
+    name: SSDLC Contract Registry
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: cd backend && npm ci
+      - run: cd backend && npm run verify:ssdlc-contracts
+      - name: Run isolated source-to-learning interoperability qualification
+        run: cd backend && npm run verify:ssdlc-interoperability
+
+  backend-tests:
+    name: Complete Backend Test Corpus
+    runs-on: [macos, arm64]
+    env:
+      RORCA_TEST_DATABASE_MODE: docker
+      # Isolate the jest transform cache from other host-executor jobs and
+      # from developer machines: the corpus shares this Mac's /tmp.
+      TMPDIR: /tmp/rorca-ci-${{ github.run_id }}-corpus
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: cd backend && npm ci
+      - name: Run every backend Jest shard with a shard-owned database
+        run: cd backend && npm test
+
+  golden-tests:
+    name: Golden Corpus (Isolated Database)
+    needs: backend-tests
+    runs-on: [macos, arm64]
+    env:
+      TMPDIR: /tmp/rorca-ci-${{ github.run_id }}-golden
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: cd backend && npm ci
+      - run: cd backend && npm run test:golden -- --runInBand
+
+  pg-boss-integration:
+    name: Real pg-boss Integration Corpus
+    needs: golden-tests
+    runs-on: [macos, arm64]
+    env:
+      TMPDIR: /tmp/rorca-ci-${{ github.run_id }}-pgboss
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: cd backend && npm ci
+      - name: Run all real queue lifecycle suites in an invocation-owned database
+        run: cd backend && npm run test:integration
+
+  populated-upgrade:
+    name: Populated Immutable-Ledger Upgrade
+    needs: pg-boss-integration
+    runs-on: [macos, arm64]
+    env:
+      TMPDIR: /tmp/rorca-ci-${{ github.run_id }}-populated
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: cd backend && npm ci
+      - name: Replay the seven-phase upgrade against populated protected ledgers
+        run: cd backend && npm run test:populated-upgrade
+
+  canonical-gate-tests:
+    name: Seven-Phase Gate Compiler and Evaluator
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: cd backend && npm ci
+      - run: cd backend && npm run test:ssdlc-gates
+
+  frontend-tests:
+    name: Frontend Vitest Corpus
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run test:frontend
+
+  workspace-tests:
+    name: Pi Extension and Capture Workspace Tests
+    runs-on: ci-amd64
+    container:
+      image: node:24-bookworm
+      options: >-
+        --cap-drop ALL
+        --cap-add SYS_ADMIN
+        --cap-add SETFCAP
+        --security-opt no-new-privileges=true
+        --security-opt seccomp=unconfined
+        --security-opt apparmor=unconfined
+        --security-opt systempaths=unconfined
+    env:
+      RORCA_API_URL: http://127.0.0.1:3030
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - name: Install the Linux sandbox required by Hermes supervisor tests
+        run: apt-get update && apt-get install -y --no-install-recommends bubblewrap
+      - run: npm ci
+      - run: npm run test:workspaces
+
+  wave-qualification:
+    name: Canonical Wave Qualification and CI Stress Profile
+    runs-on: ci-amd64
+    container:
+      image: node:24-bookworm
+      options: --init
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+      - run: npm ci
+      - run: npm run test:wave-qualification
+      - run: npm run qualify:wave:ci
+
+  public-contract-tests:
+    name: Public Contract Node Tests
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run test:public-contract
+
+  harness-contract:
+    name: CI and Harness Dead-Test Contract
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+      - run: npm ci
+      - run: npm run test:ci-contract
+      - run: npm --prefix backend run test:harness
+
+  top-level-e2e:
+    name: Top-Level Playwright E2E Corpus
+    runs-on: ci-amd64
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: rorca_bootstrap
+          POSTGRES_PASSWORD: ${{ secrets.CI_POSTGRES_PASSWORD }}
+          POSTGRES_DB: rorca_e2e
+        options: >-
+          --health-cmd "pg_isready -U rorca_bootstrap -d rorca_e2e"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CI: 'true'
+      CI_DB_HOST: postgres
+      CI_DB_NAME: rorca_e2e
+      RORCA_DB_MODE: byop
+      RORCA_DISABLE_BACKGROUND_RUNTIME: 'true'
+      RORCA_SERVE_MCP: 'false'
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:5210
+      PLAYWRIGHT_API_BASE_URL: http://127.0.0.1:3030
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Provision isolated split database principals
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends postgresql-client
+          PGPASSWORD="$POSTGRES_BOOTSTRAP_PASSWORD" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+            --host "$POSTGRES_HOST" --username "$POSTGRES_BOOTSTRAP_USER" --dbname "$POSTGRES_DB" \
+            --command 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto;'
+          docker/postgres/bootstrap-roles.sh
+        env:
+          POSTGRES_HOST: postgres
+          POSTGRES_DB: rorca_e2e
+          POSTGRES_BOOTSTRAP_USER: rorca_bootstrap
+          POSTGRES_BOOTSTRAP_PASSWORD: ${{ secrets.CI_POSTGRES_PASSWORD }}
+          RORCA_MIGRATION_DATABASE_USER: rorca_migrator
+      - name: Start the owned backend and frontend stack
+        run: |
+          npm run dev:server:contract > /tmp/rorca-e2e-backend.log 2>&1 &
+          npm run dev:frontend-only -- --host 127.0.0.1 > /tmp/rorca-e2e-frontend.log 2>&1 &
+          curl --fail --silent --show-error --retry 60 --retry-delay 1 --retry-all-errors http://127.0.0.1:3030/api/health
+          curl --fail --silent --show-error --retry 60 --retry-delay 1 --retry-all-errors http://127.0.0.1:5210
+      - run: npm run test:e2e:ci
+      - if: always()
+        run: |
+          cat /tmp/rorca-e2e-backend.log
+          cat /tmp/rorca-e2e-frontend.log
+
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run lint
+
+  tier-lint:
+    name: Tier Annotation Lint
+    runs-on: ci-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run lint:tier

@@ -1,0 +1,30 @@
+{
+  "name": "@rorca/public-contract",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/packages/rorca-public-contract/src/governed-execution.js",
+  "types": "./dist/packages/rorca-public-contract/src/governed-execution.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/packages/rorca-public-contract/src/governed-execution.d.ts",
+      "require": "./dist/packages/rorca-public-contract/src/governed-execution.js",
+      "default": "./dist/packages/rorca-public-contract/src/governed-execution.js"
+    },
+    "./schemas/*": "./schemas/governed-execution/*"
+  },
+  "files": ["dist", "schemas/governed-execution"],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node -e \"require('fs').writeFileSync('dist/package.json', JSON.stringify({type:'commonjs'})+'\\n')\"",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/__tests__/*.node.test.ts"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.1"
+  }
+}

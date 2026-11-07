@@ -1,0 +1,22 @@
+# Dedicated proposal-only bounty worker. It contains no API server entrypoint.
+FROM node:20-bookworm-slim AS build
+WORKDIR /app/backend
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
+COPY backend/package.json backend/package-lock.json* ./
+COPY backend/scripts/verify-node-pty-install.js ./scripts/
+RUN npm ci
+COPY backend/tsconfig.json ./
+COPY backend/src/ src/
+RUN npx tsc && npm prune --omit=dev
+
+FROM node:20-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --uid 10001 bounty
+WORKDIR /app
+COPY --from=build /app/backend/node_modules ./node_modules
+COPY --from=build /app/backend/package.json ./
+COPY --from=build /app/backend/dist ./dist
+COPY backend/src/db/pg-migrations/ ./dist/db/pg-migrations/
+ENV NODE_ENV=production RORCA_BWRAP_BIN=/usr/bin/bwrap
+USER bounty
+ENTRYPOINT ["node", "dist/bounty-worker.js"]

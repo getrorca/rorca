@@ -1,0 +1,4 @@
+sourceSha=ffb7644315b3fb5908d659be0c998ef7478ea2a5
+node=v22.19.0
+npm=10.9.3
+postgres=postgres (PostgreSQL) 16.13 (Homebrew)

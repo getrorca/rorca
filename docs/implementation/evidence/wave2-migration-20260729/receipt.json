@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "rorca.wave2-migration-evidence.v1",
+  "sourceShaBeforeMigrationCommit": "30215e6ad3a3d7c8fe207a02a5f4ae3d6b284fd7",
+  "migration": {
+    "path": "backend/src/db/pg-migrations/20260729131000_wave2_governed_mission_control_plane.sql",
+    "sha256": "f85265d1a5002ef0f2037415ee7143f250423a00e43f662a1700a3212ffc9f4b",
+    "version": "20260729131000",
+    "transactionOwner": "canonical migration runner",
+    "pgbossDdl": false
+  },
+  "freshDatabase": {
+    "name": "rorca_w2mig202607291830573cf411_test",
+    "owner": "w2mig202607291830573cf411owner",
+    "postgres": "16.13",
+    "vector": "0.8.0",
+    "age": "1.5.0",
+    "pgcrypto": "1.3",
+    "ownerLogin": true,
+    "ownerSuperuser": false,
+    "ownerCreateDb": false,
+    "ownerCreateRole": false,
+    "ownerReplication": false,
+    "ownerBypassRls": false,
+    "canonicalMigrationsApplied": 249,
+    "canonicalMigrationsSkipped": 0,
+    "migrationHead": "20260729131000",
+    "totalRlsTableCountAfterMigration": 40,
+    "immutableUpdateDeleteTriggerCount": 29,
+    "immutableTruncateTriggerCount": 29,
+    "pgbossSchemaCountAfterMigrations": 0,
+    "attestationPath": "fresh-pg16-attestation.txt",
+    "attestationSha256": "175ca369eb2798cb931b74258c29fcae53f0d451167b87f8499ed1acc2725754"
+  },
+  "cleanup": {
+    "path": "cleanup.txt",
+    "sha256": "a91582ceaf692e16aba817c146b9c56426da57debd6958d05e072c0a55d5abbe",
+    "serviceAlive": false,
+    "appListenerCount": 0,
+    "postgresListenerCount": 0,
+    "stateExists": false,
+    "socketExists": false,
+    "prunePerformed": false
+  },
+  "authority": {
+    "providerOperation": false,
+    "runTriggered": false,
+    "merge": false,
+    "deployment": false,
+    "passesChanged": false
+  }
+}

@@ -1,0 +1,280 @@
+[
+  {
+    "schemaVersion": "rorca.clean-room-certificate.v1",
+    "lane": "managed",
+    "namespaceId": "rorca-cleanroom-managed-6962abbab37969a7",
+    "environmentClass": "real_isolated_host",
+    "sourceSha": "a3efe85b701ba35030c399fc4ba0e684c4638298",
+    "migrationHash": "sha256:430ba55b55c244488ecb9ad804fba642ec74fb4ccb21fc626d2aa3d23e0cc404",
+    "contractHash": "sha256:26534fb1551fb6fc5e2b7ebd5b568f2698cc2189cf9f059ba8dcdd42d4ac7d32",
+    "specHash": "sha256:6c67ac5993d7de4a95ed82b7ab0d2a7c68fb98ae5bc17bc7d3f3ef65938e20cd",
+    "artifactSetHash": "sha256:096abcd20e704f93ffa7f1701a5b66a6bee87d49a9261b3f76beff0268746c9d",
+    "backupLedgerHash": "sha256:9a8af695ac72671586c809b32fbb4b9044d80db424a0adf9013c0b1320b511a9",
+    "policyConfigurationHash": "sha256:c9ec25d60aed48b4826dd21ae42867323549902baac1d6258003b037ef153d17",
+    "toolVersions": {
+      "node": "v22.19.0",
+      "tsx": "backend/node_modules/tsx (program worktree)",
+      "docker": "Docker version 29.3.0, build 5927d80c76",
+      "git": "git version 2.50.1 (Apple Git-155)",
+      "postgresImage": "rorca-postgres:pg16-age",
+      "toolchainNodeModules": "symlinked external node_modules (MUTABLE tool input; content hash sha256:8689497d03d22d2ec0816d04240f6c26b390f3977f978f68dd2b4040cd55466e)",
+      "rootPackageLockHash": "sha256:bbc9fd591358af4739190ce62169482e26f2c2f248abeacdeafab406b6deaa6e",
+      "backendPackageLockHash": "sha256:37b41a9ffef116e2b8e92ff18f6ac639c3f312f4376c04f7d0394b8a330804cf",
+      "lane": "managed"
+    },
+    "exactCommands": [
+      "git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" rev-parse HEAD && git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" rev-parse HEAD^{tree} && git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" fsck --no-progress && git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" diff --quiet HEAD -- && echo CLEAN",
+      "cd \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7/backend\" && DATABASE_URL=\"postgres://[REDACTED_USER]:[REDACTED]@127.0.0.1:57329/rorca_cleanroom\" RORCA_RUNTIME_DATABASE_USER=\"[REDACTED_USER]\" RORCA_CANONICAL_WRITER_DATABASE_USER=\"[REDACTED_USER]\" node \"/private/tmp/rorca-autonomous-runner-20260804/backend/node_modules/tsx/dist/cli.mjs\" -e \"import { runPgMigrations } from './src/db/pg-index.ts'; (async () => await runPgMigrations())().catch(e => { console.error(e); process.exit(1); })\"",
+      "git --git-dir=\"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-managed-6962abbab37969a7.git\" cat-file -t 305df00144c15a498a69857e279edcbf4ea14233 && git --git-dir=\"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-managed-6962abbab37969a7.git\" cat-file -t bdcc1ce28efcf1cdd714781b04a6e70ca1271e5b && git --git-dir=\"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-managed-6962abbab37969a7.git\" rev-list --objects --all | sort | shasum -a 256 && docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 pg_dump -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom | shasum -a 256",
+      "cd \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" && node \"/private/tmp/rorca-autonomous-runner-20260804/backend/node_modules/tsx/dist/cli.mjs\" scripts/check-governed-contract-artifacts.ts",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE 'wave4%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'wave4_resource_inventory' AS tbl, (SELECT count(*) FROM rorca.wave4_resource_inventory) AS cnt) t)\"",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE '%dispatch%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'continuation_dispatch_outbox' AS tbl, (SELECT count(*) FROM rorca.continuation_dispatch_outbox) AS cnt) t)\"",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE '%lease%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'execution_leases' AS tbl, (SELECT count(*) FROM rorca.execution_leases) AS cnt) t)\"",
+      "cd \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7/packages/rorca-public-contract/schemas/governed-execution\" && find . -type f | sort | xargs shasum -a 256 | shasum -a 256",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE '%checkpoint%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'context_checkpoints' AS tbl, (SELECT count(*) FROM rorca.context_checkpoints) AS cnt UNION ALL SELECT 'context_bundles' AS tbl, (SELECT count(*) FROM rorca.context_bundles) AS cnt) t)\"",
+      "echo \"source_config_drift=$(git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" status --porcelain --untracked-files=no | wc -l)\"; echo \"dependency_health=$(node --version 2>/dev/null | wc -l),$(docker --version 2>/dev/null | wc -l),$(git --version 2>/dev/null | wc -l)\"; echo \"runtime_health=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT pg_is_in_recovery()\")\"; echo \"queue_outbox_freshness=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT count(*) FROM rorca.continuation_dispatch_outbox\")\"; echo \"lease_retry_recovery=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT count(*) FROM rorca.execution_leases\")\"; echo \"observability_freshness=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE 'run_activity%'\")\"; echo \"provider_operations_readiness=$(env | grep -cE '^(RORCA|GITHUB|OPENAI|ANTHROPIC|GOOGLE).*(TOKEN|KEY|SECRET)' || true)\"",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-6962abbab37969a7 psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT name FROM pg_available_extensions WHERE name IN ('age','vector','pgcrypto') ORDER BY name\"",
+      "docker rm -f rorca-cleanroom-pg-6962abbab37969a7 && rm -rf \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-managed-6962abbab37969a7.git\" && test ! -e \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-managed-6962abbab37969a7\" && test ! -e \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-managed-6962abbab37969a7.git\""
+    ],
+    "observations": [
+      {
+        "step": "verify_source_sha",
+        "status": "verified",
+        "observationHash": "sha256:1a41599f80a30c134710d22529a63ee12250eca25cf6b2f935962fd49976c248",
+        "verifierReceiptHash": "sha256:91af6acb0be7939648d6a4a33bbacb8b543362bc3d8b6abba56446da0dadb313",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:f6a7876ec60c1ae9bb771a4dd9b9625e5c5e367659dbf4117fbcd7538f32e58e"
+      },
+      {
+        "step": "apply_migrations",
+        "status": "verified",
+        "observationHash": "sha256:a34e4d4f75cae1e1362e9863ad2efae8daa946ebe30302cb39fd8735e40858a5",
+        "verifierReceiptHash": "sha256:68a0ff10f12b30aa65fa3d7450209cc8da5c47d08975cf0c831983523d92df5a",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:64e4361f9ffc479561612afd8dd5349c6a30b1fc471a2aa69e106065fe629401"
+      },
+      {
+        "step": "verify_backup_ledger",
+        "status": "verified",
+        "observationHash": "sha256:3f8c37ecf86c1210ac6c205c340cdf47df8d7a23574c06b3f44fa9b004c34143",
+        "verifierReceiptHash": "sha256:85b1750742e4cc681473eab7e023d2f227b600546f57c317818c1775f9964d8c",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:f82759281071d2223d5f1ef7ac89954fd7bcfda3ac7fed1568088c7a684dbc69"
+      },
+      {
+        "step": "verify_public_contract_generation",
+        "status": "verified",
+        "observationHash": "sha256:c5439d9583682c742eb37621ddf6a8afbcdffedebc8c6572253c2f90f3e441f8",
+        "verifierReceiptHash": "sha256:54c1d1268df3bcaf6899e02558f218014f5c5a0b042357f183a4bc76a8cc255a",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:6a2961767df8cd9a0c1f9d0a7287ecabb7cfca30306bf3186db47574bdb0b058"
+      },
+      {
+        "step": "reconcile_inventory",
+        "status": "verified",
+        "observationHash": "sha256:3adbf81d4ad985bf6c8966ef50b46d10fd1728d6eb3c705c8d78f48e8cc14fe2",
+        "verifierReceiptHash": "sha256:d119d6376e30172cbe84f3e7c04128eae2235887ee547071913b52e8648ea929",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:940b1965261966285c6913ab700b7729497b6523ea7b55e090c8fb65c4fc5b4b"
+      },
+      {
+        "step": "recover_queue_outbox",
+        "status": "verified",
+        "observationHash": "sha256:d0a6f3c469c11c1088cf83f697952cefcedc4bc423b2b13695feb2b1df26db78",
+        "verifierReceiptHash": "sha256:9d4eaa1659b30a3ff5416a9fa0f8bdb81a090fc22de61a3bd880748a525b5dd9",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:d6d68322d448a633d25fc2efbb55e62b0925a9aafc3e5d0cb7b33a66fbe2a1ea"
+      },
+      {
+        "step": "scan_lease_fence_retry",
+        "status": "verified",
+        "observationHash": "sha256:c162f861b19fbbeb37dfc4c59687dcb0e2bd0342f3fa5e0f900b41835a1256bd",
+        "verifierReceiptHash": "sha256:cddef8c05e26bdff6678e4a4e23b5ba0222a24f8fd8dcdc3a67ae6422d61183f",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:5f3b88555c9126435ebb11a1dbb2c913a86245aba1830a4c667f2f6f90b6454d"
+      },
+      {
+        "step": "verify_artifacts",
+        "status": "verified",
+        "observationHash": "sha256:d8e2aaf6d7330ba0063c92ddf828e706aa39cde13b0be1f4e8aefcce71992a81",
+        "verifierReceiptHash": "sha256:035ac2556028ac60b22696d0834710d3a05e016bf8403daca582bbdefa0b9bbd",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:f76a5e56b17f69fac5b12de6dfb6d71d481bf729273e62f75b3b5b8709998bd7"
+      },
+      {
+        "step": "verify_context_continuation",
+        "status": "verified",
+        "observationHash": "sha256:14a29ed57d1f98fe3e1dd218a9cc5fa62c7ed356eb8c2fbea02c05ed32b17063",
+        "verifierReceiptHash": "sha256:97fee31cbd7f86017165a43e6bb55f6404e54fb720a30365cb4dc0d434bdbb9e",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:76eb3899547dfb9bfbbede137e6a586d00a1b980506fbd6ac6ca0263bf93e5d6"
+      },
+      {
+        "step": "observe_seven_status_planes",
+        "status": "verified",
+        "observationHash": "sha256:3ceed290bc6a331e63c1cd8e1d31b9c089a92add40f143f25b78be146bc2917c",
+        "verifierReceiptHash": "sha256:0b14d6da5e2c0afa64aea29f21a473bd41332542f57662346371e70a2f40188b",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:c382db2ffac75f984b6656154e927ab67075e75839eb6aaea796ed2acbae3e67"
+      },
+      {
+        "step": "verify_optional_dependency_degradation",
+        "status": "verified",
+        "observationHash": "sha256:8b3f01f2230169f2e8995e6c0249cd68ffda381bec94c7365d3cbb8869da89cb",
+        "verifierReceiptHash": "sha256:33fad7dafdaa2eed1a83526700bbe1e6edf4ff17d04cbbe74647c8bda4897be4",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:5ce0b4ac769ddf48fdf66e4ef6a21f5766a2fdb0276c186f07f7eeb470cb3382"
+      },
+      {
+        "step": "cleanup",
+        "status": "verified",
+        "observationHash": "sha256:3246a3a8973a9d1397569ee012432ea079ee4db2611667d976fde9b8c2130514",
+        "verifierReceiptHash": "sha256:2a37cfe46878f74fed90943c171f90f447cb6fe82040504d7ec83c48b3d1f7fa",
+        "detail": "executed verifier host:rorca-cleanroom:managed; observed sha256:9186513030cc6ca58d49df198278a6071de6dab2252e259ee7a1355cf7b852ee"
+      }
+    ],
+    "statusPlanes": {
+      "source_config_drift": "healthy",
+      "dependency_health": "degraded",
+      "runtime_health": "healthy",
+      "queue_outbox_freshness": "healthy",
+      "lease_retry_recovery": "healthy",
+      "observability_freshness": "healthy",
+      "provider_operations_readiness": "healthy"
+    },
+    "unresolvedBlockers": [],
+    "cleanupHash": "sha256:4d46ea5ff457a960252e3f65e4e2d0f4a62973eaf5beaa405593fcaaa5a384e7",
+    "providerMutationCount": 0,
+    "productionMutationCount": 0,
+    "authorityEffect": "none",
+    "certificateHash": "sha256:67fd6dfc7533f162a074dab8eb6941b2af9f380e2565c44b0bb684a86c3ed206"
+  },
+  {
+    "schemaVersion": "rorca.clean-room-certificate.v1",
+    "lane": "fake_federated",
+    "namespaceId": "rorca-cleanroom-fake_federated-69d992c049a5181d",
+    "environmentClass": "real_isolated_host",
+    "sourceSha": "a3efe85b701ba35030c399fc4ba0e684c4638298",
+    "migrationHash": "sha256:430ba55b55c244488ecb9ad804fba642ec74fb4ccb21fc626d2aa3d23e0cc404",
+    "contractHash": "sha256:26534fb1551fb6fc5e2b7ebd5b568f2698cc2189cf9f059ba8dcdd42d4ac7d32",
+    "specHash": "sha256:6c67ac5993d7de4a95ed82b7ab0d2a7c68fb98ae5bc17bc7d3f3ef65938e20cd",
+    "artifactSetHash": "sha256:096abcd20e704f93ffa7f1701a5b66a6bee87d49a9261b3f76beff0268746c9d",
+    "backupLedgerHash": "sha256:9a8af695ac72671586c809b32fbb4b9044d80db424a0adf9013c0b1320b511a9",
+    "policyConfigurationHash": "sha256:c9ec25d60aed48b4826dd21ae42867323549902baac1d6258003b037ef153d17",
+    "toolVersions": {
+      "node": "v22.19.0",
+      "tsx": "backend/node_modules/tsx (program worktree)",
+      "docker": "Docker version 29.3.0, build 5927d80c76",
+      "git": "git version 2.50.1 (Apple Git-155)",
+      "postgresImage": "rorca-postgres:pg16-age",
+      "toolchainNodeModules": "symlinked external node_modules (MUTABLE tool input; content hash sha256:8689497d03d22d2ec0816d04240f6c26b390f3977f978f68dd2b4040cd55466e)",
+      "rootPackageLockHash": "sha256:bbc9fd591358af4739190ce62169482e26f2c2f248abeacdeafab406b6deaa6e",
+      "backendPackageLockHash": "sha256:37b41a9ffef116e2b8e92ff18f6ac639c3f312f4376c04f7d0394b8a330804cf",
+      "lane": "fake_federated"
+    },
+    "exactCommands": [
+      "git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" rev-parse HEAD && git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" rev-parse HEAD^{tree} && git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" fsck --no-progress && git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" diff --quiet HEAD -- && echo CLEAN",
+      "cd \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d/backend\" && DATABASE_URL=\"postgres://[REDACTED_USER]:[REDACTED]@127.0.0.1:57343/rorca_cleanroom\" RORCA_RUNTIME_DATABASE_USER=\"[REDACTED_USER]\" RORCA_CANONICAL_WRITER_DATABASE_USER=\"[REDACTED_USER]\" node \"/private/tmp/rorca-autonomous-runner-20260804/backend/node_modules/tsx/dist/cli.mjs\" -e \"import { runPgMigrations } from './src/db/pg-index.ts'; (async () => await runPgMigrations())().catch(e => { console.error(e); process.exit(1); })\"",
+      "git --git-dir=\"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-fake_federated-69d992c049a5181d.git\" cat-file -t 305df00144c15a498a69857e279edcbf4ea14233 && git --git-dir=\"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-fake_federated-69d992c049a5181d.git\" cat-file -t bdcc1ce28efcf1cdd714781b04a6e70ca1271e5b && git --git-dir=\"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-fake_federated-69d992c049a5181d.git\" rev-list --objects --all | sort | shasum -a 256 && docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d pg_dump -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom | shasum -a 256",
+      "cd \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" && node \"/private/tmp/rorca-autonomous-runner-20260804/backend/node_modules/tsx/dist/cli.mjs\" scripts/check-governed-contract-artifacts.ts",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE 'wave4%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'wave4_resource_inventory' AS tbl, (SELECT count(*) FROM rorca.wave4_resource_inventory) AS cnt) t)\"",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE '%dispatch%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'continuation_dispatch_outbox' AS tbl, (SELECT count(*) FROM rorca.continuation_dispatch_outbox) AS cnt) t)\"",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE '%lease%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'execution_leases' AS tbl, (SELECT count(*) FROM rorca.execution_leases) AS cnt) t)\"",
+      "cd \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d/packages/rorca-public-contract/schemas/governed-execution\" && find . -type f | sort | xargs shasum -a 256 | shasum -a 256",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE '%checkpoint%'), (SELECT string_agg(coalesce(t.cnt::text,'missing'), ',') FROM (SELECT 'context_checkpoints' AS tbl, (SELECT count(*) FROM rorca.context_checkpoints) AS cnt UNION ALL SELECT 'context_bundles' AS tbl, (SELECT count(*) FROM rorca.context_bundles) AS cnt) t)\"",
+      "echo \"source_config_drift=$(git -C \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" status --porcelain --untracked-files=no | wc -l)\"; echo \"dependency_health=$(node --version 2>/dev/null | wc -l),$(docker --version 2>/dev/null | wc -l),$(git --version 2>/dev/null | wc -l)\"; echo \"runtime_health=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT pg_is_in_recovery()\")\"; echo \"queue_outbox_freshness=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT count(*) FROM rorca.continuation_dispatch_outbox\")\"; echo \"lease_retry_recovery=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT count(*) FROM rorca.execution_leases\")\"; echo \"observability_freshness=$(docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT count(*) FROM information_schema.tables WHERE table_schema='rorca' AND table_name LIKE 'run_activity%'\")\"; echo \"provider_operations_readiness=$(env | grep -cE '^(RORCA|GITHUB|OPENAI|ANTHROPIC|GOOGLE).*(TOKEN|KEY|SECRET)' || true)\"",
+      "docker exec -e PGPASSWORD=[REDACTED] rorca-cleanroom-pg-69d992c049a5181d psql -X -t -A -h 127.0.0.1 -p 5432 -U [REDACTED_USER] -d rorca_cleanroom -c \"SELECT name FROM pg_available_extensions WHERE name IN ('age','vector','pgcrypto') ORDER BY name\"",
+      "docker rm -f rorca-cleanroom-pg-69d992c049a5181d && rm -rf \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-fake_federated-69d992c049a5181d.git\" && test ! -e \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/workspace-fake_federated-69d992c049a5181d\" && test ! -e \"/var/folders/85/j8r9g59521l5s07l_987pqyw0000gn/T/rorca-cleanroom-JXmtZH/repo-fake_federated-69d992c049a5181d.git\""
+    ],
+    "observations": [
+      {
+        "step": "verify_source_sha",
+        "status": "verified",
+        "observationHash": "sha256:3a16f030848f08a1e1b2dd6c519e70943583fd9a373791561a10493c1623eec7",
+        "verifierReceiptHash": "sha256:d7e67196cb482ea8b6474508aa7f9266f8320aca8816339a5f6ddc7c7b9aecbb",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:f6a7876ec60c1ae9bb771a4dd9b9625e5c5e367659dbf4117fbcd7538f32e58e"
+      },
+      {
+        "step": "apply_migrations",
+        "status": "verified",
+        "observationHash": "sha256:a4a553d0d2ceba8b34f9c2d186da95206fc4e02fdce3ae4e55a84f82d659c203",
+        "verifierReceiptHash": "sha256:264b64b1cfb67b826b4c879fcd338f5b8725b395d3083271941e6e2fcec05381",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:64e4361f9ffc479561612afd8dd5349c6a30b1fc471a2aa69e106065fe629401"
+      },
+      {
+        "step": "verify_backup_ledger",
+        "status": "verified",
+        "observationHash": "sha256:96518858638e92e1afbecf81ec154efb28d20841e7e49e8c5101045d17104b12",
+        "verifierReceiptHash": "sha256:0f1c591a1ae17821a2224f270c4e174026c8ac628290808a2db57f6ed1f91724",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:2e388b598b0f54ceb9f1a5a9b454a994d8e0d5744508b1f34476cae55cabddb4"
+      },
+      {
+        "step": "verify_public_contract_generation",
+        "status": "verified",
+        "observationHash": "sha256:fcca6120bd1c5ac12355484078433631199164b24b4845d2129fccb3eb5bf5b8",
+        "verifierReceiptHash": "sha256:c62c8e0f773a60b021e42edce3df0c2060d1fd1f92f164042af969b5f2f878f1",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:6a2961767df8cd9a0c1f9d0a7287ecabb7cfca30306bf3186db47574bdb0b058"
+      },
+      {
+        "step": "reconcile_inventory",
+        "status": "verified",
+        "observationHash": "sha256:d55d6754b191d733a86cb77dbc63e015f10c2360c48075722b73c233f17752b9",
+        "verifierReceiptHash": "sha256:8426fb874702868d39752e69fb6419600517c9be4407da22cff0124a6503d3b8",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:940b1965261966285c6913ab700b7729497b6523ea7b55e090c8fb65c4fc5b4b"
+      },
+      {
+        "step": "recover_queue_outbox",
+        "status": "verified",
+        "observationHash": "sha256:028da1a5c19c2447158a04416c71d67c99ee55837719c2a49f3b38dc1585dadd",
+        "verifierReceiptHash": "sha256:5ec12f2833a92260f9f51ce5dae78df88e8306882b8f25149fbb75dd833d862f",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:d6d68322d448a633d25fc2efbb55e62b0925a9aafc3e5d0cb7b33a66fbe2a1ea"
+      },
+      {
+        "step": "scan_lease_fence_retry",
+        "status": "verified",
+        "observationHash": "sha256:b2f43b6fa3a18e9e2d0e67ed03670091c266470cc81e1b1d3bf100a7be852d40",
+        "verifierReceiptHash": "sha256:67afb39f395f755606bd5beec100e54c6e4f1c53442482339e4c0a2dc9bd9be9",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:5f3b88555c9126435ebb11a1dbb2c913a86245aba1830a4c667f2f6f90b6454d"
+      },
+      {
+        "step": "verify_artifacts",
+        "status": "verified",
+        "observationHash": "sha256:ab363fbdf080aadc60d948b1da8602b604bca891204de1ef5de45c0c657e41d1",
+        "verifierReceiptHash": "sha256:836c7225029b88b510495b2e035fd82270141219f77fca80232e313e2d094575",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:f76a5e56b17f69fac5b12de6dfb6d71d481bf729273e62f75b3b5b8709998bd7"
+      },
+      {
+        "step": "verify_context_continuation",
+        "status": "verified",
+        "observationHash": "sha256:b756c25010b1f0ee4ad12783e4a73e6fc26808a0e381f73aea75aec74b31799e",
+        "verifierReceiptHash": "sha256:f74197e2f575001e0adb7a70a0554701c8e82a82a9d0c03281964a351cfc42eb",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:76eb3899547dfb9bfbbede137e6a586d00a1b980506fbd6ac6ca0263bf93e5d6"
+      },
+      {
+        "step": "observe_seven_status_planes",
+        "status": "verified",
+        "observationHash": "sha256:721815dca6d1c70c77bbee501f9ad47829b3181eb09c5c39cb81424cd08229c2",
+        "verifierReceiptHash": "sha256:cde9c7de02ec22d908030536703b06767c15b765a8871948723e75099a6a7ba7",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:c382db2ffac75f984b6656154e927ab67075e75839eb6aaea796ed2acbae3e67"
+      },
+      {
+        "step": "verify_optional_dependency_degradation",
+        "status": "verified",
+        "observationHash": "sha256:a8c34dce912655652d595588f83fbff9690c4cb63fa4860237226a4345521e3a",
+        "verifierReceiptHash": "sha256:7b38efacfd84c5e212f41af5a3b75293bfa357cf8c5494e6b95834238c114a20",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:5ce0b4ac769ddf48fdf66e4ef6a21f5766a2fdb0276c186f07f7eeb470cb3382"
+      },
+      {
+        "step": "cleanup",
+        "status": "verified",
+        "observationHash": "sha256:d3cbc1bceaf6ee7392870b12a24077ea188ad64b58a10f305705106cd9193c5a",
+        "verifierReceiptHash": "sha256:10be3fc01d785f6a97249d11c05e25f1d098508ba6fe23658afd4a98b8cc1975",
+        "detail": "executed verifier host:rorca-cleanroom:fake_federated; observed sha256:85a493e4f14922461e5750a4aa84d8b37abd13e9bf068b96b565032b61fea062"
+      }
+    ],
+    "statusPlanes": {
+      "source_config_drift": "healthy",
+      "dependency_health": "degraded",
+      "runtime_health": "healthy",
+      "queue_outbox_freshness": "healthy",
+      "lease_retry_recovery": "healthy",
+      "observability_freshness": "healthy",
+      "provider_operations_readiness": "healthy"
+    },
+    "unresolvedBlockers": [],
+    "cleanupHash": "sha256:5820c6be7f4c27b15b26b3fa28602376bdbbdc3199acd77c4e88fe1eed37f25b",
+    "providerMutationCount": 0,
+    "productionMutationCount": 0,
+    "authorityEffect": "none",
+    "certificateHash": "sha256:ddf1586de985694db82b79e31081de38bdbec3963e712895d721e8e61b5c36b5"
+  }
+]

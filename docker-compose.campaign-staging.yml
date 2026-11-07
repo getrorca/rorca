@@ -1,0 +1,128 @@
+name: rorca-campaign-authority-staging
+
+services:
+  db:
+    image: rorca-postgres:pg16-age
+    build:
+      context: docker/postgres
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_USER: rorca_campaign_bootstrap
+      POSTGRES_PASSWORD: ${CAMPAIGN_STAGING_POSTGRES_BOOTSTRAP_PASSWORD:?set CAMPAIGN_STAGING_POSTGRES_BOOTSTRAP_PASSWORD}
+      POSTGRES_DB: rorca_campaign
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - campaign_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rorca_campaign_bootstrap -d rorca_campaign"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+
+  db-role-bootstrap:
+    image: rorca-postgres:pg16-age
+    entrypoint: ["/usr/local/bin/rorca-bootstrap-roles"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: rorca_campaign
+      POSTGRES_BOOTSTRAP_USER: rorca_campaign_bootstrap
+      POSTGRES_BOOTSTRAP_PASSWORD: ${CAMPAIGN_STAGING_POSTGRES_BOOTSTRAP_PASSWORD:?set CAMPAIGN_STAGING_POSTGRES_BOOTSTRAP_PASSWORD}
+      RORCA_MIGRATION_DATABASE_USER: rorca_campaign_migrator
+      RORCA_MIGRATION_DATABASE_PASSWORD: ${CAMPAIGN_STAGING_MIGRATION_DATABASE_PASSWORD:?set CAMPAIGN_STAGING_MIGRATION_DATABASE_PASSWORD}
+      RORCA_RUNTIME_DATABASE_USER: rorca_campaign_runtime
+      RORCA_RUNTIME_DATABASE_PASSWORD: ${CAMPAIGN_STAGING_RUNTIME_DATABASE_PASSWORD:?set CAMPAIGN_STAGING_RUNTIME_DATABASE_PASSWORD}
+      RORCA_CANONICAL_WRITER_DATABASE_USER: rorca_campaign_writer
+      RORCA_CANONICAL_WRITER_DATABASE_PASSWORD: ${CAMPAIGN_STAGING_CANONICAL_WRITER_DATABASE_PASSWORD:?set CAMPAIGN_STAGING_CANONICAL_WRITER_DATABASE_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  db-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["sh", "-c", "node dist/db/pg-index.js && node dist/db/pg-boss-install.js"]
+    environment:
+      DATABASE_URL: postgres://rorca_campaign_migrator:${CAMPAIGN_STAGING_MIGRATION_DATABASE_PASSWORD}@db:5432/rorca_campaign
+      RORCA_RUNTIME_DATABASE_USER: rorca_campaign_runtime
+      RORCA_CANONICAL_WRITER_DATABASE_USER: rorca_campaign_writer
+      NODE_ENV: production
+    depends_on:
+      db-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  rorca:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      DATABASE_URL: postgres://rorca_campaign_runtime:${CAMPAIGN_STAGING_RUNTIME_DATABASE_PASSWORD}@db:5432/rorca_campaign
+      RORCA_MIGRATIONS_PREAPPLIED: "true"
+      RORCA_PGBOSS_PREAPPLIED: "true"
+      RORCA_RUNTIME_DATABASE_USER: rorca_campaign_runtime
+      RORCA_CANONICAL_WRITER_DATABASE_URL: postgres://rorca_campaign_writer:${CAMPAIGN_STAGING_CANONICAL_WRITER_DATABASE_PASSWORD}@db:5432/rorca_campaign
+      RORCA_CANONICAL_WRITER_DATABASE_USER: rorca_campaign_writer
+      RORCA_DB_MODE: byop
+      NODE_ENV: production
+      PORT: "3030"
+      AUTH_REQUIRED: "false"
+      JWT_SECRET: ${CAMPAIGN_STAGING_JWT_SECRET:?set CAMPAIGN_STAGING_JWT_SECRET}
+      RORCA_INTERNAL_SERVICE_TOKEN: ${CAMPAIGN_STAGING_INTERNAL_SERVICE_TOKEN:?set CAMPAIGN_STAGING_INTERNAL_SERVICE_TOKEN}
+      RORCA_DISPATCH_RECEIVER_TOKEN: ${CAMPAIGN_STAGING_DISPATCH_RECEIVER_TOKEN:?set CAMPAIGN_STAGING_DISPATCH_RECEIVER_TOKEN}
+      HOME: /state/home
+      RORCA_DISABLE_BACKGROUND_RUNTIME: "true"
+      RORCA_EXPERIMENTAL_WAVE_PARALLEL: "false"
+      RORCA_DISABLE_SCHEDULERS: "true"
+      RORCA_DISABLE_DELIVERY: "true"
+      RORCA_MCP_ALLOW_REMOTE: "false"
+      RORCA_AUTONOMOUS_ISOLATION: linux-bwrap
+      RORCA_BWRAP_BIN: /usr/bin/bwrap
+      RORCA_PTY_ARCHIVE_ROOT: /state/pty-archives
+    ports:
+      - "127.0.0.1:3031:3030"
+    volumes:
+      - campaign_rorca_state:/state
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN]
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined
+    pids_limit: 256
+    restart: "no"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "127.0.0.1:5211:80"
+    depends_on:
+      rorca:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    cap_drop: [ALL]
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+volumes:
+  campaign_pgdata:
+    driver: local
+  campaign_rorca_state:
+    driver: local

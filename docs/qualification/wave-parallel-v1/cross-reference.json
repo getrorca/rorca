@@ -1,0 +1,2716 @@
+{
+  "schemaVersion": 1,
+  "indexId": "rorca-wave-parallel-production-cross-reference-v1",
+  "requirementsArtifact": {
+    "path": "requirements.json",
+    "hashAlgorithm": "sha256",
+    "sha256": "f45fc506d4ab71416bcac954941dd18620ee6c2388f1c847e5ba5efcbfa82d1b",
+    "sourceSpecSha256": "3e47570b7b654613e2d71d496baeb6fa0e311e5a521459aba700272f98fb69d6",
+    "acceptanceCriteriaCount": 125
+  },
+  "evidenceClassTaxonomy": {
+    "recognized": [
+      "automated_test_output",
+      "durable_database_wal",
+      "git_integration",
+      "independent_checker",
+      "canary_soak",
+      "rollback_rehearsal",
+      "operator_observation",
+      "skipped_check",
+      "environmental_blocker"
+    ],
+    "measured": [
+      "durable_database_wal",
+      "git_integration",
+      "independent_checker",
+      "canary_soak",
+      "rollback_rehearsal"
+    ],
+    "supporting": [
+      "automated_test_output",
+      "operator_observation"
+    ],
+    "gateUnavailable": [
+      "skipped_check",
+      "environmental_blocker"
+    ]
+  },
+  "entries": [
+    {
+      "requirementId": "WPE-001-R01",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R01-ISOLATION-PREFLIGHT-BEFORE-WRITE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R02",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R02-SANITIZED-QUALIFICATION-ENVIRONMENT"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R03",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-002",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R03-NO-PRODUCTION-CONFIGURATION-FALLBACK"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R04",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-003",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R04-SYNTHETIC-RUN-NAMESPACE"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R05",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R05-FILESYSTEM-OWNERSHIP-CONTAINMENT"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R06",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-004",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R06-NAMESPACE-BOUNDED-DATABASE-CLEANUP"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R07",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R07-PRODUCTION-LIKE-ZERO-MUTATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R08",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R08-REDACTED-ISOLATION-SENTINELS"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R09",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-003",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R09-APPLICATION-MIGRATION-AND-QUEUE-SAFETY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-001-R10",
+      "storyId": "WPE-001",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-002",
+        "WPE-Q-003",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-001-R10-INVARIANT-REGISTRY-COMPLETE"
+      ],
+      "evidenceClasses": [
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R01",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-003",
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R01-FIXTURE-FAULT-MODE-CATALOG"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R02",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-006"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R02-REAL-CHILD-ADAPTER-EXECUTION"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R03",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R03-WALL-CLOCK-CONCURRENCY-BARRIER"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R04",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-003",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R04-VERSIONED-SAFE-FIXTURE-MANIFEST"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R05",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R05-SEEDED-FIXTURE-DETERMINISM"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R06",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R06-EXPLICIT-STORY-BOUNDARY-TRACE"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R07",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R07-CHILD-PROCESS-TREE-REAPED"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R08",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R08-DURABLE-FAULT-POINT-CATALOG"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-002-R09",
+      "storyId": "WPE-002",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-002-R09-REAL-PI-SMOKE-NONAUTHORITATIVE"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "operator_observation",
+        "skipped_check",
+        "environmental_blocker"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R01",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-003",
+        "WPE-Q-004"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R01-WORKTREE-OWNERSHIP-METADATA"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R02",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R02-ALLOWLISTED-WORKTREE-CLEANUP"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R03",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R03-EXPECTED-PARENT-HEAD-COMPARE-AND-SWAP"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R04",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R04-SUCCESS-WORKTREE-REF-CLEANUP"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R05",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R05-REJECTED-COMMIT-RECOVERY-BRANCH"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R06",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R06-DIRTY-WORKTREE-SAFE-RECOVERY-SNAPSHOT"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R07",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R07-CONTENT-ADDRESSED-RECOVERY-REF"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R08",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R08-CLEANUP-FAILURE-CANNOT-PASS"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R09",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-004"
+      ],
+      "scenarioIds": [
+        "WPE-Q-003",
+        "WPE-Q-006"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R09-SINGLETON-WAVE-RUN-WORKTREE"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R10",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R10-REPOSITORY-INVENTORY-ACCOUNTING"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-003-R11",
+      "storyId": "WPE-003",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-003-R11-RESTART-SAFE-CLEANUP-IDEMPOTENCY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R01",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R01-CONCURRENT-STORIES-CANONICAL-CLOSEOUT"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R02",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R02-DETERMINISTIC-EXACTLY-ONCE-INTEGRATION-ORDER"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R03",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R03-DURABLE-INTEGRATION-STATE-MACHINE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R04",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R04-NO-PASS-BEFORE-INTEGRATED-VALIDATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R05",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R05-INTEGRATION-LEDGER-IDEMPOTENCY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R06",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R06-PREAPPLY-GIT-AND-MANIFEST-GUARDS"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R07",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R07-SUCCESS-PROJECTIONS-AGREE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R08",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R08-SUCCESS-RESOURCE-CLEANUP"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R09",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R09-QUALIFICATION-BOUNDARY-ZERO-EXTERNAL-WRITE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R10",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R10-PARALLELISM-TWO-AND-FOUR-SEMANTIC-PARITY"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-004-R11",
+      "storyId": "WPE-004",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-004-R11-INDEPENDENT-NORMALIZED-TRACE-VERDICT"
+      ],
+      "evidenceClasses": [
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R01",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R01-POSTCOMMIT-REJECTION-SIBLING-CORRELATION"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R02",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-003"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R02-DETERMINISTIC-REJECTION-SCHEDULING-POLICY"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R03",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R03-REJECTION-DURABLY-PROJECTED"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R04",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R04-INDEPENDENT-SIBLING-FINALIZES-ONCE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R05",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-003"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R05-FAILED-DEPENDENCY-CLOSURE-NEVER-STARTS"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R06",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R06-REJECTED-RECOVERY-AND-REDACTED-DIAGNOSTIC"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R07",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R07-SEMANTIC-FAILURE-CLOSEOUT-AUTHORITY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R08",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R08-EVIDENCE-GAP-FAILS-CLOSED"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R09",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R09-REJECTION-SERIALIZATION-BOUNDED-AND-REDACTED"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-005-R10",
+      "storyId": "WPE-005",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-003"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-005-R10-CANONICAL-DEPENDENCY-CLOSURE-TERMINATES"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R01",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R01-DETERMINISTIC-SAME-HUNK-CONFLICT"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R02",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R02-CONFLICT-CANNOT-FINALIZE-PASS"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R03",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R03-INTEGRATED-SIBLING-SURVIVES-CONFLICT"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R04",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R04-CONFLICT-RECOVERY-OWNERSHIP-CLEANUP"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R05",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R05-BOUNDED-RESOLUTION-REVALIDATES"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R06",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-006",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R06-PARTIAL-GIT-OPERATION-ABORT-AND-RECONCILE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R07",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002"
+      ],
+      "scenarioIds": [
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R07-MERGE-CONFLICT-FORCES-RUN-FAILURE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R08",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R08-PARTIAL-WAVE-SEMANTICS"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R09",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R09-CONFLICT-MATRIX-FAILS-CLOSED"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-006-R10",
+      "storyId": "WPE-006",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-006-R10-NO-RESIDUAL-GIT-OPERATION-STATE"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R01",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-006",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R01-CANCEL-TIMEOUT-TERMINAL-NONSUCCESS"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R02",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R02-CRASH-BOUNDARY-RESTART-RECONCILIATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R03",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-003",
+        "WPE-Q-004",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R03-RESOURCE-HARD-LIMITS-FAIL-CLOSED"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R04",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R04-BACKPRESSURE-PRESERVES-DURABLE-ORDER"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R05",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R05-INTERRUPTION-CLEANUP-OWNERSHIP-BOUNDARY"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R06",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-006",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R06-STARTUP-ORPHAN-CLASSIFICATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R07",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R07-REPEATED-RECOVERY-DELIVERY-IDEMPOTENT"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R08",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R08-LEASE-FENCING-REJECTS-STALE-WORKER"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R09",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R09-PLATFORM-SIGNAL-RECOVERY-COVERAGE"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker",
+        "skipped_check"
+      ]
+    },
+    {
+      "requirementId": "WPE-007-R10",
+      "storyId": "WPE-007",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-003",
+        "WPE-Q-004"
+      ],
+      "assertionIds": [
+        "WPE-A-007-R10-BOUNDED-SYNTHETIC-RESOURCE-TEST"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R01",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-003",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R01-AUTHORITATIVE-MINIMAL-RETRY-SCOPE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R02",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R02-RETRY-PREVIEW-IDENTITY-VALIDATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R03",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R03-RETRY-INTEGRATES-ONCE-PRESERVES-HISTORY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R04",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R04-RESTART-DOES-NOT-DUPLICATE-ACCEPTED-WORK"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R05",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R05-AT-LEAST-ONCE-QUEUE-DELIVERY-SAFE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R06",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R06-RETRY-FAILURE-APPENDS-IMMUTABLE-ATTEMPT"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R07",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R07-RETRY-BASE-INCLUDES-ACCEPTED-SIBLINGS"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R08",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R08-POSTGIT-PREDURABILITY-REPLAY-RECONCILES"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R09",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R09-LINEARIZABLE-STORY-ATTEMPT-FINALIZATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal"
+      ]
+    },
+    {
+      "requirementId": "WPE-008-R10",
+      "storyId": "WPE-008",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-003",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-008"
+      ],
+      "assertionIds": [
+        "WPE-A-008-R10-RETRY-ISOLATED-FROM-PRODUCTION-RUN"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R01",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R01-SEEDED-STRESS-SCENARIO-MATRIX"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R02",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R02-REFERENCE-STATE-MACHINE-SCHEDULE-CHECK"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R03",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R03-BOUNDED-CI-AND-SEPARATE-SOAK-PROFILES"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "canary_soak",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R04",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R04-NORMALIZED-SAME-SEED-DETERMINISM"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R05",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R05-PER-ITERATION-LEAK-FREEDOM"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R06",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-003",
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R06-DATABASE-NAMESPACE-AND-PRODUCTION-SENTINELS"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R07",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004"
+      ],
+      "scenarioIds": [
+        "WPE-Q-007",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R07-VERSIONED-RESOURCE-PERFORMANCE-BUDGETS"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "canary_soak",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R08",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R08-FIRST-ATTEMPT-AUTHORITATIVE-NO-FLAKE-HIDING"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R09",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R09-SAFE-REPRODUCIBLE-FAILURE-EVIDENCE"
+      ],
+      "evidenceClasses": [
+        "independent_checker",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R10",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R10-MUTATION-TESTS-DETECT-INVARIANT-BREACH"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-009-R11",
+      "storyId": "WPE-009",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-009-R11-REPEATED-RUN-LEAK-SENTINEL"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "canary_soak",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R01",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R01-CANONICAL-REPORT-IDENTITY-BINDINGS"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R02",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R02-EVIDENCE-CLASS-AUTHORITY-DISTINCTIONS"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker",
+        "canary_soak",
+        "rollback_rehearsal",
+        "operator_observation",
+        "skipped_check",
+        "environmental_blocker"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R03",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R03-BOUNDED-RUNTIME-TELEMETRY-CARDINALITY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R04",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R04-PORTABLE-EVIDENCE-PRIVACY"
+      ],
+      "evidenceClasses": [
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R05",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R05-STRICT-AUTHENTICATED-RECEIPT-SCHEMA"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R06",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R06-LOCAL-IDENTITY-RECOMPUTE-AND-REPLAY-REJECTION"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R07",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005"
+      ],
+      "scenarioIds": [
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R07-RUN-CLOSEOUT-OPERATOR-SURFACE-AUTHORITY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R08",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R08-PUBLICATION-TELEMETRY-FAILURE-CLOSED"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "environmental_blocker"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R09",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R09-VERSIONED-DOCUMENT-TRACEABILITY-INDEX"
+      ],
+      "evidenceClasses": [
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-010-R10",
+      "storyId": "WPE-010",
+      "invariantIds": [
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-010-R10-PORTABLE-REPORT-DETERMINISTIC-DIGEST"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R01",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-005",
+        "WPE-Q-006",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R01-PRODUCTION-SEQUENTIAL-DEFAULT"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R02",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R02-THREE-CONDITION-PRODUCTION-GATE"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R03",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R03-EXPERIMENTAL-FLAG-NEVER-PRODUCTION-AUTHORITY"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R04",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-003",
+        "WPE-Q-005",
+        "WPE-Q-006",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R04-DISPATCH-BOUNDARY-POLICY-REVALIDATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R05",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R05-ENABLEMENT-DOES-NOT-REWRITE-HISTORY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R06",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-003",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R06-ROLLOUT-COHORT-CAPS-HALT-KILL-SWITCH"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "canary_soak",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R07",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-008",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R07-INFLIGHT-ROLLBACK-DRAIN-SEMANTICS"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker",
+        "rollback_rehearsal"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R08",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R08-PRODUCTION-GOVERNANCE-AUDIT-TRAIL"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R09",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-002",
+        "WPE-Q-005"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R09-PRODUCTION-POLICY-PATH-ISOLATED-TEST"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R10",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-002",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R10-OPERATOR-POLICY-STATE-NOT-FLAG-AS-EVIDENCE"
+      ],
+      "evidenceClasses": [
+        "independent_checker",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-011-R11",
+      "storyId": "WPE-011",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-011-R11-IMPLEMENTATION-DOES-NOT-ACTIVATE-OR-DEPLOY"
+      ],
+      "evidenceClasses": [
+        "independent_checker",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R01",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-005",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R01-INDEPENDENT-ARCHITECTURE-REVIEW"
+      ],
+      "evidenceClasses": [
+        "independent_checker",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R02",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-002",
+        "WPE-Q-003",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R02-INDEPENDENT-SECURITY-DATA-SAFETY-REVIEW"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R03",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-003",
+        "WPE-Q-005",
+        "WPE-Q-006"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R03-INDEPENDENT-DATABASE-QUEUE-REVIEW"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R04",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R04-INDEPENDENT-GIT-SRE-REVIEW"
+      ],
+      "evidenceClasses": [
+        "git_integration",
+        "independent_checker",
+        "rollback_rehearsal"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R05",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-002",
+        "WPE-Q-003",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R05-SUPPORTED-PLATFORM-BLOCKING-CI"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "independent_checker",
+        "skipped_check",
+        "environmental_blocker"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R06",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R06-NONPRODUCTION-CANARY-AND-BOUNDED-SOAK"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker",
+        "canary_soak"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R07",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-003",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-002",
+        "WPE-Q-003",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R07-RELEASE-CHECKLIST-COMPLETE-TRACEABILITY"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker",
+        "canary_soak",
+        "rollback_rehearsal",
+        "skipped_check",
+        "environmental_blocker"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R08",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006"
+      ],
+      "scenarioIds": [
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R08-DISTINCT-INDEPENDENT-HUMAN-REVIEWS"
+      ],
+      "evidenceClasses": [
+        "independent_checker",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R09",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-005",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-006",
+        "WPE-Q-007",
+        "WPE-Q-008",
+        "WPE-Q-009",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R09-PR-HEAD-COMPLETE-CI-EVIDENCE"
+      ],
+      "evidenceClasses": [
+        "automated_test_output",
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R10",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-002",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R10-PR-ONLY-NO-AUTOMERGE-OR-DEPLOY"
+      ],
+      "evidenceClasses": [
+        "independent_checker",
+        "operator_observation"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R11",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-001",
+        "WPE-INV-002",
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R11-ROLLBACK-REHEARSAL-PRESERVES-SEQUENTIAL"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "independent_checker",
+        "rollback_rehearsal"
+      ]
+    },
+    {
+      "requirementId": "WPE-012-R12",
+      "storyId": "WPE-012",
+      "invariantIds": [
+        "WPE-INV-004",
+        "WPE-INV-006",
+        "WPE-INV-007"
+      ],
+      "scenarioIds": [
+        "WPE-Q-001",
+        "WPE-Q-004",
+        "WPE-Q-005",
+        "WPE-Q-010"
+      ],
+      "assertionIds": [
+        "WPE-A-012-R12-FINAL-ZERO-PRODUCTION-MUTATION-ATTESTATION"
+      ],
+      "evidenceClasses": [
+        "durable_database_wal",
+        "git_integration",
+        "independent_checker",
+        "operator_observation"
+      ]
+    }
+  ]
+}

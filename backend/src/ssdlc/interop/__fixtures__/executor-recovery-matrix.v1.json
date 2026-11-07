@@ -1,0 +1,91 @@
+{
+  "schemaVersion": "rorca.executor-recovery-matrix.v1",
+  "run": {
+    "schemaVersion": "rorca.entity-ref.v1",
+    "workspaceId": "workspace_int003",
+    "kind": "run",
+    "id": "20260316000634",
+    "revision": { "kind": "artifact_digest", "value": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481" },
+    "label": "INT-003 compatibility run"
+  },
+  "spec": {
+    "schemaVersion": "rorca.entity-ref.v1",
+    "workspaceId": "workspace_int003",
+    "kind": "spec",
+    "id": "source-verified-hermes-rorca-omp-ssdlc-delivery-program",
+    "revision": { "kind": "artifact_digest", "value": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481" },
+    "label": "Source-Verified Hermes Rorca OMP SSDLC Delivery Program"
+  },
+  "revision": { "kind": "artifact_digest", "value": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481" },
+  "executorAgnosticIdentity": {
+    "manifestHash": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481",
+    "resultIdentity": "story-result:20260316000634:INT-003:1",
+    "walReleaseIntentHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "executions": [
+    {
+      "scenario": "omp-sequential",
+      "executor": "omp",
+      "identity": {
+        "manifestHash": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481",
+        "resultIdentity": "story-result:20260316000634:INT-003:1",
+        "walReleaseIntentHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    {
+      "scenario": "omp-wave-parallel",
+      "executor": "omp",
+      "identity": {
+        "manifestHash": "sha256:a6475e7aa4639b7fbf04403e9e4727a482a73c8c6509f783b2f6d663cb04c481",
+        "resultIdentity": "story-result:20260316000634:INT-003:1",
+        "walReleaseIntentHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    }
+  ],
+  "heterogeneousWave": [
+    { "storyId": "INT-003-OMP", "declaredExecutor": "omp", "dispatchedExecutor": "omp", "worktreeId": "worktree:int003:omp", "merged": true, "mergePolicy": "normal-wave" },
+    { "storyId": "INT-003-PI", "declaredExecutor": "pi", "dispatchedExecutor": "pi", "worktreeId": "worktree:int003:pi", "merged": true, "mergePolicy": "normal-wave" },
+    { "storyId": "INT-003-CLAUDE", "declaredExecutor": "claude", "dispatchedExecutor": "claude", "worktreeId": "worktree:int003:claude", "merged": true, "mergePolicy": "normal-wave" }
+  ],
+  "piFallback": {
+    "reliabilityQualification": "MIG-003",
+    "qualificationStatus": "passed",
+    "declaredExecutor": "pi",
+    "retryExecutor": "pi",
+    "completed": true
+  },
+  "providerFallback": {
+    "policy": {
+      "schemaVersion": "rorca.provider-fallback-policy.v1",
+      "name": "int-003-qualified-alternates",
+      "allowedAlternateChain": ["anthropic/primary", "openai/alternate"],
+      "failureReasons": ["usage_limit", "connection_error"]
+    },
+    "currentModel": "anthropic/primary",
+    "selectedAlternate": "openai/alternate",
+    "originalReason": "usage_limit",
+    "originalMessage": "qualified primary usage limit",
+    "controlSemanticsBefore": "controls:sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "controlSemanticsAfter": "controls:sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "gateSemanticsBefore": "gates:sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "gateSemanticsAfter": "gates:sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "recovery": [
+    {
+      "executor": "omp",
+      "eventSequence": ["omp:start", "omp:cancelled"],
+      "replaySequence": ["omp:start", "omp:cancelled"],
+      "terminalEventId": "omp:cancelled",
+      "processClosed": true,
+      "worktreeClosed": true
+    },
+    {
+      "executor": "pi",
+      "eventSequence": ["pi:start", "pi:cancelled"],
+      "replaySequence": ["pi:start", "pi:cancelled"],
+      "terminalEventId": "pi:cancelled",
+      "processClosed": true,
+      "worktreeClosed": true
+    }
+  ]
+}

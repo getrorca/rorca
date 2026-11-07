@@ -1,0 +1,1300 @@
+{
+  "schema": "hackbot-skill-manifest.v1",
+  "version": "1.0.0",
+  "registryPrecedence": [
+    "governed-manifest",
+    "workspace-package",
+    "database",
+    "ordinary"
+  ],
+  "skills": [
+    {
+      "id": "hackbot.skill.recon-and-attack-surface",
+      "sourceName": "recon_and_attack_surface",
+      "packageName": "recon-and-attack-surface",
+      "triggers": [
+        "reconnaissance"
+      ],
+      "objectives": [
+        "reconnaissance"
+      ],
+      "prerequisites": [],
+      "schemas": {
+        "input": "hackbot.recon-and-attack-surface.input.v1",
+        "output": "hackbot.recon-and-attack-surface.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [],
+      "brokerCapabilities": [
+        "http.request"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "public-target-metadata"
+      ],
+      "conflicts": [],
+      "successors": [
+        "authentication-and-session"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.recon-and-attack-surface.v1",
+        "required": false,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/recon_and_attack_surface.md",
+        "sourceSha256": "sha256:492437ee792407a5f44373341232d98b02ec630b9462ed2231fc3d4a66992342",
+        "adaptedPath": "config/hackbot/skills/recon-and-attack-surface/SKILL.md",
+        "adaptedSha256": "sha256:ee831923b27b60bb94fd18169dadf9533ef5f365682c6f0f53fe22a0fff94c3f",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for reconnaissance without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.authentication-and-session",
+      "sourceName": "authentication_and_session",
+      "packageName": "authentication-and-session",
+      "triggers": [
+        "authentication-testing"
+      ],
+      "objectives": [
+        "authentication-testing"
+      ],
+      "prerequisites": [
+        "program-scope",
+        "test-account"
+      ],
+      "schemas": {
+        "input": "hackbot.authentication-and-session.input.v1",
+        "output": "hackbot.authentication-and-session.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [],
+      "brokerCapabilities": [
+        "http.request",
+        "browser.action"
+      ],
+      "credentials": [
+        "test-account"
+      ],
+      "sensitivity": [
+        "credentials",
+        "session-evidence"
+      ],
+      "conflicts": [],
+      "successors": [
+        "authorization-and-idor"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.authentication-and-session.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/authentication_and_session.md",
+        "sourceSha256": "sha256:e33b72497ba38aa16576d78bfd5a81c8a413036d8a502a652799c028727b4ea0",
+        "adaptedPath": "config/hackbot/skills/authentication-and-session/SKILL.md",
+        "adaptedSha256": "sha256:bf2c612fd3d67fcfebc7bb53dcbe177e8f33e0e59b1eaaafa28e62d3a9506afd",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for authentication-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.authorization-and-idor",
+      "sourceName": "authorization_and_idor",
+      "packageName": "authorization-and-idor",
+      "triggers": [
+        "authorization-testing"
+      ],
+      "objectives": [
+        "authorization-testing"
+      ],
+      "prerequisites": [
+        "program-scope",
+        "two-test-roles"
+      ],
+      "schemas": {
+        "input": "hackbot.authorization-and-idor.input.v1",
+        "output": "hackbot.authorization-and-idor.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [],
+      "brokerCapabilities": [
+        "http.request"
+      ],
+      "credentials": [
+        "test-account"
+      ],
+      "sensitivity": [
+        "account-data",
+        "authorization-evidence"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.authorization-and-idor.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/authorization_and_idor.md",
+        "sourceSha256": "sha256:d1e4876c85b1a7b6dd389b4e0bb33ce9673eea826ed8fab6d970069f3b4340d6",
+        "adaptedPath": "config/hackbot/skills/authorization-and-idor/SKILL.md",
+        "adaptedSha256": "sha256:e25abc5213ba208970a9acbb6bc559235f815a1259062bd791a461f317430bf1",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for authorization-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.injection-and-parser",
+      "sourceName": "injection_and_parser",
+      "packageName": "injection-and-parser",
+      "triggers": [
+        "injection-testing"
+      ],
+      "objectives": [
+        "injection-testing"
+      ],
+      "prerequisites": [
+        "program-scope"
+      ],
+      "schemas": {
+        "input": "hackbot.injection-and-parser.input.v1",
+        "output": "hackbot.injection-and-parser.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "payload-encoder"
+      ],
+      "brokerCapabilities": [
+        "http.request"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "target-response"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.injection-and-parser.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/injection_and_parser.md",
+        "sourceSha256": "sha256:dc206f0ecd6044c98a37912f01b0f75aa6c1eb1abd1772e097bc77a44705fac2",
+        "adaptedPath": "config/hackbot/skills/injection-and-parser/SKILL.md",
+        "adaptedSha256": "sha256:b5d2686bd7b3a381c42ff752ab0cfdf713cc8dfea37073f0cde90bd0b7f573b9",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for injection-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.cross-site-scripting",
+      "sourceName": "cross_site_scripting",
+      "packageName": "cross-site-scripting",
+      "triggers": [
+        "xss-testing"
+      ],
+      "objectives": [
+        "xss-testing"
+      ],
+      "prerequisites": [
+        "program-scope"
+      ],
+      "schemas": {
+        "input": "hackbot.cross-site-scripting.input.v1",
+        "output": "hackbot.cross-site-scripting.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "html-parser"
+      ],
+      "brokerCapabilities": [
+        "http.request",
+        "browser.action"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "active-content",
+        "browser-evidence"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.cross-site-scripting.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/cross_site_scripting.md",
+        "sourceSha256": "sha256:d0e71fa6136148e13bcc3b959c016741f0b2bb49db1f3cd9e0341aca800a8a71",
+        "adaptedPath": "config/hackbot/skills/cross-site-scripting/SKILL.md",
+        "adaptedSha256": "sha256:aea5618803ae33465bd03de8fdd5b5a63721394b245bf09c4a273c63b104a826",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for xss-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.server-side-request-forgery",
+      "sourceName": "server_side_request_forgery",
+      "packageName": "server-side-request-forgery",
+      "triggers": [
+        "ssrf-testing"
+      ],
+      "objectives": [
+        "ssrf-testing"
+      ],
+      "prerequisites": [
+        "program-scope",
+        "callback-grant"
+      ],
+      "schemas": {
+        "input": "hackbot.server-side-request-forgery.input.v1",
+        "output": "hackbot.server-side-request-forgery.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "url-normalizer"
+      ],
+      "brokerCapabilities": [
+        "http.request",
+        "callback.allocate"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "callback-evidence",
+        "network-metadata"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.server-side-request-forgery.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/server_side_request_forgery.md",
+        "sourceSha256": "sha256:bc8622f5c485506994a01dd0e5f66b104a6c1a3a3ebb8f9bca5f748f378d8af5",
+        "adaptedPath": "config/hackbot/skills/server-side-request-forgery/SKILL.md",
+        "adaptedSha256": "sha256:4f816ac04634e4d9f131e37a1748bc89d46237bd3a44cb308b335ffecea48581",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for ssrf-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.file-and-upload",
+      "sourceName": "file_and_upload",
+      "packageName": "file-and-upload",
+      "triggers": [
+        "file-upload-testing"
+      ],
+      "objectives": [
+        "file-upload-testing"
+      ],
+      "prerequisites": [
+        "program-scope",
+        "admitted-artifact"
+      ],
+      "schemas": {
+        "input": "hackbot.file-and-upload.input.v1",
+        "output": "hackbot.file-and-upload.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "file-signature"
+      ],
+      "brokerCapabilities": [
+        "http.request",
+        "browser.action"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "uploaded-artifact",
+        "target-response"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.file-and-upload.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/file_and_upload.md",
+        "sourceSha256": "sha256:996b0b124d32999ba64ef14c4fa345c6cf8393df8e3e548f2cee1fa76a87b03c",
+        "adaptedPath": "config/hackbot/skills/file-and-upload/SKILL.md",
+        "adaptedSha256": "sha256:39300a8d96f5bc8fd3f37ec5520af52bf521a848d9c2d889d6223a455d01735e",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for file-upload-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.api-and-graphql",
+      "sourceName": "api_and_graphql",
+      "packageName": "api-and-graphql",
+      "triggers": [
+        "api-and-graphql-testing"
+      ],
+      "objectives": [
+        "api-and-graphql-testing"
+      ],
+      "prerequisites": [
+        "program-scope"
+      ],
+      "schemas": {
+        "input": "hackbot.api-and-graphql.input.v1",
+        "output": "hackbot.api-and-graphql.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "schema-parser"
+      ],
+      "brokerCapabilities": [
+        "http.request"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "api-schema",
+        "target-response"
+      ],
+      "conflicts": [],
+      "successors": [
+        "authorization-and-idor"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.api-and-graphql.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/api_and_graphql.md",
+        "sourceSha256": "sha256:3716d54333444280f17ee5ac68707e55e16cba90caf0e0aa6de339142a1ddcda",
+        "adaptedPath": "config/hackbot/skills/api-and-graphql/SKILL.md",
+        "adaptedSha256": "sha256:e2181d96ef76f392048b20fbc792de98d94f17aa1ec73e2841d28d57dcd5994b",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for api-and-graphql-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.business-logic",
+      "sourceName": "business_logic",
+      "packageName": "business-logic",
+      "triggers": [
+        "business-logic-testing"
+      ],
+      "objectives": [
+        "business-logic-testing"
+      ],
+      "prerequisites": [
+        "program-scope",
+        "business-invariant"
+      ],
+      "schemas": {
+        "input": "hackbot.business-logic.input.v1",
+        "output": "hackbot.business-logic.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [],
+      "brokerCapabilities": [
+        "http.request",
+        "browser.action"
+      ],
+      "credentials": [
+        "test-account"
+      ],
+      "sensitivity": [
+        "account-data",
+        "workflow-evidence"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.business-logic.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/business_logic.md",
+        "sourceSha256": "sha256:b17870471cf99e87f24af6da8c0a795ca4f65336141269cd0309c6d30da8461c",
+        "adaptedPath": "config/hackbot/skills/business-logic/SKILL.md",
+        "adaptedSha256": "sha256:9349a516d08933659f078971ab34390b3d67ed71790fd915ea08e5cb320627a9",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for business-logic-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.race-and-concurrency",
+      "sourceName": "race_and_concurrency",
+      "packageName": "race-and-concurrency",
+      "triggers": [
+        "race-condition-testing"
+      ],
+      "objectives": [
+        "race-condition-testing"
+      ],
+      "prerequisites": [
+        "program-scope",
+        "repeatable-effect-grant"
+      ],
+      "schemas": {
+        "input": "hackbot.race-and-concurrency.input.v1",
+        "output": "hackbot.race-and-concurrency.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "barrier-scheduler"
+      ],
+      "brokerCapabilities": [
+        "http.request.concurrent"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "operation-receipts",
+        "target-response"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.race-and-concurrency.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/race_and_concurrency.md",
+        "sourceSha256": "sha256:45064736523537f1c73c6370a98af91dad84bd3764281bde9b06821ee52df494",
+        "adaptedPath": "config/hackbot/skills/race-and-concurrency/SKILL.md",
+        "adaptedSha256": "sha256:dd316a5c704954aae596e027bc1d52405767f94cfc27e6e60ab6c57518732946",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for race-condition-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.websocket-and-realtime",
+      "sourceName": "websocket_and_realtime",
+      "packageName": "websocket-and-realtime",
+      "triggers": [
+        "websocket-testing"
+      ],
+      "objectives": [
+        "websocket-testing"
+      ],
+      "prerequisites": [
+        "program-scope"
+      ],
+      "schemas": {
+        "input": "hackbot.websocket-and-realtime.input.v1",
+        "output": "hackbot.websocket-and-realtime.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "frame-decoder"
+      ],
+      "brokerCapabilities": [
+        "websocket.action"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "message-content",
+        "connection-metadata"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.websocket-and-realtime.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/websocket_and_realtime.md",
+        "sourceSha256": "sha256:227d6b64ca676c08fa14da4f730f04999489333138dde8b45227f908b28d8f38",
+        "adaptedPath": "config/hackbot/skills/websocket-and-realtime/SKILL.md",
+        "adaptedSha256": "sha256:b113a233a29b5c3a5cbac992afb7f5bd4ec96d1e26611cb6eb5aeda2cdfe0e75",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for websocket-testing without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.cloud-and-infrastructure",
+      "sourceName": "cloud_and_infrastructure",
+      "packageName": "cloud-and-infrastructure",
+      "triggers": [
+        "cloud-security-review"
+      ],
+      "objectives": [
+        "cloud-security-review"
+      ],
+      "prerequisites": [
+        "program-scope"
+      ],
+      "schemas": {
+        "input": "hackbot.cloud-and-infrastructure.input.v1",
+        "output": "hackbot.cloud-and-infrastructure.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "config-parser"
+      ],
+      "brokerCapabilities": [],
+      "credentials": [],
+      "sensitivity": [
+        "configuration-evidence"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.cloud-and-infrastructure.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "none"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/cloud_and_infrastructure.md",
+        "sourceSha256": "sha256:9ebb2be17e6b25ed51d7645dbc070495cb5b25a585c95f317d819fd59fc06aaa",
+        "adaptedPath": "config/hackbot/skills/cloud-and-infrastructure/SKILL.md",
+        "adaptedSha256": "sha256:91bfcacc18f7c9bb0896ae490474b67bc6902673ca95f67e5b86b53d6cdd80a1",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": []
+      }
+    },
+    {
+      "id": "hackbot.skill.mobile-client",
+      "sourceName": "mobile_client",
+      "packageName": "mobile-client",
+      "triggers": [
+        "mobile-client-review"
+      ],
+      "objectives": [
+        "mobile-client-review"
+      ],
+      "prerequisites": [
+        "admitted-artifact"
+      ],
+      "schemas": {
+        "input": "hackbot.mobile-client.input.v1",
+        "output": "hackbot.mobile-client.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "mobile-decompiler"
+      ],
+      "brokerCapabilities": [],
+      "credentials": [],
+      "sensitivity": [
+        "client-artifact",
+        "embedded-metadata"
+      ],
+      "conflicts": [],
+      "successors": [
+        "whitebox-code-review"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.mobile-client.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "none"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/mobile_client.md",
+        "sourceSha256": "sha256:f2c740f543b094f00059d2ddc4fa7fed5c5f2a6b87677916f4fdb72cc43c8ae8",
+        "adaptedPath": "config/hackbot/skills/mobile-client/SKILL.md",
+        "adaptedSha256": "sha256:f8f0aa121b2a804eae594745bef4a4dd7f4e097afb97b90f049a69e7941679a3",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": []
+      }
+    },
+    {
+      "id": "hackbot.skill.whitebox-code-review",
+      "sourceName": "whitebox_code_review",
+      "packageName": "whitebox-code-review",
+      "triggers": [
+        "whitebox-code-review"
+      ],
+      "objectives": [
+        "whitebox-code-review"
+      ],
+      "prerequisites": [
+        "admitted-source"
+      ],
+      "schemas": {
+        "input": "hackbot.whitebox-code-review.input.v1",
+        "output": "hackbot.whitebox-code-review.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 8000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "ast-parser",
+        "dependency-index"
+      ],
+      "brokerCapabilities": [],
+      "credentials": [],
+      "sensitivity": [
+        "source-code",
+        "repository-metadata"
+      ],
+      "conflicts": [],
+      "successors": [
+        "vulnerability-validation"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.whitebox-code-review.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "none"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/whitebox_code_review.md",
+        "sourceSha256": "sha256:c28263c423cf8d173422ef9d85651fddfc5e8f22c66642cd57dad8e51aa267c9",
+        "adaptedPath": "config/hackbot/skills/whitebox-code-review/SKILL.md",
+        "adaptedSha256": "sha256:fd8bcbeb787f0f833bccba105d99710bff9ceda6e099503768785af859619e57",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": []
+      }
+    },
+    {
+      "id": "hackbot.skill.vulnerability-validation",
+      "sourceName": "vulnerability_validation",
+      "packageName": "vulnerability-validation",
+      "triggers": [
+        "vulnerability-validation"
+      ],
+      "objectives": [
+        "vulnerability-validation"
+      ],
+      "prerequisites": [
+        "blind-evidence-packet",
+        "oracle-definition"
+      ],
+      "schemas": {
+        "input": "hackbot.vulnerability-validation.input.v1",
+        "output": "hackbot.vulnerability-validation.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [],
+      "brokerCapabilities": [
+        "http.request",
+        "browser.action"
+      ],
+      "credentials": [],
+      "sensitivity": [
+        "blind-evidence",
+        "oracle-result"
+      ],
+      "conflicts": [],
+      "successors": [
+        "report-writing"
+      ],
+      "oracle": {
+        "id": "hackbot.oracle.vulnerability-validation.v1",
+        "required": true,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "broker-only"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/vulnerability_validation.md",
+        "sourceSha256": "sha256:531958f90efdf8c802e34cb7c57529617c497698a165fefeed7b3af5b0494cc5",
+        "adaptedPath": "config/hackbot/skills/vulnerability-validation/SKILL.md",
+        "adaptedSha256": "sha256:63929f164e8b885723c8da66d35940174651a254b9fa7fb68063816dbdcc237c",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": [
+          "Use direct target tooling for vulnerability-validation without treating mission policy as optional."
+        ]
+      }
+    },
+    {
+      "id": "hackbot.skill.report-writing",
+      "sourceName": "report_writing",
+      "packageName": "report-writing",
+      "triggers": [
+        "report-writing"
+      ],
+      "objectives": [
+        "report-writing"
+      ],
+      "prerequisites": [
+        "admitted-finding",
+        "redacted-evidence"
+      ],
+      "schemas": {
+        "input": "hackbot.report-writing.input.v1",
+        "output": "hackbot.report-writing.proposal.v1"
+      },
+      "contextLimits": {
+        "maxInputTokens": 12000,
+        "maxEvidenceItems": 32
+      },
+      "localTools": [
+        "markdown-renderer"
+      ],
+      "brokerCapabilities": [],
+      "credentials": [],
+      "sensitivity": [
+        "finding-data",
+        "redacted-evidence"
+      ],
+      "conflicts": [],
+      "successors": [],
+      "oracle": {
+        "id": "hackbot.oracle.report-writing.v1",
+        "required": false,
+        "negativeControl": "required-before-finding-admission"
+      },
+      "controls": {
+        "exactMissionControlsRequired": true,
+        "sourceInstructionsInert": true,
+        "brokerOnly": true,
+        "effectsDefaultDenied": true
+      },
+      "releaseStatus": "active",
+      "availability": {
+        "listed": true,
+        "reason": "reviewed-inert-guidance"
+      },
+      "routeEligibility": {
+        "defaultEligible": false,
+        "allowWhenControlsMatch": true
+      },
+      "effectAuthorization": {
+        "defaultAuthorized": false,
+        "mode": "none"
+      },
+      "provenance": {
+        "sourcePath": "config/hackbot/provenance/report_writing.md",
+        "sourceSha256": "sha256:e011cd46477b4f96bbf9dc542d8847c3499ad7099f53861b6cae4f30eb07f5c5",
+        "adaptedPath": "config/hackbot/skills/report-writing/SKILL.md",
+        "adaptedSha256": "sha256:c7d8bf82e6b43e459945b240d621149b993d644f06f700b75ad45a2949bafb4e",
+        "reviewDiff": {
+          "summary": "Renamed snake_case source to kebab-case package; retained the source snapshot only as provenance; rewrote operational language as inert, bounded proposal guidance; separated listing, routing, and broker authorization.",
+          "sha256": "sha256:d3d600b8f94f1cf44a4609c2db1b6c3d106064915dc416fe4f4d35aa99cc607b"
+        },
+        "unsafeSourceInstructions": []
+      }
+    }
+  ],
+  "personas": [
+    {
+      "name": "hackbot-orchestrator",
+      "role": "orchestrator",
+      "allowedContext": [
+        "mission-summary",
+        "work-status",
+        "budget-status",
+        "redacted-evidence-index"
+      ],
+      "excludedContext": [
+        "target-tools",
+        "credentials",
+        "raw-target-content"
+      ],
+      "localTools": [],
+      "brokerCapabilities": [],
+      "credentials": [],
+      "canSubmit": false,
+      "canCauseEffects": false
+    },
+    {
+      "name": "hackbot-hunter",
+      "role": "hunter",
+      "allowedContext": [
+        "mission-summary",
+        "one-work-package",
+        "selected-skills",
+        "redacted-evidence"
+      ],
+      "excludedContext": [
+        "authority-tables",
+        "submission-controls",
+        "other-mission-context"
+      ],
+      "localTools": [],
+      "brokerCapabilities": [
+        "package-bound-broker"
+      ],
+      "credentials": [
+        "opaque-role-handle"
+      ],
+      "canSubmit": false,
+      "canCauseEffects": true
+    },
+    {
+      "name": "hackbot-validator",
+      "role": "validator",
+      "allowedContext": [
+        "blind-evidence-packet",
+        "oracle-definition",
+        "negative-control",
+        "narrower-validation-grant"
+      ],
+      "excludedContext": [
+        "hunter-narrative",
+        "hunter-severity",
+        "hunter-confidence",
+        "hunter-hidden-state"
+      ],
+      "localTools": [],
+      "brokerCapabilities": [
+        "validation-bound-broker"
+      ],
+      "credentials": [
+        "independent-validator-role"
+      ],
+      "canSubmit": false,
+      "canCauseEffects": true
+    },
+    {
+      "name": "hackbot-reporter",
+      "role": "reporter",
+      "allowedContext": [
+        "admitted-finding",
+        "redacted-evidence",
+        "citation-manifest"
+      ],
+      "excludedContext": [
+        "hunter-narrative",
+        "target-tools",
+        "credentials",
+        "submission-controls",
+        "network"
+      ],
+      "localTools": [
+        "markdown-renderer"
+      ],
+      "brokerCapabilities": [],
+      "credentials": [],
+      "canSubmit": false,
+      "canCauseEffects": false
+    },
+    {
+      "name": "hackbot-specialist",
+      "role": "specialist",
+      "allowedContext": [
+        "one-work-package",
+        "selected-skill",
+        "bounded-artifact",
+        "redacted-evidence"
+      ],
+      "excludedContext": [
+        "mission-authority",
+        "submission-controls",
+        "ambient-workspace"
+      ],
+      "localTools": [
+        "manifest-pinned-local-analyzer"
+      ],
+      "brokerCapabilities": [],
+      "credentials": [],
+      "canSubmit": false,
+      "canCauseEffects": false
+    }
+  ]
+}

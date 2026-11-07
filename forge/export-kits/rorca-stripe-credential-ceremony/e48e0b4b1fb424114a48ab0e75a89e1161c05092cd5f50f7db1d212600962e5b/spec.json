@@ -1,0 +1,97 @@
+{
+  "id": "rorca-stripe-credential-ceremony",
+  "mermaidDiagram": "graph LR\n  SCR-001[\"SCR-001\"]\n  SCR-002[\"SCR-002\"]\n  SCR-003[\"SCR-003\"]\n  SCR-004[\"SCR-004\"]\n  SCR-005[\"SCR-005\"]\n  SCR-001 --> SCR-002\n  SCR-002 --> SCR-003\n  SCR-003 --> SCR-004\n  SCR-004 --> SCR-005",
+  "slug": "rorca-stripe-credential-ceremony",
+  "source": "skill-first-explicit",
+  "title": "Rorca Stripe Credential Authority Adapter",
+  "userStories": [
+    {
+      "acceptanceCriteria": [
+        "Inventory returns every bound Stripe credential class with mode, application/resource scope, permissions, owner, fingerprint, status, generation, and verification time",
+        "Inventory, API responses, logs, receipts, and database rows contain no key or webhook-secret values",
+        "Test and live bindings are distinct and cross-mode fallback or reuse fails",
+        "The adapter rejects application mappings broader than the approved permission manifest and reports why",
+        "Webhook signing-secret rotation cannot be authorized by a restricted API-key grant"
+      ],
+      "complexity": 4,
+      "dependsOn": [],
+      "description": "Implement a generic Stripe AuthorityProviderAdapter and ProviderBinding inventory for account, test/live mode, application/resource binding, key kind, permission manifest, owner, fingerprint, SecretStore reference, target-binding reference, status, binding generation, and last verification. Treat webhook signing secrets as a distinct credential class. Use core tables/routes and no provider-specific secret column or child migration. Never map application runtime to an unrestricted account secret when a restricted key can satisfy the declared operations.",
+      "id": "SCR-001",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Stripe bindings inventory least-privilege credentials without storing values"
+    },
+    {
+      "acceptanceCriteria": [
+        "Changing permissions, mode, target, canary, grace, rollback, or current fingerprint changes the digest and invalidates approval",
+        "Required Dashboard reauthentication and restricted-key creation cannot be bypassed, scripted through model prompts, or marked complete without provider evidence",
+        "Secure operator capture writes the replacement to SecretStore/target binding and returns only reference, fingerprint, and provenance",
+        "A replacement broader than the approved permission manifest or in the wrong mode is rejected before cutover",
+        "Waiting for the human step does not consume story timeout and resumes exactly once against the same intent"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SCR-001"
+      ],
+      "description": "Define an immutable rotation intent with current fingerprint, exact restricted permission manifest, test/live mode, target binding, canary, grace period, rollback, and human-step requirements. When Stripe Dashboard reauthentication or manual creation is required, pause in WAITING_FOR_AUTHENTICATION and present a secure operator ceremony. Capture the replacement directly into SecretStore/target binding; the model and ordinary API never receive it. Do not automate MFA, bypass provider controls, or use an unrestricted account secret as replacement.",
+      "id": "SCR-002",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Human-assisted restricted-key creation bypasses neither reauthentication nor secret isolation"
+    },
+    {
+      "acceptanceCriteria": [
+        "The old key remains active while secure capture, target stage, canary, and post-cutover verification are pending",
+        "The canary calls a real Stripe test-mode operation requiring the declared permissions rather than only a local health endpoint",
+        "Grace-period state records both fingerprints and exact expiry without exposing either value",
+        "Old-key revocation occurs only after successful canary/cutover and is followed by verified old-key rejection",
+        "Replay or crash discovers the existing replacement/binding state and produces no duplicate rotation or untracked key"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SCR-002"
+      ],
+      "description": "Stage the replacement through RuntimeSecretBindingAdapter, run a real bounded Stripe test-mode operation matching the permission manifest, verify target health and fingerprint, then enter the declared grace period. After post-cutover verification, revoke the old key through the supported provider/human ceremony and verify old-key failure. Reconcile provider and target state before retrying uncertain steps.",
+      "id": "SCR-003",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Verified canary and grace cut over before old-key revocation"
+    },
+    {
+      "acceptanceCriteria": [
+        "Canary or pre-revocation failure restores the prior binding, retains the old key, quarantines the replacement, and records a rollback receipt",
+        "Runtime authentication failure creates a typed emergency request linked to binding, fingerprint, evidence, and affected resource without a secret",
+        "Emergency state cannot grant itself, broaden permissions, cross mode/workspace, or skip required Dashboard authentication",
+        "Unknown old/new key status is read back or sent to manual reconciliation before retry",
+        "Errors, incident evidence, receipts, WAL events, and UI contain no Stripe key or webhook-secret value"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SCR-003"
+      ],
+      "description": "Implement failure and runtime-detection paths. Canary/cutover failure restores the prior target binding, keeps the old key active when safe, quarantines the replacement, and emits a rollback receipt. Revoked/failing runtime credentials create a structured emergency rotation request with evidence; they do not inject a new secret or bypass approval. Unknown revocation outcome is reconciled before another action.",
+      "id": "SCR-004",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Rotation failure restores payment access and surfaces emergency authority"
+    },
+    {
+      "acceptanceCriteria": [
+        "The test-mode journey proves restricted permissions, secure capture, real canary, cutover, and rollback without exposing key values",
+        "Prompt extraction, cross-mode/workspace use, broadened permissions, altered intent, replay, and expired grant all fail",
+        "Crash at secure capture, target stage, canary, grace, revocation, and receipt settlement resumes or reconciles once",
+        "Every injected failure leaves the prior disposable payment binding functional or records an explicit manual-reconciliation blocker",
+        "No Categoric/Cashflow-App Stripe account, key, environment, payment flow, or product code is used"
+      ],
+      "complexity": 5,
+      "dependsOn": [
+        "SCR-004"
+      ],
+      "description": "Qualify on a dedicated Rorca-owned Stripe test account and disposable target binding. Exercise least-privilege inventory, human-assisted capture, real canary, grace, revocation verification where supported, rollback, runtime failure, replay, cross-mode/workspace denial, prompt extraction, and crash recovery. Live-mode remains disabled until separately authorized evidence exists. Rollback disables the adapter, restores the prior target binding, revokes/quarantines replacements, and preserves receipts. Non-goals are payment-product changes, billing logic, webhook processing, customer accounts, and automatic provider-control bypass.",
+      "id": "SCR-005",
+      "priority": 1,
+      "timeoutMinutes": 240,
+      "title": "Stripe test-mode attacks cannot expose keys or interrupt the prior binding"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+name: Public API Contract
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: Contract Stability
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Canonical migrations use pgvector; AGE remains optional/lite-mode in
+        # this contract environment and is safely skipped by the migration runner.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: rorca
+          POSTGRES_PASSWORD: rorca
+          POSTGRES_DB: rorca
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rorca -d rorca"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://rorca:rorca@127.0.0.1:5432/rorca
+      RORCA_DISABLE_BACKGROUND_RUNTIME: "true"
+      RORCA_SERVE_MCP: "false"
+      GITHUB_PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - run: npm ci
+      - run: cd backend && npm ci
+      - run: npm run build
+      - run: git fetch origin "${{ github.base_ref }}" --depth=1
+      - name: Start backend
+        run: npm run dev:server:contract > /tmp/rorca-contract-server.log 2>&1 &
+      - run: npm run check:contract
+        env:
+          RORCA_CONTRACT_BASE_URL: http://127.0.0.1:3030
+      - if: always()
+        run: cat /tmp/rorca-contract-server.log

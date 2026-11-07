@@ -1,0 +1,138 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import type { Express } from 'express';
+import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
+
+let app: Express;
+let authToken: string;
+
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
+  const serverMod = require('../../server');
+  app = serverMod.default;
+}, 60_000);
+
+beforeEach(async () => {
+  authToken = await getAuthToken(app);
+});
+
+afterAll(() => {
+  delete process.env.NODE_ENV;
+});
+
+describe('GET /api/mcp/tools', () => {
+  test('returns the live MCP catalog including memory aliases', async () => {
+    const res = await request(app)
+      .get('/api/mcp/tools')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.tools)).toBe(true);
+
+    const names = res.body.tools.map((tool: { name: string }) => tool.name);
+    expect(names).toContain('rorca_save_memory');
+    expect(names).toContain('rorca_get_memories');
+    expect(names).toContain('rorca_trigger_run');
+    expect(names).toContain('rorca_pipeline_preflight');
+    expect(names).toContain('rorca_preflight_run');
+    expect(names).toContain('rorca_pipeline_task_manifests_trigger');
+    expect(names).toContain('rorca_trigger_task_manifest');
+    expect(names).toContain('rorca_retry_story');
+    expect(names).toContain('rorca_create_spec');
+    expect(names).toContain('rorca_persist_spec');
+    expect(names).toContain('rorca_spec_workflow');
+    expect(names).toContain('rorca_spec_readiness');
+    expect(names).toContain('rorca_retry_spec_stage');
+    expect(names).toContain('rorca_repair_spec');
+    expect(names).toContain('rorca_repair_spec_batch');
+    expect(names).not.toContain('rorca_log_decision');
+
+    const saveMemory = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_save_memory');
+    expect(saveMemory).toMatchObject({
+      category: 'Memory',
+    });
+    expect(saveMemory.requiredParams).toEqual(expect.arrayContaining(['category', 'title', 'rule']));
+
+    const triggerRun = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_trigger_run');
+    expect(triggerRun).toMatchObject({
+      category: 'Specs & Pipeline',
+    });
+
+    const preflightRun = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_preflight_run');
+    expect(preflightRun).toMatchObject({
+      category: 'Specs & Pipeline',
+      requiredParams: expect.arrayContaining(['specPath', 'workspaceId']),
+    });
+    expect(preflightRun.inputSchema).toEqual(expect.objectContaining({
+      specPath: expect.any(Object),
+      workspaceId: expect.any(Object),
+      queue: expect.any(Object),
+      autoWorktree: expect.any(Object),
+      mergeStrategy: expect.any(Object),
+      forceSequential: expect.any(Object),
+      agentOverride: expect.any(Object),
+      modelOverride: expect.any(Object),
+      effortLevel: expect.any(Object),
+      reasoning: expect.any(Object),
+      terminal_mode: expect.any(Object),
+      executionEnvironment: expect.any(Object),
+    }));
+
+    const docs = await request(app)
+      .get('/api/docs/openapi.json')
+      .set('Authorization', `Bearer ${authToken}`);
+    expect(docs.status).toBe(200);
+    const preflightOperation = docs.body.paths['/api/pipeline/preflight'].post;
+    expect(preflightOperation).toMatchObject({
+      operationId: 'preflightPipelineCheck',
+      'x-rorca-tier': 'auth',
+      'x-rorca-rationale': expect.stringContaining('side-effect-free trigger binding'),
+    });
+    expect(preflightOperation['x-rorca-public-api']).toBeUndefined();
+    expect(preflightOperation['x-rorca-native-api']).toBeUndefined();
+    expect(preflightOperation.responses['200'].content['application/json'].schema
+      .properties.preview.required).toEqual(expect.arrayContaining([
+      'previewHash',
+      'expiresAt',
+      'workspaceId',
+      'spec',
+      'specHash',
+      'effectiveOptions',
+      'scheduling',
+    ]));
+
+    const taskManifestTrigger = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_trigger_task_manifest');
+    expect(taskManifestTrigger).toMatchObject({
+      category: 'Specs & Pipeline',
+    });
+    expect(taskManifestTrigger.requiredParams).toEqual(expect.arrayContaining(['workspaceId', 'manifest', 'idempotencyKey']));
+
+    const createSpec = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_create_spec');
+    const persistSpec = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_persist_spec');
+    expect(createSpec.description).toContain('Canonical');
+    expect(persistSpec.description).toContain('Compatibility alias');
+    expect(createSpec.inputSchema).toEqual(expect.objectContaining({
+      workspaceId: expect.any(Object),
+      title: expect.any(Object),
+      stories: expect.any(Object),
+      policyPresetId: expect.any(Object),
+      postSavePolicy: expect.any(Object),
+      postSave: expect.any(Object),
+    }));
+
+    const generationContext = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_specs_generation_context');
+    expect(generationContext.requiredParams).toEqual(expect.arrayContaining(['workspaceId', 'brief']));
+    expect(generationContext.inputSchema).toEqual(expect.objectContaining({
+      workspaceId: expect.any(Object),
+      brief: expect.any(Object),
+      title: expect.any(Object),
+      agentOverride: expect.any(Object),
+    }));
+  });
+});

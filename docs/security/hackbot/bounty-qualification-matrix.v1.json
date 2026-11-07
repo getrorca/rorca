@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "bounty.qualification-matrix.v1",
+  "candidateId": "bounty-mission-control-mvp",
+  "qualificationResult": "passed-hermetic-fixture",
+  "releaseDisposition": "disabled-pending-post-commit-requalification",
+  "requirements": [
+    { "id": "HB-AUTH-001", "disposition": "qualified", "namedTest": "controller-mutation-authority.contract", "result": "passed" },
+    { "id": "HB-EFFECT-001", "disposition": "qualified", "namedTest": "broker-sole-effect-authority.contract", "result": "passed" },
+    { "id": "HB-WORKER-001", "disposition": "qualified", "namedTest": "worker-bwrap-no-bypass.contract", "result": "passed" },
+    { "id": "HB-HERMES-001", "disposition": "qualified", "namedTest": "hermes-relay-only.contract", "result": "passed" },
+    { "id": "HB-SCOPE-001", "disposition": "qualified", "namedTest": "broker-scope-epoch-dns.contract", "result": "passed" },
+    { "id": "HB-EPOCH-001", "disposition": "qualified", "namedTest": "broker-replay-stale-epoch.contract", "result": "passed" },
+    { "id": "HB-EFFECT-002", "disposition": "qualified", "namedTest": "unknown-effect-default-deny.contract", "result": "passed" },
+    { "id": "HB-EVIDENCE-001", "disposition": "qualified", "namedTest": "evidence-tamper-rejection.contract", "result": "passed" },
+    { "id": "HB-NET-001", "disposition": "qualified-linux-only", "namedTest": "worker-bwrap-no-bypass.contract", "result": "passed" },
+    { "id": "HB-DNS-001", "disposition": "qualified", "namedTest": "broker-scope-epoch-dns.contract", "result": "passed" },
+    { "id": "HB-SECRETS-001", "disposition": "qualified", "namedTest": "worker-credential-nondisclosure.contract", "result": "passed" },
+    { "id": "HB-SUBMIT-001", "disposition": "qualified-manual-only", "namedTest": "submission-human-presence.contract", "result": "passed" },
+    { "id": "HB-AUDIT-001", "disposition": "qualified", "namedTest": "evidence-tamper-rejection.contract", "result": "passed" },
+    { "id": "HB-HUMAN-001", "disposition": "qualified", "namedTest": "submission-human-presence.contract", "result": "passed" },
+    { "id": "HB-RELEASE-001", "disposition": "qualified-with-exclusions", "namedTest": "release-exclusions.contract", "result": "passed" },
+    { "id": "HB-UI-001", "disposition": "qualified", "namedTest": "mission-control-redacted-ui.contract", "result": "passed" }
+  ],
+  "p0Invariants": [
+    { "id": "P0-AUTH-01", "disposition": "qualified", "namedTest": "controller-mutation-authority.contract", "result": "passed" },
+    { "id": "P0-EFFECT-01", "disposition": "qualified", "namedTest": "broker-sole-effect-authority.contract", "result": "passed" },
+    { "id": "P0-SCOPE-01", "disposition": "qualified", "namedTest": "broker-scope-epoch-dns.contract", "result": "passed" },
+    { "id": "P0-REPLAY-01", "disposition": "qualified", "namedTest": "broker-replay-stale-epoch.contract", "result": "passed" },
+    { "id": "P0-WORKER-01", "disposition": "qualified", "namedTest": "worker-bwrap-no-bypass.contract", "result": "passed" },
+    { "id": "P0-HERMES-01", "disposition": "qualified", "namedTest": "hermes-relay-only.contract", "result": "passed" },
+    { "id": "P0-EVIDENCE-01", "disposition": "qualified", "namedTest": "evidence-tamper-rejection.contract", "result": "passed" },
+    { "id": "P0-SECRETS-01", "disposition": "qualified", "namedTest": "worker-credential-nondisclosure.contract", "result": "passed" },
+    { "id": "P0-SUBMIT-01", "disposition": "qualified-zero-path", "namedTest": "submission-human-presence.contract", "result": "passed" }
+  ]
+}

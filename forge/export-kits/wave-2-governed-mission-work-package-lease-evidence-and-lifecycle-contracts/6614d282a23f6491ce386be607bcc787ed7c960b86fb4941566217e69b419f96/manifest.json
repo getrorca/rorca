@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 28998,
+      "contentHash": "sha256:bc3eed205867611b7db352e47bd5f4b236fb0c34c623f17f4503ba0b9c9eec2d",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 40534,
+      "contentHash": "sha256:125becc775a4e6f7ed31fc228acd576dc93c3ce134f4e1c4e17584bbd1d2b459",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 6214,
+      "contentHash": "sha256:b128099df9b1bd0c44e2fe9df56148bf7d162e38bd4125f5f6ce951aab1bf1c4",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 17862,
+      "contentHash": "sha256:1606c75db52770c72a20bff1ba7aea902a496fc8227f8a8534dff6c02f6fe284",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:6614d282a23f6491ce386be607bcc787ed7c960b86fb4941566217e69b419f96",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "wave-2-governed-mission-work-package-lease-evidence-and-lifecycle-contracts",
+  "specMaterialHash": "sha256:bc3eed205867611b7db352e47bd5f4b236fb0c34c623f17f4503ba0b9c9eec2d"
+}

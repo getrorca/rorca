@@ -1,0 +1,38 @@
+##
+# docker-compose.test.yml — Test database for backend tests
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d db-test
+#   cd backend && DATABASE_URL_TEST=postgres://rorca:rorca@localhost:5432/rorca_test npm test
+#   docker compose -f docker-compose.test.yml down
+#
+# CI usage:
+#   services:
+#     postgres:
+#       image: pgvector/pgvector:pg16
+#       env:
+#         POSTGRES_USER: rorca
+#         POSTGRES_PASSWORD: rorca
+#         POSTGRES_DB: rorca_test
+##
+
+services:
+  db-test:
+    build:
+      context: docker/postgres
+      dockerfile: Dockerfile
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: rorca
+      POSTGRES_PASSWORD: rorca
+      POSTGRES_DB: rorca_test
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rorca -d rorca_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data  # RAM disk for fast tests

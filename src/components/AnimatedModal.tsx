@@ -1,0 +1,79 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
+ * AnimatedModal: Animated backdrop + modal entry with scaleIn + fadeIn
+ * Used for: modals, dialogs, confirmation screens
+ * Animation: scale from 95% to 100% + fadeIn (150ms)
+ * Exit: scale back down + fadeOut
+ */
+
+import { motion, AnimatePresence } from 'framer-motion';
+import { scaleIn } from '../lib/animations';
+import { useFocusTrap } from '../hooks/useFocusTrap';
+
+interface AnimatedModalProps {
+  isOpen: boolean;
+  onClose?: () => void;
+  children: React.ReactNode;
+  className?: string;
+  backdropClassName?: string;
+  closeOnBackdropClick?: boolean;
+  ariaLabel?: string;
+}
+
+export function AnimatedModal({
+  isOpen,
+  onClose,
+  children,
+  className = '',
+  backdropClassName = '',
+  closeOnBackdropClick = true,
+  ariaLabel = 'Dialog',
+}: AnimatedModalProps) {
+  const trapRef = useFocusTrap<HTMLDivElement>(isOpen, undefined, { onEscape: onClose });
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          {/* Backdrop */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className={`fixed inset-0 z-40 bg-black/50 ${backdropClassName}`}
+            onClick={() => closeOnBackdropClick && onClose?.()}
+            aria-hidden="true"
+          />
+          {/* Modal content */}
+          <motion.div
+            ref={trapRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={ariaLabel}
+            variants={scaleIn}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+            transition={{
+              duration: 0.15,
+              ease: [0.4, 0, 0.2, 1],
+            }}
+            className={`fixed inset-0 z-50 flex items-center justify-center pointer-events-none ${className}`}
+          >
+            <div className="pointer-events-auto">
+              {children}
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
+
+export default AnimatedModal;

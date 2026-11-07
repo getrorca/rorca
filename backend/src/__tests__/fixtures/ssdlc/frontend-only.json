@@ -1,0 +1,42 @@
+{
+  "name": "frontend-only code change",
+  "input": {
+    "schemaVersion": 1,
+    "workspaceId": "workspace-frontend",
+    "canonicalSpec": {
+      "specId": "fixture-frontend-only",
+      "version": "8",
+      "contentHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "json": {
+        "title": "Add lifecycle status panel",
+        "tags": ["frontend"],
+        "executionMode": "qa",
+        "contextSummary": { "predictedFiles": ["src/components/LifecycleStatus.tsx"] },
+        "userStories": [{
+          "id": "FIX-FRONTEND-001",
+          "title": "Render lifecycle status",
+          "description": "Implement the production React component.",
+          "acceptanceCriteria": ["The component renders normal, negative, responsive, accessibility, and light-theme states."],
+          "tags": ["react"],
+          "fileHints": ["src/components/LifecycleStatus.tsx"]
+        }]
+      }
+    },
+    "workspaceTags": [{ "workspaceId": "workspace-frontend", "tag": "typescript" }],
+    "riskAssignments": [{ "workspaceId": "workspace-frontend", "assignmentId": "risk-frontend", "scopeReference": "FIX-FRONTEND-001", "risk": "low", "rationale": "Presentation-only code change." }],
+    "ownerAssignments": [{ "workspaceId": "workspace-frontend", "assignmentId": "owner-frontend", "scopeReference": "FIX-FRONTEND-001", "ownerReference": "owner-frontend" }],
+    "policyAnnotations": [],
+    "compilerAnnotations": [],
+    "compilerVersion": "ssdlc-plan-compiler-5",
+    "policyVersion": "fixture-policy-1",
+    "compiledAt": "2026-06-15T12:00:00.000Z"
+  },
+  "expected": {
+    "profiles": ["code-change"],
+    "notApplicablePhases": [],
+    "capabilityHint": "qa",
+    "acceptedAnnotations": [],
+    "rejectedAnnotations": [],
+    "defaultedInputs": []
+  }
+}

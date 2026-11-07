@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "rorca.wave2-prerequisite-gate.v1",
+  "decision": "accepted",
+  "gateFor": "ROR-23",
+  "acceptedAdr": {
+    "sourceSha": "dab2a136a1d1754ccdaeb15224a60a6e9dedd594",
+    "gitBlobOid": "8bc32c523890abb2e24bbe2d3253c2ed448c6369",
+    "sha256": "b6ca538e513716b5e331964af110c5f8b20d432c22308cac18099a3ef7f973a5",
+    "acceptanceCommentId": "2823a595-c79e-4d0a-8e48-7c5216b0bb66"
+  },
+  "acceptedWave1": {
+    "sourceSha": "38d26ee944f0fd80904e79021100d5023b70f170",
+    "specSha256": "caeb0720cd09f4e6a5cd22b078b2d50932b34613262c15631cdf71af9c056920",
+    "reviewSha256": "577a6d9ab9efe0753b50e031d16bc67b53bad71fc314396e077b2d57849ecd4c",
+    "verdict": "APPROVED_FOR_FINAL_WAVE1_PREFLIGHT"
+  },
+  "implementationAuthority": "isolated_source_only",
+  "executionAuthority": "none",
+  "mergeAuthority": "none",
+  "deploymentAuthority": "none"
+}

@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:de7dbd3a6a78e1c87e370d81a5a9ea944f7ff8b05e17e490bbc8a378a54a2001",
+      "path": "forge/export-kits/wave-5-forgejo-adapter-omp-shim/3fea61f1f7219f7f4183b394f58643b304c0de722be5467b8d71ee664dcc9aab/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:6ef6fbe19700bb80c90efc533f32e65148659c1293c42f8a3131ec6ff3d17676",
+      "path": "forge/export-kits/wave-5-forgejo-adapter-omp-shim/3fea61f1f7219f7f4183b394f58643b304c0de722be5467b8d71ee664dcc9aab/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:8d34b5239b5b1cce882afe73342f1249fd2fa95aa4ab54826f09fdd66f8f3014",
+      "path": "forge/export-kits/wave-5-forgejo-adapter-omp-shim/3fea61f1f7219f7f4183b394f58643b304c0de722be5467b8d71ee664dcc9aab/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:b9fc08d4a9b5636448a73a3f372d4a8ebccad9203b9a3447e4df0ece89e1f326",
+      "path": "forge/export-kits/wave-5-forgejo-adapter-omp-shim/3fea61f1f7219f7f4183b394f58643b304c0de722be5467b8d71ee664dcc9aab/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/wave-5-forgejo-adapter-omp-shim/3fea61f1f7219f7f4183b394f58643b304c0de722be5467b8d71ee664dcc9aab",
+  "manifestHash": "sha256:3fea61f1f7219f7f4183b394f58643b304c0de722be5467b8d71ee664dcc9aab",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:b9fc08d4a9b5636448a73a3f372d4a8ebccad9203b9a3447e4df0ece89e1f326"
+}

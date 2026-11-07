@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 3631,
+      "contentHash": "sha256:d1184f1317bc8178272a95beb6019081da538a8f9eeea049e17caa180e674fa4",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 6240,
+      "contentHash": "sha256:ecef0952388f229b5273b65596d94ae194b2aef6e11f08d1286a1e318a65d5d7",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 2493,
+      "contentHash": "sha256:7c944fb3683b32246005756195c404e998eb3dfbf98ea4452470b48614017f77",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 1544,
+      "contentHash": "sha256:17e962fa480ef52990df5351a296053e9ccc98b56db78a1590d35dc96220b3f3",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:ab4ed0722ac5a2cbb2c14e7dfe71d5c4dd9ca12fd5f5769518abdda85312d1c0",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "omp-session-visibility",
+  "specMaterialHash": "sha256:d1184f1317bc8178272a95beb6019081da538a8f9eeea049e17caa180e674fa4"
+}

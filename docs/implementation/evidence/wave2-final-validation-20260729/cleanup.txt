@@ -1,0 +1,6 @@
+serviceAlive=false
+listenerCount=0
+stateExists=false
+socketExists=false
+credentialMaterialExists=false
+prunePerformed=false

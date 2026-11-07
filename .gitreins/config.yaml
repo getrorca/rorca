@@ -1,0 +1,14 @@
+guards:
+  secrets: true
+  lint: false
+  tests: true
+  test_mode: full
+  test_timeout: 900
+  test_command: npm run typecheck
+  static_analysis: false
+evaluator:
+  max_iterations: 50
+history:
+  enabled: false
+  storage: filesystem
+  max_verdicts: 50

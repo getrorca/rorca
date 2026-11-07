@@ -1,0 +1,9 @@
+service_pid=62712 service_alive=false
+app_listener_count=0
+postgres_listener_count=0
+state_exists=false
+socket_exists=false
+home_exists=false
+credential_file_count=0
+database_catalog_unavailable_after_exact_cluster_stop=true
+no_prune=true

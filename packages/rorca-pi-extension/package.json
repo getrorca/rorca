@@ -1,0 +1,57 @@
+{
+  "name": "@rorca/pi-extension",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "keywords": ["pi-package", "rorca", "pi-extension", "hermes", "autonomous-supervisor"],
+  "bin": {
+    "rorca-pi-supervisor": "./extensions/rorca/autonomous-supervisor-launcher.js"
+  },
+  "exports": {
+    ".": "./extensions/rorca/index.ts",
+    "./autonomous-supervisor": "./extensions/rorca/autonomous-supervisor.ts",
+    "./autonomous-supervisor-core": "./extensions/rorca/autonomous-supervisor-core.js",
+    "./companion": "./extensions/rorca/autonomous-supervisor-companion.js",
+    "./launcher": "./extensions/rorca/autonomous-supervisor-launcher.js",
+    "./sandbox": "./extensions/rorca/autonomous-supervisor-sandbox.js"
+  },
+  "files": [
+    "extensions/rorca",
+    "!extensions/rorca/__tests__",
+    "skills",
+    "contracts",
+    "README.md",
+    "CHANGELOG.md",
+    "DOCS-INDEX.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.6",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "^0.80.7",
+    "typebox": "^1.1.38"
+  },
+  "pi": {
+    "extensions": ["./extensions/rorca/index.ts"],
+    "skills": ["./skills"]
+  },
+  "omp": {
+    "extensions": ["./extensions/rorca/index.ts"],
+    "skills": ["./skills"]
+  },
+  "scripts": {
+    "build:runtime": "node ../../scripts/generate-pi-runtime.mjs --write",
+    "check:runtime-parity": "node ../../scripts/generate-pi-runtime.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "node --check extensions/rorca/autonomous-supervisor-core.js && node --check extensions/rorca/autonomous-supervisor-sandbox.js && node --check extensions/rorca/autonomous-supervisor-companion.js && node --check extensions/rorca/autonomous-supervisor-launcher.js && npm run check:runtime-parity && tsc -p tsconfig.json --noEmit",
+    "test": "npm run check:runtime-parity && vitest run --root ../.. --config packages/rorca-pi-extension/vitest.config.ts && vitest run --root ../.. --config packages/rorca-pi-extension/vscode-extension/vitest.config.ts"
+  }
+}

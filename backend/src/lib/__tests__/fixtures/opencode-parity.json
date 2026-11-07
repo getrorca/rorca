@@ -1,0 +1,36 @@
+{
+  "fixture": "opencode-parity",
+  "opencodeVersion": "opencode 1.17.10",
+  "evidenceClass": "non-release-fixture-replay",
+  "actualProviderCapture": false,
+  "captureCommand": "cd fixtures/opencode-parity-workspace && COLUMNS=80 LINES=24 opencode run --format json --model openai/gpt-4o \"Explain the replay semantics of this fixed OpenCode terminal parity fixture.\"",
+  "terminalWidth": 80,
+  "workspace": "fixtures/opencode-parity-workspace",
+  "prompt": "Explain the replay semantics of this fixed OpenCode terminal parity fixture.",
+  "captureNotes": [
+    "Deterministic replay fixture pinned to the shipped OpenCode 1.17.10 contract; it is not a real provider capture or release proof.",
+    "Final completion event intentionally omits a trailing newline to guard replay flush behavior."
+  ],
+  "chunks": [
+    {
+      "sequence": 1,
+      "stream": "stdout",
+      "base64": "eyJ0eXBlIjoiYXNzaXN0YW50IiwiY29udGVudCI6Ikluc3BlY3RpbmcgdGhlIGZpeGVkIGZpeHR1cmUgYmVmb3JlIHdyaXRpbmcgYSBub3RlLiIsInRpbWVzdGFtcCI6IjIwMjYtMDMtMTZUMDA6MDA6MDAuMDAwWiJ9CnsidHlwZSI6InRvb2xfY2FsbCIsInRvb2wiOiJyZWFkIiwiYXJncyI6eyJmaWxlX3BhdGgiOiJSRUFETUUubWQifSwidGltZXN0YW1wIjoiMjAyNi0wMy0xNlQwMDowMA=="
+    },
+    {
+      "sequence": 2,
+      "stream": "stdout",
+      "base64": "OjAwLjE1MFoifQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsInRvb2wiOiJyZWFkIiwiY29udGVudCI6IiMgRml4dHVyZSBSRUFETUVcbkV4cGxhaW4gdGhlIHJlcGxheSBzZW1hbnRpY3MuIiwiZHVyYXRpb25fbXMiOjM0LCJ0aW1lc3RhbXAiOiIyMDI2LTAzLTE2VDAwOjAwOjAwLjE4NFoifQp7InR5cGUiOiJ0b29sX2NhbGwiLCJ0b29sIjoiYmFzaCIsImFyZ3MiOnsiY29tbWFuZCI6InByaQ=="
+    },
+    {
+      "sequence": 3,
+      "stream": "stdout",
+      "base64": "bnRmIFwibGl2ZSBhdHRhY2ggdXBkYXRlXFxuXCIiLCJkZXNjcmlwdGlvbiI6IkVtaXQgbGl2ZSBhdHRhY2ggdXBkYXRlIn0sInRpbWVzdGFtcCI6IjIwMjYtMDMtMTZUMDA6MDA6MDAuMjYwWiJ9CnsidHlwZSI6InRvb2xfcmVzdWx0IiwidG9vbCI6ImJhc2giLCJjb250ZW50IjoibGl2ZSBhdHRhY2ggdXBkYXRlIiwiZHVyYXRpb25fbXMiOjI4LCJ0aW1lc3RhbXAiOiIyMDI2LTAzLTE2VA=="
+    },
+    {
+      "sequence": 4,
+      "stream": "stdout",
+      "base64": "MDA6MDA6MDAuMjg4WiJ9CnsidHlwZSI6InRvb2xfY2FsbCIsInRvb2wiOiJ3cml0ZSIsImFyZ3MiOnsicGF0aCI6Im5vdGVzLnR4dCJ9LCJ0aW1lc3RhbXAiOiIyMDI2LTAzLTE2VDAwOjAwOjAwLjMyMFoifQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsInRvb2wiOiJ3cml0ZSIsImNvbnRlbnQiOiJXcm90ZSBub3Rlcy50eHQiLCJkdXJhdGlvbl9tcyI6MTIsInRpbWVzdGFtcCI6IjIwMjYtMDMtMTZUMDA6MDA6MDAuMzMyWiJ9CnsidHlwZSI6ImNvbXBsZXRpb24iLCJjb250ZW50IjoiRml4dHVyZSByZXBsYXkgY29tcGxldGUuIiwiZXhpdF9jb2RlIjowLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjMyMSwib3V0cHV0X3Rva2VucyI6ODksIm1vZGVsIjoib3BlbmFpL2dwdC00byJ9fQ=="
+    }
+  ]
+}

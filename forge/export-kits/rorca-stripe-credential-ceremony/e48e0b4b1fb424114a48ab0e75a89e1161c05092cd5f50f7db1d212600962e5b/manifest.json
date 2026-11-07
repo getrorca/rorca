@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 7754,
+      "contentHash": "sha256:4e3f7661d33b3c0cfa703eb3a8714c6919cf4e00e4f3edc013d048954edf70a3",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 12497,
+      "contentHash": "sha256:ca76815f4a4530500f095e00615f987990a80d434c04fa2748eb254c640d49f1",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 3951,
+      "contentHash": "sha256:2c6fdc3b2ea0604e4bd0e00ac26d03a6a29395b88b167e52b19a2131037dbffb",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 3987,
+      "contentHash": "sha256:27370dc6864d29c01ae227638a85a52ccc8ffa59a17b58c35fdee5e8950fd1bc",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:e48e0b4b1fb424114a48ab0e75a89e1161c05092cd5f50f7db1d212600962e5b",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "rorca-stripe-credential-ceremony",
+  "specMaterialHash": "sha256:4e3f7661d33b3c0cfa703eb3a8714c6919cf4e00e4f3edc013d048954edf70a3"
+}

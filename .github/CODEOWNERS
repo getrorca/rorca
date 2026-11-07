@@ -1,0 +1,9 @@
+# Default owner for the repo
+* @sysgazer
+
+# Core areas
+/backend/ @sysgazer
+/src/ @sysgazer
+/packages/rorca-pi-extension/ @sysgazer
+/scripts/ @sysgazer
+/docs/ @sysgazer

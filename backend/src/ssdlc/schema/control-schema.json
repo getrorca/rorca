@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rorca.dev/schemas/ssdlc/control-record-v1.json",
+  "title": "Rorca SSDLC ControlRecord v1",
+  "description": "Canonical provider contract for one source-verified SSDLC control.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "version",
+    "controlId",
+    "phase",
+    "objective",
+    "applicability",
+    "sourceReferences",
+    "sourceStrength",
+    "requiredEvidence",
+    "failureSeverity",
+    "exceptionPolicy",
+    "skillRefs"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "rorca.ssdlc-control-record.v1" },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "controlId": { "$ref": "#/$defs/nonEmptyString" },
+    "phase": {
+      "enum": ["planning", "requirements", "design", "development", "testing", "deployment", "maintenance"]
+    },
+    "objective": { "$ref": "#/$defs/nonEmptyString" },
+    "applicability": { "$ref": "#/$defs/applicability" },
+    "sourceReferences": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/sourceReference" }
+    },
+    "sourceStrength": { "enum": ["primary", "secondary", "derived"] },
+    "requiredEvidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/evidenceRequirement" }
+    },
+    "failureSeverity": { "enum": ["advisory", "blocking", "critical"] },
+    "exceptionPolicy": { "$ref": "#/$defs/exceptionPolicy" },
+    "skillRefs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonEmptyString" }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["universal", "productProfiles", "riskProfiles", "domainRegulatory"],
+      "properties": {
+        "universal": { "type": "boolean" },
+        "productProfiles": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" } },
+        "riskProfiles": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" } },
+        "domainRegulatory": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" } }
+      }
+    },
+    "sourceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["genesisEvidenceId", "citation"],
+      "properties": {
+        "genesisEvidenceId": { "$ref": "#/$defs/nonEmptyString" },
+        "citation": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "evidenceRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "allowedSourceTypes", "requiredBindings", "minimumTrust", "evidenceDepth", "freshness"],
+      "properties": {
+        "classification": { "enum": ["artifact", "attestation", "measurement", "review", "approval"] },
+        "allowedSourceTypes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "requiredBindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subject", "release"],
+          "properties": {
+            "subject": { "type": "boolean" },
+            "release": { "type": "boolean" }
+          },
+          "anyOf": [
+            { "properties": { "subject": { "const": true } } },
+            { "properties": { "release": { "const": true } } }
+          ]
+        },
+        "minimumTrust": { "enum": ["self-attested", "tool-verified", "independently-verified"] },
+        "evidenceDepth": { "enum": ["declaration", "demonstrated", "independent-verification"] },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxAgeSeconds"],
+          "properties": {
+            "maxAgeSeconds": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "exceptionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed", "approvalRequired", "justificationRequired"],
+      "properties": {
+        "allowed": { "type": "boolean" },
+        "approvalRequired": { "type": "boolean" },
+        "justificationRequired": { "type": "boolean" },
+        "maxDurationDays": { "type": "integer", "minimum": 1 }
+      },
+      "if": {
+        "properties": { "maxDurationDays": {} },
+        "required": ["maxDurationDays"]
+      },
+      "then": {
+        "properties": { "allowed": { "const": true } }
+      }
+    }
+  }
+}

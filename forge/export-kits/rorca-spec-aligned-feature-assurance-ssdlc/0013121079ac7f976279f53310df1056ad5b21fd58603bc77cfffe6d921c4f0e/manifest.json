@@ -1,0 +1,35 @@
+{
+  "artifacts": [
+    {
+      "byteLength": 9525,
+      "contentHash": "sha256:bcd312b3c09c360d133667f9253644288a82e502a4169882275712d37401b8c2",
+      "path": "spec.json",
+      "role": "spec"
+    },
+    {
+      "byteLength": 14794,
+      "contentHash": "sha256:21d62eb921fcbe970f34c447e8d0e9abaf358b7fe5fdc7656ff8f7afa833ef0c",
+      "path": "PRD.md",
+      "role": "requirements"
+    },
+    {
+      "byteLength": 4155,
+      "contentHash": "sha256:841f3025ac689e6d72ace582b53c17013d8ef3c81749e2d1268702ac60d2b6f5",
+      "path": "SDD.md",
+      "role": "design"
+    },
+    {
+      "byteLength": 5680,
+      "contentHash": "sha256:2ee466aa51a4ddcdbe8ddf35d0ce47656d47601be4b88d5e12638d465cd9e9b8",
+      "path": "PLAN.md",
+      "role": "delivery"
+    }
+  ],
+  "compilerVersion": "rorca-export-kit-compiler-1",
+  "inputSchemaVersion": "canonical-spec-projection.v1",
+  "manifestHash": "sha256:0013121079ac7f976279f53310df1056ad5b21fd58603bc77cfffe6d921c4f0e",
+  "schemaVersion": "rorca.export-kit-manifest.v1",
+  "sources": [],
+  "specId": "rorca-spec-aligned-feature-assurance-ssdlc",
+  "specMaterialHash": "sha256:bcd312b3c09c360d133667f9253644288a82e502a4169882275712d37401b8c2"
+}

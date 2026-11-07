@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "rorca-wave-fixture-fault-points-v1",
+  "faultPoints": [
+    { "id": "WPE-FP-001", "boundary": "queue_claim", "description": "The durable queue job is claimed before any story process starts." },
+    { "id": "WPE-FP-002", "boundary": "agent_start", "description": "The child execution identity and started timestamp are durably recorded." },
+    { "id": "WPE-FP-003", "boundary": "agent_commit", "description": "The story source commit is created and its identity is captured." },
+    { "id": "WPE-FP-004", "boundary": "host_validation", "description": "Host-resolved validation runs against the committed story result." },
+    { "id": "WPE-FP-005", "boundary": "integration_preparation", "description": "The accepted contribution enters deterministic integration preparation." },
+    { "id": "WPE-FP-006", "boundary": "integration_apply", "description": "The merge or cherry-pick is attempted and its exact outcome is recorded." },
+    { "id": "WPE-FP-007", "boundary": "integrated_validation", "description": "Validation runs against the assembled integration result." },
+    { "id": "WPE-FP-008", "boundary": "evidence_persistence", "description": "Normalized qualification evidence is persisted before status promotion." },
+    { "id": "WPE-FP-009", "boundary": "run_closeout", "description": "Final story/run closeout is decided only from explicit prior evidence." }
+  ],
+  "volatileEvidenceAllowlist": [
+    "executionId",
+    "pid",
+    "descendantPids",
+    "startedAt",
+    "finishedAt",
+    "event.at",
+    "event.wallClockMs",
+    "elapsedMs",
+    "exitSignal"
+  ]
+}

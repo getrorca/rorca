@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:92b5f3678fe0c6746abcf5a17b14b9bb926ace3a6b2d2c1d3985edd710bdd1cd",
+      "path": "forge/export-kits/wave-3b-runtime-neutral-live-output-and-structured-activity-streaming/46b91a027cd374d808e14289d98cbdfa51ee22f04c2354d19d9a53e6bd3dcc94/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:09c5d616eb30f2f70c66d0cd1d058ad3e262d22c42a9d584722b27d275b87fb9",
+      "path": "forge/export-kits/wave-3b-runtime-neutral-live-output-and-structured-activity-streaming/46b91a027cd374d808e14289d98cbdfa51ee22f04c2354d19d9a53e6bd3dcc94/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:a3c8d1fcaa7226dc2dd5cfece32acdd9560d7b8e81d47b5be4f4a6f2e9de06cd",
+      "path": "forge/export-kits/wave-3b-runtime-neutral-live-output-and-structured-activity-streaming/46b91a027cd374d808e14289d98cbdfa51ee22f04c2354d19d9a53e6bd3dcc94/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:00ce99011da23fae84b9daf001d2d7d262c98928055a65b9ab45d0ecabc83199",
+      "path": "forge/export-kits/wave-3b-runtime-neutral-live-output-and-structured-activity-streaming/46b91a027cd374d808e14289d98cbdfa51ee22f04c2354d19d9a53e6bd3dcc94/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/wave-3b-runtime-neutral-live-output-and-structured-activity-streaming/46b91a027cd374d808e14289d98cbdfa51ee22f04c2354d19d9a53e6bd3dcc94",
+  "manifestHash": "sha256:46b91a027cd374d808e14289d98cbdfa51ee22f04c2354d19d9a53e6bd3dcc94",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:00ce99011da23fae84b9daf001d2d7d262c98928055a65b9ab45d0ecabc83199"
+}

@@ -1,0 +1,59 @@
+# ── Stage 1: Build backend ──
+FROM node:22-alpine AS build
+
+WORKDIR /app/backend
+
+# node-pty has no musl/linux-arm64 prebuild, so compile its native addon here.
+# Keep the toolchain out of the runtime image.
+RUN apk add --no-cache python3 make g++ linux-headers
+
+# Install dependencies (cache layer). postinstall verifies node-pty can load,
+# finds an executable spawn-helper, and performs a real PTY spawn.
+COPY backend/package.json backend/package-lock.json* ./
+COPY backend/scripts/verify-node-pty-install.js ./scripts/
+RUN npm ci
+
+# Copy source and compile TypeScript
+COPY backend/tsconfig.json ./
+COPY backend/src/ src/
+RUN npx tsc && npm prune --omit=dev
+RUN cc -O2 -Wall -Wextra -Werror -static \
+    src/native/rorca-sandbox-launcher.c \
+    -o /usr/local/bin/rorca-sandbox-launcher
+
+# ── Stage 2: Production runtime ──
+FROM node:22-alpine
+
+# Keep this backend-only image aligned with the canonical Linux worker image:
+# autonomous children require a real namespace boundary and absolute tool probes.
+RUN apk add --no-cache bash git github-cli python3 ripgrep
+
+WORKDIR /app
+
+# Reuse the verified, production-only native addon. Running npm ci here would
+# require a compiler toolchain in the runtime image on linux/arm64.
+COPY --from=build /app/backend/node_modules ./node_modules
+COPY --from=build /app/backend/package.json ./
+COPY --from=build /app/backend/scripts/verify-node-pty-install.js ./scripts/
+
+# Copy compiled JS from build stage
+COPY --from=build /app/backend/dist/ dist/
+COPY --from=build /usr/local/bin/rorca-sandbox-launcher /usr/local/bin/rorca-sandbox-launcher
+
+# Copy PostgreSQL migrations and exact immutable Wave 2 prerequisite bytes.
+COPY backend/src/db/pg-migrations/ dist/db/pg-migrations/
+COPY docs/implementation/evidence/ror24-adr-0001-v1/ ./docs/implementation/evidence/ror24-adr-0001-v1/
+
+ENV DATABASE_URL=postgres://rorca:rorca@db:5432/rorca
+ENV NODE_ENV=production
+ENV RORCA_AUTONOMOUS_ISOLATION=linux-bwrap
+ENV RORCA_BWRAP_BIN=/usr/local/bin/rorca-sandbox-launcher
+ENV RORCA_AUTONOMOUS_MODEL_EGRESS_HOSTS=api.anthropic.com,api.openai.com,openrouter.ai,generativelanguage.googleapis.com
+ENV PORT=3030
+
+EXPOSE 3030
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:3030/api/health || exit 1
+
+CMD ["node", "dist/server.js"]

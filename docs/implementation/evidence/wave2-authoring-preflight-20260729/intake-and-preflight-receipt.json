@@ -1,0 +1,128 @@
+{
+  "schemaVersion": "rorca.wave2-authoring-preflight-evidence.v1",
+  "recordedAt": "2026-07-29",
+  "implementationSourceSha": "978a3035444532cb2b817d26c8ae0faaf89e04e3",
+  "sourceGate": {
+    "decisionPath": "source-gate-decision.json",
+    "decisionSha256": "8daa6b150c2c311be64b585ad985d826d103bf54cd3338048458ef26028d63f1",
+    "decision": "accepted",
+    "gateFor": "ROR-23",
+    "implementationAuthority": "isolated_source_only",
+    "executionAuthority": "none",
+    "mergeAuthority": "none",
+    "deploymentAuthority": "none"
+  },
+  "isolatedService": {
+    "workspaceId": "wave2pf2026072918064435d26cworkspace",
+    "workspacePath": "/private/tmp/rorca-wave2-integration-20260729",
+    "loopbackPort": 3347,
+    "databasePort": 5450,
+    "database": "rorca_wave2pf2026072918064435d26c_test",
+    "owner": "wave2pf2026072918064435d26cowner",
+    "postgres": "16.13",
+    "extensions": {
+      "vector": "0.8.0",
+      "age": "1.5.0",
+      "pgcrypto": "1.3"
+    },
+    "ownerCapabilities": {
+      "login": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false
+    },
+    "canonicalMigrations": 248,
+    "migrationHead": "20260729130000",
+    "onlyRegisteredWorkspace": true,
+    "databaseAttestationPath": "database-attestation.txt",
+    "databaseAttestationSha256": "e5165b27e09ee5dd53ec04fd06cec8c1da51f3366b6331b5bd64a125a5cfa6d9",
+    "startupObservation": "The first migration pass exposed the missing local authenticated NOLOGIN prerequisite role and stopped at that exact failure. The invocation-owned service was stopped, the bounded role was created with no login/privileges, and the same fresh database resumed to all 248 canonical migrations before preflight. No preflight WAL existed before migration completion."
+  },
+  "wave1": {
+    "exactSourceSha": "38d26ee944f0fd80904e79021100d5023b70f170",
+    "pureRuns": {
+      "count": 2,
+      "byteEquivalentCanonicalResponses": true,
+      "responseSha256": "f8aeb6fe0774b83f9589d9f844005d37c6dcd108892e95c512039799da71e40c",
+      "state": "accepted",
+      "draftMutationCount": 0,
+      "acceptedPlanHash": "sha256:01b17b5809c5d9b21121b5d83a8cec6c00df595558cb40aa177a1b28749d4957",
+      "acceptedPreflightHash": "sha256:211096453a2cb870da78d445d96622740e4e7fbe48255c136f63d5107c9243d8"
+    },
+    "canonicalService": {
+      "requestPath": "wave1-request.json",
+      "requestSha256": "020fcbba64242fc2a26726e1759932c83534b84a1daec53cc3c89673eb75fe74",
+      "responsePath": "wave1-response.json",
+      "responseSha256": "1bc4bef6fd2b573767039d993648289962281ecaf17e0132b893ff85895adf8a",
+      "walPreflightReceiptId": 3,
+      "state": "accepted",
+      "confirmationRequired": true,
+      "authoritativePersistenceAllowed": false,
+      "executionAuthority": "none",
+      "confirmationTargetHash": "sha256:e17329c23d76f77b93edaaafc04d0abd26f48f52d4d4ac9b12d39380f97015e9"
+    },
+    "supersededObservation": {
+      "walPreflightReceiptId": 2,
+      "reason": "The otherwise accepted request used the inaccurate source-context version label wave2-integrated-context-1. It was not confirmed or persisted and was replaced by exact Wave 1 context label evidence at WAL 3."
+    }
+  },
+  "wave2": {
+    "specStories": 12,
+    "specCriteria": 71,
+    "everyStoryPasses": false,
+    "pureRuns": {
+      "count": 2,
+      "byteEquivalentCanonicalResponses": true,
+      "responseSha256": "5ade1f2e8623bbd744711e469c9760626fd876089c0c5d9ca9399173a7883258",
+      "state": "accepted",
+      "draftMutationCount": 0,
+      "acceptedPlanHash": "sha256:b074b5d0150cf2a3debe1ae807384c25ff48aca02b8a549bedc24dbf21cd208a",
+      "acceptedPreflightHash": "sha256:d127a35b84218a8fa2e63f0479377b80c504b0378633334fa9ab200627ead613"
+    },
+    "canonicalService": {
+      "requestPath": "wave2-request.json",
+      "requestSha256": "3aa5b000b7ef984878ba5dece52f7bb09704f87e15d601c119df38474005fe36",
+      "responsePath": "wave2-response.json",
+      "responseSha256": "11a00abc3b3e3b3f66bd3f1e667021b2e93546ecfeef3be82e07df8535afaac6",
+      "walPreflightReceiptId": 1,
+      "state": "accepted",
+      "confirmationRequired": true,
+      "authoritativePersistenceAllowed": false,
+      "executionAuthority": "none",
+      "confirmationTargetHash": "sha256:882efba9d23554c0c2d279278939d7cfd7bdefae4fa4d0815d4f64681fcd224b"
+    }
+  },
+  "postHashHumanAuthority": {
+    "confirmationReceiptId": null,
+    "persistenceReceiptId": null,
+    "persistenceRequestHash": null,
+    "approvalTarget": null,
+    "approvalReceiptId": null,
+    "reason": "Both exact plans are confirmation-required. The user's implementation instruction authorizes deterministic preflight and isolated source implementation but is not a signed post-hash provider-human confirmation. No confirmation, persistence, or approval call was made."
+  },
+  "authorityState": {
+    "storiesMutated": false,
+    "passesMutated": false,
+    "specPersisted": false,
+    "specApproved": false,
+    "runTriggered": false,
+    "providerCalled": false,
+    "mergePerformed": false,
+    "deploymentPerformed": false,
+    "protectedRunsAccessed": false
+  },
+  "cleanup": {
+    "path": "cleanup.txt",
+    "sha256": "9ee80ba5c5242245185ebdc9b7966cc008b1b72fb9787198ccd5e1fcf6eff4dd",
+    "serviceAlive": false,
+    "appListenerCount": 0,
+    "postgresListenerCount": 0,
+    "stateExists": false,
+    "socketExists": false,
+    "homeExists": false,
+    "credentialFileCount": 0,
+    "prunePerformed": false
+  }
+}

@@ -1,0 +1,14 @@
+<!doctype html>
+<title>hostile browser fixture</title>
+<a id="external" href="file:///etc/passwd">external protocol</a>
+<a id="popup" target="_blank" href="https://untrusted.invalid/popup">popup</a>
+<iframe src="https://untrusted.invalid/frame"></iframe>
+<form action="https://untrusted.invalid/form" method="post"><button>submit</button></form>
+<a download href="data:text/plain,stolen">download</a>
+<script>
+navigator.serviceWorker?.register('/service-worker.js');
+new WebSocket('ws://127.0.0.1:9');
+new RTCPeerConnection();
+fetch('https://untrusted.invalid/subresource');
+window.open('devtools://devtools/bundled/inspector.html');
+</script>

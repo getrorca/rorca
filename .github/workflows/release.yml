@@ -1,0 +1,427 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'backend/package.json'
+      - 'backend/package-lock.json'
+      - 'cli.js'
+      - 'bin/**'
+      - 'scripts/verify-pack.sh'
+      - 'scripts/build-binaries.sh'
+      - 'scripts/_compile-target.ts'
+      - 'scripts/_generate-embedded-assets.ts'
+      - 'vite.config.*'
+      - 'tsconfig.json'
+      - 'backend/tsconfig.json'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-pack:
+    name: Verify Pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Verify pack
+        run: ./scripts/verify-pack.sh
+
+  # ── Quality gates (must pass before any binary build) ──
+  validate:
+    name: Validate
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: verify-pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      # Step 2: Install dependencies
+      - name: Install dependencies
+        run: npm ci && cd backend && npm ci
+
+      # Step 3: Typecheck both frontend and backend
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+
+      - name: Typecheck backend
+        run: cd backend && npx tsc --noEmit
+
+      # Step 4: Run backend tests
+      - name: Run tests
+        run: cd backend && npm test
+
+      # Step 5: Build frontend
+      - name: Build frontend
+        run: npm run build
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+          retention-days: 1
+
+  # ── Step 6: Matrix build — 4 parallel jobs producing platform binaries ──
+  build:
+    name: Building ${{ matrix.name }}...
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: bun-darwin-arm64
+            binary: rorca-darwin-arm64
+            name: darwin-arm64
+          - target: bun-darwin-x64
+            binary: rorca-darwin-x64
+            name: darwin-x64
+          - target: bun-linux-x64
+            binary: rorca-linux-x64
+            name: linux-x64
+          - target: bun-windows-x64
+            binary: rorca-win32-x64.exe
+            name: win32-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci && cd backend && npm ci
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+
+      # TODO: Add Apple Developer Program enrollment for proper code signing and notarization
+      # See: https://developer.apple.com/help/app-store-connect/reference/notarization-api
+      # This would allow us to sign binaries with an Apple certificate, eliminating the Gatekeeper
+      # quarantine warning and improving user experience on macOS.
+      - name: Building ${{ matrix.name }}...
+        env:
+          RORCA_VERSION: ${{ github.ref_name }}
+        run: bash scripts/build-binaries.sh --target ${{ matrix.target }} --output build/${{ matrix.binary }}
+
+      - name: Uploading assets...
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.binary }}
+          path: build/${{ matrix.binary }}
+          retention-days: 1
+
+  # ── Step 9: Smoke test all platform binaries (matrix) ──
+  smoke-test:
+    name: Smoke test (${{ matrix.name }})
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: build
+    timeout-minutes: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-arm64
+            os: macos-latest
+            binary: rorca-darwin-arm64
+            artifact: binary-rorca-darwin-arm64
+            exe: rorca-darwin-arm64
+            windows: false
+          - name: darwin-x64
+            os: macos-latest
+            binary: rorca-darwin-x64
+            artifact: binary-rorca-darwin-x64
+            exe: rorca-darwin-x64
+            windows: false
+          - name: linux-x64
+            os: ubuntu-latest
+            binary: rorca-linux-x64
+            artifact: binary-rorca-linux-x64
+            exe: rorca-linux-x64
+            windows: false
+          - name: win32-x64
+            os: windows-latest
+            binary: rorca-win32-x64.exe
+            artifact: binary-rorca-win32-x64.exe
+            exe: rorca-win32-x64.exe
+            windows: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download ${{ matrix.name }} binary
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ./
+        continue-on-error: true
+
+      - name: Check download success (Unix)
+        if: ${{ !matrix.windows && steps.download.outcome == 'failure' }}
+        run: |
+          echo "Failed to download binary artifact for ${{ matrix.name }}"
+          exit 1
+
+      - name: Check download success (Windows)
+        if: ${{ matrix.windows && steps.download.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          Write-Error "Failed to download binary artifact for ${{ matrix.name }}"
+          exit 1
+
+      - name: Make executable (Unix)
+        if: ${{ !matrix.windows }}
+        run: chmod +x ./${{ matrix.exe }}
+
+      - name: Verify executable (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          ./${{ matrix.exe }} --version 2>/dev/null
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 126 ]; then
+            echo "Binary not executable — check build permissions"
+            exit 1
+          elif [ $EXIT_CODE -ne 0 ]; then
+            echo "Binary not executable — check build permissions"
+            exit 1
+          fi
+
+      - name: Test --version (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          VERSION_OUTPUT=$(./${{ matrix.exe }} --version)
+          echo "Version output: $VERSION_OUTPUT"
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          if echo "$VERSION_OUTPUT" | grep -qF "$VERSION"; then
+            echo "PASS: version output contains $VERSION"
+          else
+            echo "FAIL: expected '$VERSION' in version output, got '$VERSION_OUTPUT'"
+            exit 1
+          fi
+
+      - name: Test --help (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          HELP_OUTPUT=$(./${{ matrix.exe }} --help)
+          echo "$HELP_OUTPUT"
+          for cmd in start version help; do
+            if echo "$HELP_OUTPUT" | grep -q "$cmd"; then
+              echo "PASS: --help lists '$cmd'"
+            else
+              echo "FAIL: --help does not list '$cmd'"
+              exit 1
+            fi
+          done
+
+      - name: Test start --dry-run (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          DRY_OUTPUT=$(./${{ matrix.exe }} start --dry-run --no-postgres 2>&1 || true)
+          echo "$DRY_OUTPUT"
+          if echo "$DRY_OUTPUT" | grep -q "dry-run complete"; then
+            echo "PASS: start --dry-run completed successfully"
+          else
+            echo "FAIL: start --dry-run did not print expected output"
+            exit 1
+          fi
+        env:
+          DATABASE_URL: postgres://rorca:rorca@localhost:5432/rorca
+
+      - name: Assert binary size (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          if [ "$(uname)" = "Darwin" ]; then
+            SIZE=$(stat -f%z ./${{ matrix.exe }})
+          else
+            SIZE=$(stat -c%s ./${{ matrix.exe }})
+          fi
+          SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+          echo "Binary size: ${SIZE_MB}MB"
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "Binary too large: ${SIZE_MB}MB > 100MB limit"
+            exit 1
+          fi
+          echo "PASS: binary size ${SIZE_MB}MB is within 100MB limit"
+
+      - name: Verify executable (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $result = & ".\${{ matrix.exe }}" --version 2>&1
+          if ($LASTEXITCODE -eq 126 -or ($null -eq $result -and $LASTEXITCODE -ne 0)) {
+            Write-Error "Binary not executable — check build permissions"
+            exit 1
+          }
+
+      - name: Test --version (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $versionOutput = & ".\${{ matrix.exe }}" --version 2>&1
+          Write-Output "Version output: $versionOutput"
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          if ($versionOutput -like "*$version*") {
+            Write-Output "PASS: version output contains $version"
+          } else {
+            Write-Error "FAIL: expected '$version' in version output, got '$versionOutput'"
+            exit 1
+          }
+
+      - name: Test --help (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $helpOutput = & ".\${{ matrix.exe }}" --help 2>&1
+          Write-Output $helpOutput
+          $commands = @("start", "version", "help")
+          foreach ($cmd in $commands) {
+            if ($helpOutput -like "*$cmd*") {
+              Write-Output "PASS: --help lists '$cmd'"
+            } else {
+              Write-Error "FAIL: --help does not list '$cmd'"
+              exit 1
+            }
+          }
+
+      - name: Test start --dry-run (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        env:
+          DATABASE_URL: postgres://rorca:rorca@localhost:5432/rorca
+        run: |
+          $dryOutput = & ".\${{ matrix.exe }}" start --dry-run --no-postgres 2>&1
+          Write-Output $dryOutput
+          if ($dryOutput -like "*dry-run complete*") {
+            Write-Output "PASS: start --dry-run completed successfully"
+          } else {
+            Write-Error "FAIL: start --dry-run did not print expected output"
+            exit 1
+          }
+
+      - name: Assert binary size (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $sizeMB = [math]::Round((Get-Item ".\${{ matrix.exe }}").Length / 1MB, 2)
+          $sizeBytes = (Get-Item ".\${{ matrix.exe }}").Length
+          Write-Output "Binary size: ${sizeMB}MB"
+          if ($sizeBytes -gt 104857600) {
+            Write-Error "Binary too large: ${sizeMB}MB > 100MB limit"
+            exit 1
+          }
+          Write-Output "PASS: binary size ${sizeMB}MB is within 100MB limit"
+
+  # ── Steps 7-8: Generate release notes + create release + upload assets ──
+  release:
+    name: Create Release
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: [build, smoke-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Generate CHANGELOG.md
+        run: npx tsx scripts/generate-changelog.ts
+
+      - name: Commit and push CHANGELOG.md
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md
+          git commit -m "chore: update CHANGELOG.md for ${{ github.ref_name }}" || echo "No changes to CHANGELOG.md"
+          git push
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -la artifacts/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Step 7: Generate release notes from git log since last tag
+      - name: Generate release notes
+        id: notes
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          # Find the previous tag; fall back to initial commit if this is the first release
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          echo "Generating notes from ${PREV_TAG}..${CURRENT_TAG}"
+          {
+            echo "## What's Changed"
+            echo ""
+            git log --oneline "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)"
+            echo ""
+            echo ""
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${CURRENT_TAG}"
+          } > release-notes.txt
+          cat release-notes.txt
+
+      # Step 8: Create GitHub Release and upload all 4 binaries as release assets
+      - name: Uploading assets...
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Rorca ${{ github.ref_name }}" \
+            --notes-file release-notes.txt \
+            artifacts/rorca-darwin-arm64 \
+            artifacts/rorca-darwin-x64 \
+            artifacts/rorca-linux-x64 \
+            artifacts/rorca-win32-x64.exe \
+            LICENSE

@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "delivery": {
+      "contentHash": "sha256:7cebe01e78c01f11c4209b043c8e028756dc208f4878ef66a3a6fbda3fe1a3ed",
+      "path": "forge/export-kits/ssdlc-universal-assurance/bb99cd5219199d1933b80f97d01373226ccfa1272cd3731c29d6d2233a98a522/PLAN.md"
+    },
+    "design": {
+      "contentHash": "sha256:299645e2b7b68173c87f681440096d44b07ac33539c4424884d0a423ba5c1b77",
+      "path": "forge/export-kits/ssdlc-universal-assurance/bb99cd5219199d1933b80f97d01373226ccfa1272cd3731c29d6d2233a98a522/SDD.md"
+    },
+    "requirements": {
+      "contentHash": "sha256:671ee96728e7dcaea8f5804bc54b3e32847fa3308567a290e5a9af5479fe3e73",
+      "path": "forge/export-kits/ssdlc-universal-assurance/bb99cd5219199d1933b80f97d01373226ccfa1272cd3731c29d6d2233a98a522/PRD.md"
+    },
+    "spec": {
+      "contentHash": "sha256:faca0ca591657e2e1f3e88ce25403469aa6b46b146afc02878ecb8e624140fd5",
+      "path": "forge/export-kits/ssdlc-universal-assurance/bb99cd5219199d1933b80f97d01373226ccfa1272cd3731c29d6d2233a98a522/spec.json"
+    }
+  },
+  "kitPath": "forge/export-kits/ssdlc-universal-assurance/bb99cd5219199d1933b80f97d01373226ccfa1272cd3731c29d6d2233a98a522",
+  "manifestHash": "sha256:bb99cd5219199d1933b80f97d01373226ccfa1272cd3731c29d6d2233a98a522",
+  "schemaVersion": "rorca.export-kit-binding.v1",
+  "specMaterialHash": "sha256:faca0ca591657e2e1f3e88ce25403469aa6b46b146afc02878ecb8e624140fd5"
+}

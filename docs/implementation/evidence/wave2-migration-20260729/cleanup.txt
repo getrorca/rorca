@@ -1,0 +1,6 @@
+service_alive=false
+app_listener_count=0
+postgres_listener_count=0
+state_exists=false
+socket_exists=false
+no_prune=true
