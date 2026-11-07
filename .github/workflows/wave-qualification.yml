@@ -4,8 +4,13 @@
 name: Wave Parallel Deterministic Safety Regression
 
 on:
-  pull_request:
-    branches: [main]
+  # This is a long-running deterministic safety qualification suite (two 45
+  # minute jobs on Linux and macOS hosts). It is release-maintainer tooling, not
+  # a contributor gate, so it runs nightly and on demand instead of on every
+  # pull request; contributor PRs are gated by CI, the contract check, secret
+  # scanning, and the license/boundary check.
+  schedule:
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -83,6 +88,37 @@ jobs:
           SQL
           # Install as the provisioning superuser; Jest keeps the test login non-privileged.
           PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d "$DATABASE" -c 'CREATE EXTENSION IF NOT EXISTS vector'
+          # Wave 2 migrations refuse to run unless the split principals exist as
+          # distinct non-privileged logins; create them alongside the isolated
+          # qualification role.
+          MIGRATION_PASSWORD="$(openssl rand -hex 12)"
+          RUNTIME_PASSWORD="$(openssl rand -hex 12)"
+          WRITER_PASSWORD="$(openssl rand -hex 12)"
+          echo "::add-mask::${MIGRATION_PASSWORD}"
+          echo "::add-mask::${RUNTIME_PASSWORD}"
+          echo "::add-mask::${WRITER_PASSWORD}"
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d "$DATABASE" \
+            -v m_user="rorca_migrator_q" -v m_pw="$MIGRATION_PASSWORD" \
+            -v r_user="rorca_runtime_q" -v r_pw="$RUNTIME_PASSWORD" \
+            -v w_user="rorca_canonical_writer_q" -v w_pw="$WRITER_PASSWORD" <<'SQL'
+          SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'m_user', :'m_pw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:'m_user') \gexec
+          SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'m_user', :'m_pw') \gexec
+          SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'r_user', :'r_pw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:'r_user') \gexec
+          SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'r_user', :'r_pw') \gexec
+          SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'w_user', :'w_pw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:'w_user') \gexec
+          SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'w_user', :'w_pw') \gexec
+          SQL
+          {
+            echo "RORCA_MIGRATION_DATABASE_USER=rorca_migrator_q"
+            echo "RORCA_MIGRATION_DATABASE_PASSWORD=${MIGRATION_PASSWORD}"
+            echo "RORCA_RUNTIME_DATABASE_USER=rorca_runtime_q"
+            echo "RORCA_RUNTIME_DATABASE_PASSWORD=${RUNTIME_PASSWORD}"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_USER=rorca_canonical_writer_q"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_PASSWORD=${WRITER_PASSWORD}"
+          } >> "$GITHUB_ENV"
           URL="postgresql://${ROLE}:${PASSWORD}@127.0.0.1:5432/${DATABASE}?application_name=rorca-qualification%3A${RUN_ID}"
           IDENTITY_HASH="sha256:$(printf '%s' "${DATABASE}:${ROLE}:${MARKER}" | shasum -a 256 | awk '{print $1}')"
           {
@@ -240,6 +276,35 @@ jobs:
           SQL
           # Install as the local provisioning superuser; Jest uses only the owner role.
           "$PGBIN/psql" -d "$DATABASE" -c 'CREATE EXTENSION IF NOT EXISTS vector'
+          # Wave 2 migrations require distinct non-privileged principals.
+          MIGRATION_PASSWORD="$(openssl rand -hex 12)"
+          RUNTIME_PASSWORD="$(openssl rand -hex 12)"
+          WRITER_PASSWORD="$(openssl rand -hex 12)"
+          echo "::add-mask::${MIGRATION_PASSWORD}"
+          echo "::add-mask::${RUNTIME_PASSWORD}"
+          echo "::add-mask::${WRITER_PASSWORD}"
+          "$PGBIN/psql" -d "$DATABASE" \
+            -v m_user="rorca_migrator_q" -v m_pw="$MIGRATION_PASSWORD" \
+            -v r_user="rorca_runtime_q" -v r_pw="$RUNTIME_PASSWORD" \
+            -v w_user="rorca_canonical_writer_q" -v w_pw="$WRITER_PASSWORD" <<'SQL'
+          SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'m_user', :'m_pw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:'m_user') \gexec
+          SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'m_user', :'m_pw') \gexec
+          SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'r_user', :'r_pw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:'r_user') \gexec
+          SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'r_user', :'r_pw') \gexec
+          SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'w_user', :'w_pw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:'w_user') \gexec
+          SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'w_user', :'w_pw') \gexec
+          SQL
+          {
+            echo "RORCA_MIGRATION_DATABASE_USER=rorca_migrator_q"
+            echo "RORCA_MIGRATION_DATABASE_PASSWORD=${MIGRATION_PASSWORD}"
+            echo "RORCA_RUNTIME_DATABASE_USER=rorca_runtime_q"
+            echo "RORCA_RUNTIME_DATABASE_PASSWORD=${RUNTIME_PASSWORD}"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_USER=rorca_canonical_writer_q"
+            echo "RORCA_CANONICAL_WRITER_DATABASE_PASSWORD=${WRITER_PASSWORD}"
+          } >> "$GITHUB_ENV"
           URL="postgresql://${ROLE}:${PASSWORD}@127.0.0.1:5432/${DATABASE}?application_name=rorca-qualification%3A${RUN_ID}"
           IDENTITY_HASH="sha256:$(printf '%s' "${DATABASE}:${ROLE}:${MARKER}" | shasum -a 256 | awk '{print $1}')"
           {
