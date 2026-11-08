@@ -41,6 +41,7 @@ const SUPPORTED_TARGETS: PlatformTarget[] = [
   'darwin-arm64',
   'darwin-x64',
   'linux-x64',
+  'linux-arm64',
   'win32-x64',
 ];
 
@@ -159,6 +160,81 @@ function fetchWithRedirects(
 
 // ─── PostgresManager ────────────────────────────────────────────────────────
 
+// ─── Local install discovery ────────────────────────────────────────────────
+
+/**
+ * Locate a usable PostgreSQL 16 install already present on the machine.
+ *
+ * The managed download is the preferred source because it ships pgvector and
+ * AGE, but until those archives are published a bare `rorca start` must not
+ * dead-end. Falling back to a local server keeps first run working for anyone
+ * who already has PostgreSQL, and the extension check still fails loudly when
+ * pgvector is missing.
+ */
+function pgMajorVersion(binDir: string): number | null {
+  const initdb = path.join(binDir, process.platform === 'win32' ? 'initdb.exe' : 'initdb');
+  try {
+    const raw = execSync(`"${initdb}" --version`, { encoding: 'utf-8', timeout: 5_000, stdio: 'pipe' });
+    const match = raw.match(/(\d+)(?:\.\d+)?/);
+    return match ? parseInt(match[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveLocalPostgresBinDir(): string | null {
+  const candidates: string[] = [];
+
+  // Whatever `initdb` is on PATH is the most intentional signal, but PATH often
+  // resolves an older keg (e.g. postgresql@14) — versions are checked below.
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    candidates.push(dir);
+  }
+
+  // Homebrew (Apple Silicon + Intel), Postgres.app, Linux distro layouts.
+  candidates.push(
+    '/opt/homebrew/opt/postgresql@16/bin',
+    '/usr/local/opt/postgresql@16/bin',
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/Applications/Postgres.app/Contents/Versions/latest/bin',
+    '/usr/lib/postgresql/16/bin',
+    '/usr/pgsql-16/bin',
+    '/Library/PostgreSQL/16/bin'
+  );
+
+  const seen = new Set<string>();
+  let fallback: string | null = null;
+
+  for (const dir of candidates) {
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+
+    const initdb = path.join(dir, process.platform === 'win32' ? 'initdb.exe' : 'initdb');
+    const pgCtl = path.join(dir, process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl');
+    try {
+      fs.accessSync(initdb, fs.constants.X_OK);
+      fs.accessSync(pgCtl, fs.constants.X_OK);
+    } catch {
+      continue;
+    }
+
+    const major = pgMajorVersion(dir);
+    if (major !== null && major >= 16) return dir;
+    // Remember anything usable, but keep looking for a 16+ install: the
+    // canonical migrations need pgvector and AGE, which older kegs lack.
+    if (fallback === null && major !== null) fallback = dir;
+  }
+
+  if (fallback) {
+    logger.warn(
+      `[postgres] no PostgreSQL 16+ install found; falling back to ${fallback} (major ${pgMajorVersion(fallback)}). ` +
+        'pgvector and AGE may be missing — install PostgreSQL 16 for full graph support.'
+    );
+  }
+  return fallback;
+}
+
 export class PostgresManager {
   private readonly cacheDir: string;
   private readonly versionFile: string;
@@ -167,6 +243,8 @@ export class PostgresManager {
   readonly dataDir: string;
   readonly port: number;
   readonly logFile: string;
+  /** When set, use this install's client/server binaries instead of the cache. */
+  private binDirOverride: string | null = null;
 
   constructor(opts?: { downloadBaseUrl?: string; cacheDir?: string; dataDir?: string; port?: number }) {
     this.cacheDir = opts?.cacheDir ?? getCacheDir();
@@ -183,39 +261,59 @@ export class PostgresManager {
     this.logFile = getLogFile();
   }
 
+  /** Directory holding the client/server binaries in use. */
+  getBinDir(): string {
+    return this.binDirOverride ?? path.join(this.cacheDir, 'bin');
+  }
+
+  /** Use an already-installed PostgreSQL instead of the managed download. */
+  useLocalBinaries(binDir: string): void {
+    this.binDirOverride = binDir;
+  }
+
+  /** True when this instance is running against a local, non-managed install. */
+  isUsingLocalBinaries(): boolean {
+    return this.binDirOverride !== null;
+  }
+
   /** Path to the postgres binary inside the cache. */
   getBinPath(): string {
-    return path.join(this.cacheDir, 'bin', getBinaryName());
+    return this.binDirOverride ? path.join(this.binDirOverride, getBinaryName()) : path.join(this.cacheDir, 'bin', getBinaryName());
   }
 
   /** Path to the pg_ctl binary. */
   getPgCtlPath(): string {
     const name = process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl';
-    return path.join(this.cacheDir, 'bin', name);
+    return path.join(this.getBinDir(), name);
   }
 
   /** Path to the initdb binary. */
   getInitdbPath(): string {
     const name = process.platform === 'win32' ? 'initdb.exe' : 'initdb';
-    return path.join(this.cacheDir, 'bin', name);
+    return path.join(this.getBinDir(), name);
   }
 
   /** Path to the pg_isready binary. */
   getPgIsReadyPath(): string {
     const name = process.platform === 'win32' ? 'pg_isready.exe' : 'pg_isready';
-    return path.join(this.cacheDir, 'bin', name);
+    return path.join(this.getBinDir(), name);
   }
 
   /** Path to the createdb binary. */
   getCreatedbPath(): string {
     const name = process.platform === 'win32' ? 'createdb.exe' : 'createdb';
-    return path.join(this.cacheDir, 'bin', name);
+    return path.join(this.getBinDir(), name);
   }
 
   /** Path to the psql binary. */
   getPsqlPath(): string {
     const name = process.platform === 'win32' ? 'psql.exe' : 'psql';
-    return path.join(this.cacheDir, 'bin', name);
+    return path.join(this.getBinDir(), name);
+  }
+
+  /** Path to the unix socket directory owned by this process. */
+  getSocketDir(): string {
+    return path.join(path.dirname(this.dataDir), 'run');
   }
 
   /** Path to the PID file inside the data directory. */
@@ -336,9 +434,29 @@ export class PostgresManager {
     }
   }
 
-  /** Ensure postgres is available — download if needed. Convenience wrapper. */
+  /**
+   * Ensure postgres is available. Prefers the managed download (it ships
+   * pgvector + AGE); when that archive is unavailable, falls back to an
+   * already-installed PostgreSQL so first run still succeeds.
+   */
   async ensureInstalled(): Promise<string> {
-    return this.download();
+    try {
+      return await this.download();
+    } catch (err) {
+      const localBinDir = resolveLocalPostgresBinDir();
+      if (!localBinDir) throw err;
+
+      this.useLocalBinaries(localBinDir);
+      const version = this.getVersion();
+      logger.warn(
+        `[postgres] managed download unavailable (${err instanceof Error ? err.message : String(err)}); ` +
+          `using local PostgreSQL ${version ?? '(unknown)'} at ${localBinDir}`
+      );
+      if (!version) {
+        throw new Error(`local PostgreSQL at ${localBinDir} is not runnable`);
+      }
+      return this.getBinPath();
+    }
   }
 
   // ─── Lifecycle (DIST-002) ───────────────────────────────────────────────
@@ -370,8 +488,36 @@ export class PostgresManager {
       );
       logger.info('[postgres] Cluster initialized successfully');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`initdb failed: ${msg}`);
+      const raw = err instanceof Error ? err.message : String(err);
+
+      // macOS ships a small System V shared-memory budget (kern.sysv.shmall).
+      // When another PostgreSQL instance already owns most of it, cluster
+      // creation dies inside initdb with a bare shared-memory FATAL. Surface the
+      // actual remedy instead of an initdb dump.
+      if (/could not create shared memory segment|shmget/i.test(raw)) {
+        const shmall = (() => {
+          try {
+            return execSync('sysctl -n kern.sysv.shmall', { encoding: 'utf-8', timeout: 5_000 }).trim();
+          } catch {
+            return null;
+          }
+        })();
+
+        throw new Error(
+          'initdb could not allocate shared memory, so the local Rorca database could not be created.\n' +
+            (shmall ? `  kern.sysv.shmall is ${shmall} pages on this machine; another PostgreSQL instance has consumed it.\n` : '') +
+            '  Fix one of these ways:\n' +
+            '    1. Raise the limit, then run `rorca start` again:\n' +
+            '         sudo sysctl -w kern.sysv.shmall=65536 kern.sysv.shmmni=256\n' +
+            '    2. Stop the other PostgreSQL instance that owns the shared memory.\n' +
+            '    3. Point Rorca at an existing database instead:\n' +
+            '         DATABASE_URL=postgres://user:pass@host:5432/rorca rorca start\n' +
+            '         (or `npm run db:up` for the bundled Docker database)\n' +
+            `  Raw initdb error: ${raw}`
+        );
+      }
+
+      throw new Error(`initdb failed: ${raw}`);
     }
   }
 
@@ -466,11 +612,16 @@ export class PostgresManager {
     }
 
     const pgCtl = this.getPgCtlPath();
+    // Debian/Ubuntu builds default their socket to /var/run/postgresql, which is
+    // owned by the postgres system user. Point the socket at a directory this
+    // process owns so a distribution-installed PostgreSQL can start unprivileged.
+    const socketDir = this.getSocketDir();
+    fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
     logger.info(`[postgres] Starting server on port ${this.port}...`);
 
     try {
       execSync(
-        `"${pgCtl}" start -D "${this.dataDir}" -l "${this.logFile}" -o "-p ${this.port}" -w`,
+        `"${pgCtl}" start -D "${this.dataDir}" -l "${this.logFile}" -o "-p ${this.port} -k ${socketDir}" -w`,
         {
           encoding: 'utf-8',
           timeout: 30_000,

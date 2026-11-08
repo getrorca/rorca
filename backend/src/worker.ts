@@ -5334,3 +5334,13 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+/**
+ * Explicit entrypoint for packaged binaries: a compiled binary's entry module is
+ * the CLI, so `require.main === module` is false here and the auto-start above
+ * never fires. `rorca worker` calls this instead.
+ */
+export async function startWorker(): Promise<void> {
+  installWorkerProcessHandlers();
+  await start();
+}

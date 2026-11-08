@@ -33,6 +33,13 @@ const MIGRATIONS_ADVISORY_LOCK_KEY = 8_244_250_520_000;
 // ── Connection ────────────────────────────────────────────────────────────
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost:5432/rorca';
 
+function prerequisiteEvidenceRoot(): string {
+  // Compiled installs carry the evidence inside the binary and extract it; a
+  // source checkout resolves it relative to this module.
+  const override = process.env.RORCA_EVIDENCE_ROOT?.trim();
+  return override || path.resolve(__dirname, '../../..');
+}
+
 function poolOptions(connectionString: string): ConstructorParameters<typeof Pool>[0] {
   assertTestDatabaseAccess(connectionString);
   const testWorkspace = process.env.RORCA_TEST_DATABASE_WORKSPACE_SCOPE;
@@ -153,6 +160,8 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
 
     // Resolve migrations directory without assuming CommonJS __dirname.
     const migrationDirCandidates = [
+      // A compiled binary extracts embedded migrations outside the bundle.
+      process.env.RORCA_MIGRATIONS_DIR?.trim() ?? '',
       typeof __dirname !== 'undefined' ? path.join(__dirname, 'pg-migrations') : '',
       typeof __dirname !== 'undefined' ? path.join(__dirname, '..', '..', 'src', 'db', 'pg-migrations') : '',
       path.join(process.cwd(), 'src', 'db', 'pg-migrations'),
@@ -315,7 +324,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       // Wave 2 DDL transaction. A failed local/source verification creates no
       // Wave 2 schema object or migration-ledger marker.
       if (file.startsWith('20260729131000_wave2_')) {
-        verifyLocalWave2Prerequisites(path.resolve(__dirname, '../../..'));
+        verifyLocalWave2Prerequisites(prerequisiteEvidenceRoot());
       }
 
       const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
@@ -329,7 +338,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         await client.query("SET LOCAL rorca.migration_mode TO 'on'");
         await client.query(sql);
         if (file.startsWith('20260729141000_wave2_')) {
-          const decision = verifyLocalWave2Prerequisites(path.resolve(__dirname, '../../..'));
+          const decision = verifyLocalWave2Prerequisites(prerequisiteEvidenceRoot());
           const receiptHash = governedHash('rorca.wave2-prerequisite-receipt.v1', decision as never);
           await client.query(`INSERT INTO wave2_prerequisite_receipts
             (receipt_hash,gate_version,gate_for,ror24_source_sha,ror24_artifact_sha256,acceptance_comment_id,

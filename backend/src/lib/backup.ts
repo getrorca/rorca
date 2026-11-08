@@ -7,13 +7,21 @@
 
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_BACKUP_DIR = path.join(__dirname, '..', '..', 'backups');
+// A source checkout keeps backups beside the repository. A compiled binary has
+// no repository — `__dirname` there is the build machine's source path — so the
+// durable location is the Rorca home directory instead.
+const DEFAULT_BACKUP_DIR = (() => {
+  const repoRoot = path.join(__dirname, '..', '..');
+  if (fs.existsSync(repoRoot)) return path.join(repoRoot, 'backups');
+  return path.join(os.homedir(), '.rorca', 'backups');
+})();
 const RETENTION_DAYS = 30;
 const DEFAULT_BACKUP_TIMEOUT_MS = 30 * 60 * 1_000;
 const MAX_BACKUP_TIMEOUT_MS = 60 * 60 * 1_000;

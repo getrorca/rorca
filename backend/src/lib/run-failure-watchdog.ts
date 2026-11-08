@@ -27,6 +27,7 @@
  */
 
 import { spawn } from 'child_process';
+import { existsSync } from 'fs';
 import * as path from 'path';
 import { query, queryOne } from '../db/index';
 import { logger } from './logger';
@@ -135,9 +136,16 @@ async function detectAndRestartWorker(opts: RunFailureWatchdogOptions): Promise<
     return;
   }
 
+  // A source checkout restarts the worker through tsx. A packaged binary has no
+  // node_modules or TypeScript sources, so it re-executes itself and uses the
+  // `worker` subcommand instead of silently failing to spawn.
   const tsxBin = path.join(opts.backendRoot, 'node_modules', '.bin', 'tsx');
-  const child = spawn(process.execPath, [tsxBin, 'src/worker.ts'], {
-    cwd: opts.backendRoot,
+  const workerArgs = existsSync(tsxBin) ? [tsxBin, 'src/worker.ts'] : ['worker'];
+  // In a packaged binary `backendRoot` is the build machine's source path, which
+  // does not exist on the user's machine; spawning with that cwd fails ENOENT.
+  const workerCwd = existsSync(opts.backendRoot) ? opts.backendRoot : process.cwd();
+  const child = spawn(process.execPath, workerArgs, {
+    cwd: workerCwd,
     env: process.env,
     detached: true,
     stdio: 'ignore',

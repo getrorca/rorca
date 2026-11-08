@@ -25,6 +25,7 @@ TARGETS=(
   "bun-darwin-arm64:rorca-darwin-arm64"
   "bun-darwin-x64:rorca-darwin-x64"
   "bun-linux-x64:rorca-linux-x64"
+  "bun-linux-arm64:rorca-linux-arm64"
   "bun-windows-x64:rorca-win32-x64.exe"
 )
 
