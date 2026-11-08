@@ -19,7 +19,19 @@ case "$POSTGRES_PORT" in *[!0-9]*|'') echo "POSTGRES_PORT must be numeric" >&2; 
 
 for name in "$POSTGRES_BOOTSTRAP_USER" "$RORCA_MIGRATION_DATABASE_USER" "$RORCA_RUNTIME_DATABASE_USER" "$RORCA_CANONICAL_WRITER_DATABASE_USER"; do
   case "$name" in
-    *[!A-Za-z0-9_]*|'') echo "database role names must be non-empty ASCII identifiers" >&2; exit 64 ;;
+    # A hosted pooler logs in as <role>.<tenant> (Supavisor identifies the tenant
+    # from the username), so the bootstrap *login* may carry one dot-separated
+    # suffix. The roles created below stay plain identifiers.
+    "$POSTGRES_BOOTSTRAP_USER")
+      case "$name" in
+        *[!A-Za-z0-9_.-]*|'') echo "database role names must be non-empty ASCII identifiers" >&2; exit 64 ;;
+      esac
+      case "$name" in *.*.*) echo "bootstrap login may carry at most one pooler tenant suffix" >&2; exit 64 ;; esac
+      continue ;;
+    *)
+      case "$name" in
+        *[!A-Za-z0-9_]*|'') echo "database role names must be non-empty ASCII identifiers" >&2; exit 64 ;;
+      esac ;;
   esac
   case "$name" in authenticated|anon) echo "application principals must not collide with compatibility request roles" >&2; exit 64 ;; esac
 done
@@ -52,25 +64,51 @@ SELECT 'CREATE ROLE authenticated NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NO
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') \gexec
 SELECT 'CREATE ROLE anon NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') \gexec
-ALTER ROLE authenticated NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-ALTER ROLE anon NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+-- Hosted providers (Supabase among them) own these compatibility roles and only
+-- a superuser may alter them; the local Docker image creates them itself. Reassert
+-- the attributes where permitted instead of failing the whole bootstrap.
+DO $$
+DECLARE compat TEXT;
+BEGIN
+  FOREACH compat IN ARRAY ARRAY['authenticated','anon'] LOOP
+    BEGIN
+      EXECUTE format('ALTER ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', compat);
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'leaving provider-managed role % unchanged', compat;
+    END;
+  END LOOP;
+END $$;
 
--- Reassert constraints and rotate only the three application credentials.
-SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
-              :'migration_user', :'migration_password') \gexec
-SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
-              :'runtime_user', :'runtime_password') \gexec
-SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
-              :'writer_user', :'writer_password') \gexec
+-- Rotate the three application credentials. Attributes are set at CREATE above
+-- and asserted at the end of this file; repeating them here needs SUPERUSER on
+-- providers that restrict ALTER ROLE (Supabase rejects even `NOSUPERUSER`), while
+-- a password-only ALTER is permitted there.
+SELECT format('ALTER ROLE %I PASSWORD %L', :'migration_user', :'migration_password') \gexec
+SELECT format('ALTER ROLE %I PASSWORD %L', :'runtime_user', :'runtime_password') \gexec
+SELECT format('ALTER ROLE %I PASSWORD %L', :'writer_user', :'writer_password') \gexec
 
 -- Membership would collapse the split authority boundary or make a request
 -- compatibility role inherit application authority. Revoke every cross-membership.
+-- Hosted providers (Supabase among them) own the compatibility roles: revoking a
+-- membership that involves them needs their superuser, which a project's
+-- `postgres` role is not. Tolerate those failures and rely on the explicit
+-- membership assertion at the end of this file to catch real split-principal
+-- leakage, where a failure must still abort.
+\set ON_ERROR_STOP 0
 SELECT format('REVOKE %I FROM %I', granted.rolname, member.rolname)
 FROM pg_auth_members memberships
 JOIN pg_roles granted ON granted.oid=memberships.roleid
 JOIN pg_roles member ON member.oid=memberships.member
 WHERE granted.rolname IN (:'migration_user',:'runtime_user',:'writer_user','authenticated','anon')
-  AND member.rolname IN (:'migration_user',:'runtime_user',:'writer_user','authenticated','anon') \gexec
+  AND member.rolname IN (:'migration_user',:'runtime_user',:'writer_user','authenticated','anon')
+  AND granted.rolname NOT IN ('authenticated','anon') \gexec
+SELECT format('REVOKE %I FROM %I', granted.rolname, member.rolname)
+FROM pg_auth_members memberships
+JOIN pg_roles granted ON granted.oid=memberships.roleid
+JOIN pg_roles member ON member.oid=memberships.member
+WHERE granted.rolname IN ('authenticated','anon')
+  AND member.rolname IN (:'migration_user',:'runtime_user',:'writer_user') \gexec
+\set ON_ERROR_STOP 1
 
 -- The canonical migrations require pgvector, and the migration owner is
 -- deliberately a non-superuser so it cannot install extensions itself. Create
@@ -115,8 +153,18 @@ FROM pg_extension extension
 JOIN pg_namespace namespace ON namespace.oid=extension.extnamespace
 WHERE extension.extname='pgcrypto' \gexec
 
+-- Handing database ownership to the migration owner needs SET ROLE on it. On a
+-- hosted provider the connection role has CREATEROLE without that ADMIN OPTION,
+-- so treat ownership transfer as best effort and grant the migration owner what
+-- it actually needs (CREATE in public) instead of failing the bootstrap.
+\set ON_ERROR_STOP 0
 SELECT format('ALTER DATABASE %I OWNER TO %I', current_database(), :'migration_user') \gexec
+\set ON_ERROR_STOP 1
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+SELECT format('GRANT CREATE ON SCHEMA public TO %I', :'migration_user') \gexec
+-- Migrations that create extensions need CREATE at the database level. Ownership
+-- transfer above supplies it locally; on a hosted provider it must be granted.
+SELECT format('GRANT CREATE ON DATABASE %I TO %I', current_database(), :'migration_user') \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO %I, %I, %I',current_database(),:'migration_user',:'runtime_user',:'writer_user') \gexec
 SELECT format('GRANT USAGE ON SCHEMA public TO %I, %I, %I',:'migration_user',:'runtime_user',:'writer_user') \gexec
 

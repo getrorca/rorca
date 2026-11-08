@@ -95,6 +95,16 @@ function parseConnection(rawUrl) {
   const osUser = process.env.PGUSER?.trim() || os.userInfo().username;
   const username = parsed.username ? decodeURIComponent(parsed.username) : osUser;
   const sslmode = parsed.searchParams.get('sslmode');
+  // Supavisor (Supabase's pooler, and hosted poolers generally) identifies the
+  // tenant from the username: `postgres.<project-ref>`. Replacing the role name
+  // wholesale would drop that suffix and the pooler answers
+  // 'Tenant or user not found', so carry it onto every derived role.
+  const poolerHost = /(^|\.)pooler\./.test(parsed.hostname) || parsed.hostname.endsWith('.pooler.supabase.com');
+  // Self-hosted poolers do not always advertise themselves in the hostname, so
+  // allow the tenant suffix to be stated explicitly.
+  const explicitSuffix = process.env.RORCA_POOLER_TENANT_SUFFIX?.trim() || '';
+  const tenantSuffix = explicitSuffix
+    || (poolerHost && username.includes('.') ? username.slice(username.indexOf('.')) : '');
   return {
     host: parsed.hostname,
     port: parsed.port || '5432',
@@ -102,6 +112,7 @@ function parseConnection(rawUrl) {
     password: decodeURIComponent(parsed.password),
     database,
     sslmode,
+    tenantSuffix,
   };
 }
 
@@ -187,9 +198,12 @@ function main() {
   // this by letting the migration owner (the database owner) create the schema
   // while the app runs with RORCA_PGBOSS_PREAPPLIED=true. Mirror that exactly so
   // BYOP keeps the same privilege boundary instead of granting database-wide CREATE.
+  // The schema must end up owned by the migration role. Transferring ownership
+  // needs SET ROLE, which a hosted provider's connection role does not have, so
+  // create it while connected as that role instead.
   const schemaEnv = {
     ...process.env,
-    PGPASSWORD: bootstrapPassword,
+    PGPASSWORD: passwords.RORCA_MIGRATION_DATABASE_USER,
   };
   try {
     execFileSync(
@@ -197,10 +211,14 @@ function main() {
       [
         '--no-psqlrc', '--set', 'ON_ERROR_STOP=1',
         '--host', connection.host, '--port', connection.port,
-        '--username', connection.user, '--dbname', connection.database,
+        '--username', `rorca_migrator${connection.tenantSuffix ?? ''}`,
+        '--dbname', connection.database,
         '--command',
-        'CREATE SCHEMA IF NOT EXISTS pgboss AUTHORIZATION rorca_migrator; '
-          + 'ALTER SCHEMA pgboss OWNER TO rorca_migrator; '
+        // `AUTHORIZATION`/`OWNER TO` both need SET ROLE on the target, which a
+        // hosted provider's connection role does not have. Create the schema as
+        // the connecting role and grant the same authority explicitly.
+        'CREATE SCHEMA IF NOT EXISTS pgboss; '
+          + 'GRANT USAGE, CREATE ON SCHEMA pgboss TO rorca_migrator; '
           + 'GRANT USAGE, CREATE ON SCHEMA pgboss TO rorca_runtime;',
       ],
       { env: schemaEnv, stdio: ['ignore', 'pipe', 'pipe'] },
@@ -225,8 +243,8 @@ function main() {
     '',
     'RORCA_RUNTIME_DATABASE_USER=rorca_runtime',
     'RORCA_CANONICAL_WRITER_DATABASE_USER=rorca_canonical_writer',
-    `DATABASE_URL=${buildUrl({ ...connection, user: 'rorca_runtime', password: passwords.RORCA_RUNTIME_DATABASE_USER })}`,
-    `RORCA_CANONICAL_WRITER_DATABASE_URL=${buildUrl({ ...connection, user: 'rorca_canonical_writer', password: passwords.RORCA_CANONICAL_WRITER_DATABASE_USER })}`,
+    `DATABASE_URL=${buildUrl({ ...connection, user: 'rorca_runtime' + (connection.tenantSuffix ?? ''), password: passwords.RORCA_RUNTIME_DATABASE_USER })}`,
+    `RORCA_CANONICAL_WRITER_DATABASE_URL=${buildUrl({ ...connection, user: 'rorca_canonical_writer' + (connection.tenantSuffix ?? ''), password: passwords.RORCA_CANONICAL_WRITER_DATABASE_USER })}`,
     'RORCA_PGBOSS_PREAPPLIED=true',
     // Migrations are applied out-of-band by the migration profile, exactly like
     // the Docker db-migrate service; the runtime process must not attempt them.
@@ -240,7 +258,7 @@ function main() {
     '',
     'RORCA_RUNTIME_DATABASE_USER=rorca_runtime',
     'RORCA_CANONICAL_WRITER_DATABASE_USER=rorca_canonical_writer',
-    `DATABASE_URL=${buildUrl({ ...connection, user: 'rorca_migrator', password: passwords.RORCA_MIGRATION_DATABASE_USER })}`,
+    `DATABASE_URL=${buildUrl({ ...connection, user: 'rorca_migrator' + (connection.tenantSuffix ?? ''), password: passwords.RORCA_MIGRATION_DATABASE_USER })}`,
     '',
   ];
 

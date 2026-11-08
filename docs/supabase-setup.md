@@ -71,6 +71,28 @@ rather than failing.
 > statements or session state, so Rorca's migrations and pg-boss either fail or
 > silently misbehave.
 
+### Pooler (Supavisor) connections
+
+Supabase's pooler identifies the tenant from the username, so a pooler URL must
+carry the tenant suffix on whichever role connects: `rorca_runtime.<project-ref>`
+for the app, not `postgres.<project-ref>` and not a bare `rorca_runtime`. Rorca
+rejects a runtime connection whose database user is not the registered
+`internal_runtime` principal, so the bare form fails with
+`DATABASE_URL must connect as the registered Wave 2 internal_runtime principal`,
+while a missing suffix makes the pooler answer `Tenant or user not found`.
+
+A working split for a pooled deployment:
+
+- `rorca bootstrap-byop-principals.mjs --url <direct-url>` — role creation needs
+  `CREATE ROLE` and cannot run through the pooler.
+- Apply migrations against the direct connection (`RORCA_MIGRATION_DATABASE_URL`).
+- Point `DATABASE_URL` at the pooler with the suffixed runtime role.
+
+`RORCA_POOLER_TENANT_SUFFIX=.` + `<ref>` covers self-hosted poolers whose
+hostname does not identify them. Unlike PgBouncer, Supavisor accepts Rorca's
+`statement_timeout` startup parameter, so transaction mode works for the
+application (migrations still belong on the direct/session connection).
+
 ## 2. Enable pgvector
 
 pgvector is required for BYOP. In the Supabase **SQL Editor**:
